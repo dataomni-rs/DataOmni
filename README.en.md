@@ -1,6 +1,6 @@
 # DataOmni
 
-**English** | [中文](README.md)
+**English** | [中文](README.md) | [Website](https://dataomni.dev)
 
 A desktop database client for relational databases, MongoDB, Redis, Neo4j and Elasticsearch,
 built with Tauri 2, React and Rust. It runs on macOS, Windows and Linux, and the interface is
@@ -171,7 +171,7 @@ administrative functions such as `pg_terminate_backend`.
 
 ## Install
 
-Download a package from [Releases](https://github.com/yuxuetr/DataOmni/releases):
+Download a package from [Releases](https://github.com/dataomni-rs/DataOmni/releases):
 
 | Platform | Package |
 | --- | --- |
@@ -204,7 +204,7 @@ sudo apt-get install build-essential curl wget file pkg-config libssl-dev \
 ```
 
 ```bash
-git clone https://github.com/yuxuetr/DataOmni.git
+git clone https://github.com/dataomni-rs/DataOmni.git
 cd DataOmni
 bun install
 
@@ -222,7 +222,7 @@ bun run check      # lint, typecheck, frontend tests, cargo fmt / clippy / tests
 
 ## Contributing
 
-Issues and pull requests are welcome: [Issues](https://github.com/yuxuetr/DataOmni/issues).
+Issues and pull requests are welcome: [Issues](https://github.com/dataomni-rs/DataOmni/issues).
 Run `bun run check` before opening a pull request.
 
 ## License

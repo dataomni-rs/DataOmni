@@ -1,6 +1,6 @@
 # DataOmni - 现代化的数据库管理工具
 
-[English](README.en.md) | **中文**
+[English](README.en.md) | **中文** | [官网](https://dataomni.dev)
 
 <div align="center">
 
@@ -437,7 +437,7 @@ Linux 包要求 glibc 2.34 以上（Ubuntu 22.04、Debian 12、Fedora 35、RHEL 
 
 ### 安装方式
 
-安装包在 [Releases](https://github.com/yuxuetr/DataOmni/releases)（发布之前没有可下载的，只能从源码构建）。
+安装包在 [Releases](https://github.com/dataomni-rs/DataOmni/releases)（发布之前没有可下载的，只能从源码构建）。
 都没有签名，第一次打开要放行一次：
 
 - **macOS**：双击会被拦下。到「系统设置 → 隐私与安全性」底部点「仍要打开」；或者装好后在终端执行
@@ -458,7 +458,7 @@ sudo apt-get install build-essential curl wget file pkg-config libssl-dev \
 
 ```bash
 # 克隆项目
-git clone https://github.com/yuxuetr/DataOmni.git
+git clone https://github.com/dataomni-rs/DataOmni.git
 cd DataOmni
 
 # 安装依赖
@@ -580,7 +580,7 @@ curl -fsSL https://bun.sh/install | bash
 cargo install tauri-cli
 
 # 克隆项目并安装依赖
-git clone https://github.com/yuxuetr/DataOmni.git
+git clone https://github.com/dataomni-rs/DataOmni.git
 cd DataOmni
 bun install
 ```
@@ -785,9 +785,10 @@ v0.3 只差 Windows 安装验证，所以这一版**不提供 Windows 安装包*
 
 ## 📞 联系我们
 
-- **项目主页**: [GitHub](https://github.com/yuxuetr/DataOmni)
-- **问题反馈**: [Issues](https://github.com/yuxuetr/DataOmni/issues)
-- **功能建议**: [Discussions](https://github.com/yuxuetr/DataOmni/discussions)
+- **官方网站**: [dataomni.dev](https://dataomni.dev)
+- **项目主页**: [GitHub](https://github.com/dataomni-rs/DataOmni)
+- **问题反馈**: [Issues](https://github.com/dataomni-rs/DataOmni/issues)
+- **功能建议**: [Discussions](https://github.com/dataomni-rs/DataOmni/discussions)
 
 ---
 

@@ -10,8 +10,9 @@ pub const LOG_REVEAL_FAILED: &str = "DATAOMNI_LOG_REVEAL_FAILED";
 /// 没问到最新版本：离线、被墙、GitHub 限流，或者回答的形状不对。启动时的检查不显示它，只进日志
 pub const UPDATE_CHECK_FAILED: &str = "DATAOMNI_UPDATE_CHECK_FAILED";
 
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/yuxuetr/DataOmni/releases/latest";
-const RELEASE_PAGE: &str = "https://github.com/yuxuetr/DataOmni/releases/tag/v";
+const LATEST_RELEASE_API: &str =
+  "https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest";
+const RELEASE_PAGE: &str = "https://github.com/dataomni-rs/DataOmni/releases/tag/v";
 const UPDATE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, serde::Serialize)]

@@ -1,0 +1,5 @@
+# 与 src-tauri/rustfmt.toml 保持同一份格式约定
+max_width = 100
+tab_spaces = 2
+newline_style = "Unix"
+use_small_heuristics = "Max"

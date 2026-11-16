@@ -6,9 +6,15 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   // `.playwright-mcp/` 是渲染验证的一次性产物（见 .gitignore），里面的脚本不是项目代码
-  { ignores: ['dist', 'src-tauri/target', 'src/**/__snapshots__', '.playwright-mcp'] },
+  { ignores: ['dist', 'site/dist', 'site/target', 'src-tauri/target', 'src/**/__snapshots__', '.playwright-mcp'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    files: ['site/assets/**/*.js'],
+    languageOptions: {
+      globals: globals.browser,
+    },
+  },
   {
     files: ['src/**/*.{ts,tsx}'],
     languageOptions: {
