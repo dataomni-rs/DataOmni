@@ -1,4 +1,4 @@
-use crate::content::{Locale, PageCopy, SupportLevel};
+use crate::content::{Locale, PageCopy, ServerKind, SupportLevel, WorkflowStory};
 use std::fmt::Write;
 
 pub const SITE_ORIGIN: &str = "https://dataomni.dev";
@@ -13,6 +13,24 @@ pub fn escape_html(input: &str) -> String {
       '>' => out.push_str("&gt;"),
       '"' => out.push_str("&quot;"),
       '\'' => out.push_str("&#39;"),
+      _ => out.push(ch),
+    }
+  }
+  out
+}
+
+fn escape_json_str(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+  for ch in input.chars() {
+    match ch {
+      '\\' => out.push_str("\\\\"),
+      '"' => out.push_str("\\\""),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      '<' => out.push_str("\\u003c"),
+      '>' => out.push_str("\\u003e"),
+      '&' => out.push_str("\\u0026"),
       _ => out.push(ch),
     }
   }
@@ -42,6 +60,19 @@ impl ReleaseAssets {
   }
 }
 
+fn render_workflow_story(html: &mut String, story: &WorkflowStory) -> Result<(), std::fmt::Error> {
+  writeln!(html, "            <div class=\"workflow-story\">")?;
+  writeln!(html, "              <h3>{}</h3>", escape_html(story.title))?;
+  writeln!(html, "              <p class=\"workflow-lead\">{}</p>", escape_html(story.lead))?;
+  writeln!(html, "              <ul class=\"workflow-bullets\">")?;
+  for bullet in story.bullets {
+    writeln!(html, "                <li>{}</li>", escape_html(bullet))?;
+  }
+  writeln!(html, "              </ul>")?;
+  writeln!(html, "            </div>")?;
+  Ok(())
+}
+
 pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::Error> {
   let assets = ReleaseAssets::for_version(version);
   let canonical_url = format!("{SITE_ORIGIN}{}", copy.locale.canonical_path());
@@ -54,7 +85,7 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   let macos_quarantine_cmd = "xattr -dr com.apple.quarantine /Applications/DataOmni.app";
   let linux_install_cmd = format!("sudo apt install ./DataOmni_{version}_amd64.deb");
 
-  let mut html = String::with_capacity(40_960);
+  let mut html = String::with_capacity(56_320);
 
   writeln!(html, "<!DOCTYPE html>")?;
   writeln!(html, "<html lang=\"{}\">", copy.locale.html_lang())?;
@@ -87,6 +118,13 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
     "  <link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/assets/favicon-32.png\">"
   )?;
   writeln!(html, "  <link rel=\"apple-touch-icon\" href=\"/assets/icon-256.png\">")?;
+  writeln!(
+    html,
+    "  <script type=\"application/ld+json\">{{\"@context\":\"https://schema.org\",\"@type\":\"SoftwareApplication\",\"name\":\"DataOmni\",\"softwareVersion\":\"{}\",\"applicationCategory\":\"DeveloperApplication\",\"operatingSystem\":\"macOS, Windows, Linux\",\"license\":\"https://opensource.org/licenses/MIT\",\"url\":\"{}\",\"description\":\"{}\",\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}}}}</script>",
+    escape_json_str(version),
+    escape_json_str(&canonical_url),
+    escape_json_str(copy.meta_description),
+  )?;
   writeln!(html, "  <script>")?;
   writeln!(
     html,
@@ -114,9 +152,10 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "        <span class=\"version-pill\">v{}</span>", escape_html(version))?;
   writeln!(html, "      </a>")?;
   writeln!(html, "      <nav class=\"topnav\" aria-label=\"Primary\">")?;
-  writeln!(html, "        <a href=\"#guardrails\">{}</a>", escape_html(copy.nav_guardrails))?;
-  writeln!(html, "        <a href=\"#agents\">{}</a>", escape_html(copy.nav_agents))?;
+  writeln!(html, "        <a href=\"#workflows\">{}</a>", escape_html(copy.nav_workflows))?;
   writeln!(html, "        <a href=\"#compatibility\">{}</a>", escape_html(copy.nav_compatibility))?;
+  writeln!(html, "        <a href=\"#compare\">{}</a>", escape_html(copy.nav_compare))?;
+  writeln!(html, "        <a href=\"#faq\">{}</a>", escape_html(copy.nav_faq))?;
   writeln!(html, "        <a href=\"#install\">{}</a>", escape_html(copy.nav_install))?;
   writeln!(html, "      </nav>")?;
   writeln!(html, "      <div class=\"topbar-actions\">")?;
@@ -143,81 +182,80 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
 
   writeln!(html, "  <main id=\"main\">")?;
 
-  // Hero split
+  // Section 1: Hero + Above-the-fold Interactive Workbench + Engine Strip
   writeln!(html, "    <section class=\"hero\">")?;
-  writeln!(html, "      <div class=\"shell hero-grid\">")?;
-  writeln!(html, "        <div>")?;
-  writeln!(html, "          <h1 class=\"hero-title\">{}</h1>", escape_html(copy.hero_title))?;
-  writeln!(html, "          <p class=\"hero-lead\">{}</p>", escape_html(copy.hero_lead))?;
-  writeln!(html, "          <div class=\"download-box\">")?;
-  writeln!(html, "            <div class=\"download-primary-row\">")?;
+  writeln!(html, "      <div class=\"shell\">")?;
+  writeln!(html, "        <div class=\"hero-top-grid\">")?;
+  writeln!(html, "          <div class=\"hero-copy\">")?;
+  writeln!(html, "            <h1 class=\"hero-title\">{}</h1>", escape_html(copy.hero_title))?;
+  writeln!(html, "            <p class=\"hero-lead\">{}</p>", escape_html(copy.hero_lead))?;
+  writeln!(html, "            <div class=\"download-box\">")?;
+  writeln!(html, "              <div class=\"download-primary-row\">")?;
   writeln!(
     html,
-    "              <a id=\"primary-download-btn\" class=\"btn-primary\" href=\"{}\">{} v{}</a>",
+    "                <a id=\"primary-download-btn\" class=\"btn-primary\" href=\"{}\">{} v{}</a>",
     escape_html(&assets.release_tag_url),
     escape_html(copy.primary_download_default),
     escape_html(version)
   )?;
   writeln!(
     html,
-    "              <a class=\"btn-secondary\" href=\"{}\">{} v{}</a>",
+    "                <a class=\"btn-secondary\" href=\"{REPO_URL}\" rel=\"noopener\">{}</a>",
+    escape_html(copy.github_cta)
+  )?;
+  writeln!(
+    html,
+    "                <a class=\"hero-release-link\" href=\"{}\">{} v{}</a>",
     escape_html(&assets.release_tag_url),
     escape_html(copy.release_notes_cta),
     escape_html(version)
   )?;
-  writeln!(html, "            </div>")?;
-  writeln!(html, "            <div class=\"download-matrix-inline\">")?;
-  writeln!(html, "              <span>{}</span>", escape_html(copy.all_packages_label))?;
+  writeln!(html, "              </div>")?;
+  writeln!(html, "              <div class=\"download-matrix-inline\">")?;
+  writeln!(html, "                <span>{}</span>", escape_html(copy.all_packages_label))?;
   writeln!(
     html,
-    "              <a href=\"{}\" data-os=\"macos\" data-os-primary=\"macos\" data-primary-cta=\"{}\">macOS .dmg</a>",
+    "                <a href=\"{}\" data-os=\"macos\" data-os-primary=\"macos\" data-primary-cta=\"{}\">macOS .dmg</a>",
     escape_html(&assets.dmg_url),
     escape_html(copy.primary_cta_macos)
   )?;
   writeln!(
     html,
-    "              <a href=\"{}\" data-os=\"windows\" data-os-primary=\"windows\" data-primary-cta=\"{}\">Windows .exe</a>",
+    "                <a href=\"{}\" data-os=\"windows\" data-os-primary=\"windows\" data-primary-cta=\"{}\">Windows .exe</a>",
     escape_html(&assets.exe_url),
     escape_html(copy.primary_cta_windows)
   )?;
   writeln!(
     html,
-    "              <a href=\"{}\" data-os=\"windows\">Windows .msi</a>",
+    "                <a href=\"{}\" data-os=\"windows\">Windows .msi</a>",
     escape_html(&assets.msi_url)
   )?;
   writeln!(
     html,
-    "              <a href=\"{}\" data-os=\"linux\" data-os-primary=\"linux\" data-primary-cta=\"{}\">Linux .deb</a>",
+    "                <a href=\"{}\" data-os=\"linux\" data-os-primary=\"linux\" data-primary-cta=\"{}\">Linux .deb</a>",
     escape_html(&assets.deb_url),
     escape_html(copy.primary_cta_linux)
   )?;
   writeln!(
     html,
-    "              <a href=\"{}\" data-os=\"linux\">Linux .rpm</a>",
+    "                <a href=\"{}\" data-os=\"linux\">Linux .rpm</a>",
     escape_html(&assets.rpm_url)
   )?;
+  writeln!(html, "              </div>")?;
   writeln!(html, "            </div>")?;
   writeln!(html, "          </div>")?;
+
+  writeln!(html, "          <dl class=\"trust-grid\">")?;
+  for fact in copy.trust_facts {
+    writeln!(html, "            <div class=\"trust-item\">")?;
+    writeln!(html, "              <dt>{}</dt>", escape_html(fact.label))?;
+    writeln!(html, "              <dd>{}</dd>", escape_html(fact.detail))?;
+    writeln!(html, "            </div>")?;
+  }
+  writeln!(html, "          </dl>")?;
   writeln!(html, "        </div>")?;
 
-  writeln!(html, "        <dl class=\"spec-sheet\">")?;
-  for item in copy.specs {
-    writeln!(html, "          <div class=\"spec-row\">")?;
-    writeln!(html, "            <dt>{}</dt>", escape_html(item.term))?;
-    writeln!(html, "            <dd>{}</dd>", escape_html(item.detail))?;
-    writeln!(html, "          </div>")?;
-  }
-  writeln!(html, "        </dl>")?;
-  writeln!(html, "      </div>")?;
-  writeln!(html, "    </section>")?;
-
-  // Interactive Workbench Frame
-  writeln!(
-    html,
-    "    <section class=\"workbench-section\" aria-label=\"{}\">",
-    escape_html(copy.workbench_aria_label)
-  )?;
-  writeln!(html, "      <div class=\"shell\">")?;
+  // Interactive Workbench Stage directly in Hero
   writeln!(html, "        <div class=\"workbench-frame\">")?;
   writeln!(html, "          <div class=\"workbench-bar\">")?;
   writeln!(
@@ -286,159 +324,349 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
     writeln!(html, "          </div>")?;
   }
   writeln!(html, "        </div>")?;
+
+  // Database Ecosystem Badge Strip
+  writeln!(html, "        <div class=\"engine-strip\">")?;
+  writeln!(
+    html,
+    "          <p class=\"engine-strip-label\">{}</p>",
+    escape_html(copy.ecosystem_strip_label)
+  )?;
+  writeln!(html, "          <ul class=\"engine-badges\">")?;
+  for badge in copy.engine_badges {
+    let kind_class = match badge.kind {
+      ServerKind::Relational => "engine-pill",
+      ServerKind::Workspace => "engine-pill engine-pill-workspace",
+    };
+    writeln!(
+      html,
+      "            <li class=\"{kind_class}\"><span class=\"engine-name\">{}</span><span class=\"engine-tag\">{}</span></li>",
+      escape_html(badge.name),
+      escape_html(badge.tag)
+    )?;
+  }
+  writeln!(html, "          </ul>")?;
+  writeln!(html, "        </div>")?;
   writeln!(html, "      </div>")?;
   writeln!(html, "    </section>")?;
 
-  // Guardrails section
-  writeln!(html, "    <section id=\"guardrails\" class=\"section\">")?;
+  // Section 2: Four Core Product Workflows
+  writeln!(html, "    <section id=\"workflows\" class=\"section\">")?;
   writeln!(html, "      <div class=\"shell\">")?;
   writeln!(html, "        <div class=\"section-header\">")?;
-  writeln!(html, "          <h2>{}</h2>", escape_html(copy.guardrails_heading))?;
-  writeln!(html, "          <p>{}</p>", escape_html(copy.guardrails_intro))?;
+  writeln!(html, "          <h2>{}</h2>", escape_html(copy.workflows_heading))?;
+  writeln!(html, "          <p>{}</p>", escape_html(copy.workflows_intro))?;
   writeln!(html, "        </div>")?;
-  writeln!(html, "        <div class=\"split-grid\">")?;
-  writeln!(html, "          <ul class=\"feature-list\">")?;
-  for item in copy.guardrails_items {
-    writeln!(html, "            <li class=\"feature-item\">")?;
-    writeln!(html, "              <h3>{}</h3>", escape_html(item.title))?;
-    writeln!(html, "              <p>{}</p>", escape_html(item.body))?;
-    writeln!(html, "            </li>")?;
+  writeln!(html, "        <div class=\"workflow-stack\">")?;
+
+  // Workflow 1: Native Rust & Bundled Stack
+  writeln!(html, "          <article class=\"workflow-row\">")?;
+  render_workflow_story(&mut html, &copy.wf_native)?;
+  writeln!(html, "            <div class=\"workflow-proof\">")?;
+  writeln!(html, "              <div class=\"spec-panel\">")?;
+  writeln!(html, "                <div class=\"spec-panel-bar\">")?;
+  writeln!(html, "                  <span>{}</span>", escape_html(copy.wf_native_panel_bar))?;
+  writeln!(html, "                  <span class=\"env-pill-ok\">TAURI 2 + RUST</span>")?;
+  writeln!(html, "                </div>")?;
+  writeln!(html, "                <dl class=\"spec-sheet\">")?;
+  for item in copy.wf_native_specs {
+    writeln!(html, "                  <div class=\"spec-row\">")?;
+    writeln!(html, "                    <dt>{}</dt>", escape_html(item.term))?;
+    writeln!(html, "                    <dd>{}</dd>", escape_html(item.detail))?;
+    writeln!(html, "                  </div>")?;
   }
-  writeln!(html, "          </ul>")?;
-  writeln!(html, "          <div class=\"code-panel\">")?;
-  writeln!(html, "            <div class=\"code-panel-bar\">")?;
-  writeln!(html, "              <span>{}</span>", escape_html(copy.sql_preview_bar))?;
-  writeln!(html, "              <span class=\"env-pill-ok\">1 TRANSACTION</span>")?;
+  writeln!(html, "                </dl>")?;
+  writeln!(html, "              </div>")?;
   writeln!(html, "            </div>")?;
-  writeln!(html, "            <pre><code><span class=\"code-comment\">-- Previewed before execution; bound via driver parameters</span>\nBEGIN;\n\nUPDATE \"public\".\"products\"\n   SET \"price\" = $1          <span class=\"code-comment\">-- 489</span>\n WHERE \"id\" = $2             <span class=\"code-comment\">-- 1 (primary key)</span>\n   AND \"price\" = $3;         <span class=\"code-comment\">-- 429 (optimistic check)</span>\n\n<span class=\"code-comment\">-- Verify affected_rows == 1, then:</span>\nCOMMIT;</code></pre>")?;
+  writeln!(html, "          </article>")?;
+
+  // Workflow 2: Reviewable Write Guardrails (preserves #guardrails anchor)
   writeln!(
     html,
-    "            <div class=\"code-note\">{}</div>",
+    "          <article id=\"guardrails\" class=\"workflow-row workflow-row-reverse\">"
+  )?;
+  render_workflow_story(&mut html, &copy.wf_guardrails)?;
+  writeln!(html, "            <div class=\"workflow-proof\">")?;
+  writeln!(html, "              <div class=\"code-panel\">")?;
+  writeln!(html, "                <div class=\"code-panel-bar\">")?;
+  writeln!(html, "                  <span>{}</span>", escape_html(copy.sql_preview_bar))?;
+  writeln!(html, "                  <span class=\"env-pill-ok\">1 TRANSACTION</span>")?;
+  writeln!(html, "                </div>")?;
+  writeln!(
+    html,
+    "                <pre><code><span class=\"code-comment\">-- Previewed before execution; bound via driver parameters</span>\nBEGIN;\n\nUPDATE \"public\".\"products\"\n   SET \"price\" = $1          <span class=\"code-comment\">-- 489</span>\n WHERE \"id\" = $2             <span class=\"code-comment\">-- 1 (primary key)</span>\n   AND \"price\" = $3;         <span class=\"code-comment\">-- 429 (optimistic check)</span>\n\n<span class=\"code-comment\">-- Verify affected_rows == 1, then:</span>\nCOMMIT;</code></pre>"
+  )?;
+  writeln!(
+    html,
+    "                <div class=\"code-note\">{}</div>",
     escape_html(copy.sql_preview_note)
   )?;
-  writeln!(html, "          </div>")?;
-  writeln!(html, "        </div>")?;
-  writeln!(html, "      </div>")?;
-  writeln!(html, "    </section>")?;
-
-  // Agents CLI & MCP section
-  writeln!(html, "    <section id=\"agents\" class=\"section\">")?;
-  writeln!(html, "      <div class=\"shell\">")?;
-  writeln!(html, "        <div class=\"section-header\">")?;
-  writeln!(html, "          <h2>{}</h2>", escape_html(copy.agents_heading))?;
-  writeln!(html, "          <p>{}</p>", escape_html(copy.agents_intro))?;
-  writeln!(html, "        </div>")?;
-  writeln!(html, "        <div class=\"split-grid\">")?;
-  writeln!(html, "          <ul class=\"feature-list\">")?;
-  for item in copy.agents_items {
-    writeln!(html, "            <li class=\"feature-item\">")?;
-    writeln!(html, "              <h3>{}</h3>", escape_html(item.title))?;
-    writeln!(html, "              <p>{}</p>", escape_html(item.body))?;
-    writeln!(html, "            </li>")?;
-  }
-  writeln!(html, "          </ul>")?;
-  writeln!(html, "          <div class=\"code-panel\">")?;
-  writeln!(html, "            <div class=\"code-panel-bar\">")?;
-  writeln!(html, "              <span>{}</span>", escape_html(copy.agents_terminal_bar))?;
-  writeln!(html, "              <span class=\"env-pill-prod\">PROD HIDDEN</span>")?;
+  writeln!(html, "              </div>")?;
   writeln!(html, "            </div>")?;
-  writeln!(html, "            <pre><code><span class=\"code-comment\">$ dataomni cli connections</span>\n[{{\"name\":\"shop_dev\",\"db_type\":\"postgres\",\"access\":\"read_only\"}}]\n\n<span class=\"code-comment\">$ dataomni cli query shop_dev \"SELECT id, total FROM orders LIMIT 2\"</span>\n{{\"columns\":[\"id\",\"total\"],\"rows\":[[1,1467],[2,1032.5]],\"truncated\":false}}\n\n<span class=\"code-comment\">$ dataomni cli query shop_dev \"DELETE FROM orders\"</span>\nrefused: statement is not read-only (exit code 3)\n\n<span class=\"code-comment\">$ dataomni cli guide &gt; ~/.claude/skills/dataomni/SKILL.md</span></code></pre>")?;
+  writeln!(html, "          </article>")?;
+
+  // Workflow 3: Schema Diff & Deterministic Codegen
+  writeln!(html, "          <article class=\"workflow-row\">")?;
+  render_workflow_story(&mut html, &copy.wf_schema)?;
+  writeln!(html, "            <div class=\"workflow-proof\">")?;
+  writeln!(html, "              <div class=\"code-panel\">")?;
+  writeln!(html, "                <div class=\"code-panel-bar\">")?;
+  writeln!(html, "                  <span>{}</span>", escape_html(copy.schema_panel_bar))?;
+  writeln!(html, "                  <span class=\"env-pill-ok\">DETERMINISTIC</span>")?;
+  writeln!(html, "                </div>")?;
   writeln!(
     html,
-    "            <div class=\"code-note\">{}</div>",
+    "                <pre><code><span class=\"code-comment\">-- 1. Schema diff sync script (staging -&gt; dev)</span>\nALTER TABLE \"public\".\"orders\"\n  ADD COLUMN \"currency\" varchar(3) NOT NULL DEFAULT &#39;USD&#39;;\nCREATE INDEX \"idx_orders_customer_created\"\n  ON \"public\".\"orders\" (\"customer_id\", \"created_at\");\n\n<span class=\"code-comment\">// 2. Deterministic ER -&gt; sqlx / Prisma / SeaORM / TypeORM</span>\n#[derive(Debug, Clone, sqlx::FromRow)]\npub struct Order {{\n  pub id: i64,\n  pub customer_id: i64,\n  pub currency: String,\n  pub total_cents: i64,\n}}</code></pre>"
+  )?;
+  writeln!(
+    html,
+    "                <div class=\"code-note\">{}</div>",
+    escape_html(copy.schema_panel_note)
+  )?;
+  writeln!(html, "              </div>")?;
+  writeln!(html, "            </div>")?;
+  writeln!(html, "          </article>")?;
+
+  // Workflow 4: Production-Isolated CLI & MCP (preserves #agents anchor)
+  writeln!(html, "          <article id=\"agents\" class=\"workflow-row workflow-row-reverse\">")?;
+  render_workflow_story(&mut html, &copy.wf_agents)?;
+  writeln!(html, "            <div class=\"workflow-proof\">")?;
+  writeln!(html, "              <div class=\"code-panel\">")?;
+  writeln!(html, "                <div class=\"code-panel-bar\">")?;
+  writeln!(html, "                  <span>{}</span>", escape_html(copy.agents_terminal_bar))?;
+  writeln!(html, "                  <span class=\"env-pill-prod\">PROD HIDDEN</span>")?;
+  writeln!(html, "                </div>")?;
+  writeln!(
+    html,
+    "                <pre><code><span class=\"code-comment\">$ dataomni cli connections</span>\n[{{\"name\":\"shop_dev\",\"db_type\":\"postgres\",\"access\":\"read_only\"}}]\n\n<span class=\"code-comment\">$ dataomni cli query shop_dev \"SELECT id, total FROM orders LIMIT 2\"</span>\n{{\"columns\":[\"id\",\"total\"],\"rows\":[[1,1467],[2,1032.5]],\"truncated\":false}}\n\n<span class=\"code-comment\">$ dataomni cli query shop_dev \"DELETE FROM orders\"</span>\nrefused: statement is not read-only (exit code 3)\n\n<span class=\"code-comment\">$ dataomni cli guide &gt; ~/.claude/skills/dataomni/SKILL.md</span></code></pre>"
+  )?;
+  writeln!(
+    html,
+    "                <div class=\"code-note\">{}</div>",
     escape_html(copy.agents_mcp_cmd_note)
   )?;
-  writeln!(html, "            <div class=\"copy-cmd-row\">")?;
-  writeln!(html, "              <code>{}</code>", escape_html(mcp_add_cmd))?;
+  writeln!(html, "                <div class=\"copy-cmd-row\">")?;
+  writeln!(html, "                  <code>{}</code>", escape_html(mcp_add_cmd))?;
   writeln!(
     html,
-    "              <button class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
+    "                  <button class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
     escape_html(mcp_add_cmd),
     escape_html(copy.copy_label),
     escape_html(copy.copied_label),
     escape_html(copy.copy_label)
   )?;
+  writeln!(html, "                </div>")?;
+  writeln!(html, "              </div>")?;
   writeln!(html, "            </div>")?;
-  writeln!(html, "          </div>")?;
+  writeln!(html, "          </article>")?;
+
   writeln!(html, "        </div>")?;
   writeln!(html, "      </div>")?;
   writeln!(html, "    </section>")?;
 
-  // Smoke-tested Compatibility Ledger
+  // Section 3: Database Ecosystem Cards + Collapsible 18-Server Smoke-Test Ledger
   writeln!(html, "    <section id=\"compatibility\" class=\"section\">")?;
   writeln!(html, "      <div class=\"shell\">")?;
   writeln!(html, "        <div class=\"section-header\">")?;
   writeln!(html, "          <h2>{}</h2>", escape_html(copy.compatibility_heading))?;
   writeln!(html, "          <p>{}</p>", escape_html(copy.compatibility_intro))?;
   writeln!(html, "        </div>")?;
-  writeln!(html, "        <div class=\"ledger-controls\">")?;
+  writeln!(html, "        <div class=\"ecosystem-grid\">")?;
+  for card in copy.ecosystem_cards {
+    writeln!(html, "          <div class=\"ecosystem-card\">")?;
+    writeln!(html, "            <div class=\"ecosystem-card-head\">")?;
+    writeln!(html, "              <h3>{}</h3>", escape_html(card.title))?;
+    writeln!(
+      html,
+      "              <span class=\"ecosystem-count\">{}</span>",
+      escape_html(card.count_badge)
+    )?;
+    writeln!(html, "            </div>")?;
+    writeln!(html, "            <p class=\"ecosystem-summary\">{}</p>", escape_html(card.summary))?;
+    writeln!(html, "            <p class=\"ecosystem-engines\">{}</p>", escape_html(card.engines))?;
+    writeln!(html, "            <ul class=\"ecosystem-bullets\">")?;
+    for cap in card.capabilities {
+      writeln!(html, "              <li>{}</li>", escape_html(cap))?;
+    }
+    writeln!(html, "            </ul>")?;
+    writeln!(html, "          </div>")?;
+  }
+  writeln!(html, "        </div>")?;
+
+  writeln!(html, "        <details class=\"ledger-drawer\">")?;
+  writeln!(html, "          <summary class=\"ledger-drawer-summary\">")?;
   writeln!(
     html,
-    "          <div class=\"filter-group\" role=\"group\" aria-label=\"Database category\">"
+    "            <span class=\"ledger-summary-title\">{}</span>",
+    escape_html(copy.ledger_drawer_summary)
   )?;
   writeln!(
     html,
-    "            <button class=\"filter-btn\" type=\"button\" aria-pressed=\"true\" data-ledger-filter=\"all\">{}</button>",
+    "            <span class=\"ledger-summary-hint\">{}</span>",
+    escape_html(copy.ledger_drawer_hint)
+  )?;
+  writeln!(html, "          </summary>")?;
+  writeln!(html, "          <div class=\"ledger-drawer-body\">")?;
+  writeln!(html, "            <div class=\"ledger-controls\">")?;
+  writeln!(
+    html,
+    "              <div class=\"filter-group\" role=\"group\" aria-label=\"Database category\">"
+  )?;
+  writeln!(
+    html,
+    "                <button class=\"filter-btn\" type=\"button\" aria-pressed=\"true\" data-ledger-filter=\"all\">{}</button>",
     escape_html(copy.filter_all)
   )?;
   writeln!(
     html,
-    "            <button class=\"filter-btn\" type=\"button\" aria-pressed=\"false\" data-ledger-filter=\"relational\">{}</button>",
+    "                <button class=\"filter-btn\" type=\"button\" aria-pressed=\"false\" data-ledger-filter=\"relational\">{}</button>",
     escape_html(copy.filter_relational)
   )?;
   writeln!(
     html,
-    "            <button class=\"filter-btn\" type=\"button\" aria-pressed=\"false\" data-ledger-filter=\"workspace\">{}</button>",
+    "                <button class=\"filter-btn\" type=\"button\" aria-pressed=\"false\" data-ledger-filter=\"workspace\">{}</button>",
     escape_html(copy.filter_workspaces)
   )?;
-  writeln!(html, "          </div>")?;
-  writeln!(html, "        </div>")?;
-  writeln!(html, "        <div class=\"ledger-wrap\">")?;
-  writeln!(html, "          <table class=\"ledger-table\">")?;
-  writeln!(html, "            <thead>")?;
-  writeln!(html, "              <tr>")?;
-  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.col_server))?;
-  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.col_version))?;
-  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.col_driver))?;
-  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.col_status))?;
-  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.col_smoke))?;
-  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.col_notes))?;
-  writeln!(html, "              </tr>")?;
-  writeln!(html, "            </thead>")?;
-  writeln!(html, "            <tbody>")?;
+  writeln!(html, "              </div>")?;
+  writeln!(html, "            </div>")?;
+  writeln!(html, "            <div class=\"ledger-wrap\">")?;
+  writeln!(html, "              <table class=\"ledger-table\">")?;
+  writeln!(html, "                <thead>")?;
+  writeln!(html, "                  <tr>")?;
+  writeln!(html, "                    <th scope=\"col\">{}</th>", escape_html(copy.col_server))?;
+  writeln!(html, "                    <th scope=\"col\">{}</th>", escape_html(copy.col_version))?;
+  writeln!(html, "                    <th scope=\"col\">{}</th>", escape_html(copy.col_driver))?;
+  writeln!(html, "                    <th scope=\"col\">{}</th>", escape_html(copy.col_status))?;
+  writeln!(html, "                    <th scope=\"col\">{}</th>", escape_html(copy.col_smoke))?;
+  writeln!(html, "                    <th scope=\"col\">{}</th>", escape_html(copy.col_notes))?;
+  writeln!(html, "                  </tr>")?;
+  writeln!(html, "                </thead>")?;
+  writeln!(html, "                <tbody>")?;
   for row in copy.servers {
     let (status_class, status_label) = match row.level {
       SupportLevel::Supported => ("status-ok", copy.status_supported),
       SupportLevel::UsableWithGaps => ("status-gap", copy.status_gaps),
     };
-    writeln!(html, "              <tr data-ledger-kind=\"{}\">", row.kind.as_attr())?;
-    writeln!(html, "                <td class=\"ledger-server\">{}</td>", escape_html(row.server))?;
+    writeln!(html, "                  <tr data-ledger-kind=\"{}\">", row.kind.as_attr())?;
     writeln!(
       html,
-      "                <td class=\"ledger-mono\">{}</td>",
+      "                    <td class=\"ledger-server\">{}</td>",
+      escape_html(row.server)
+    )?;
+    writeln!(
+      html,
+      "                    <td class=\"ledger-mono\">{}</td>",
       escape_html(row.tested_version)
     )?;
-    writeln!(html, "                <td>{}</td>", escape_html(row.connection_type))?;
+    writeln!(html, "                    <td>{}</td>", escape_html(row.connection_type))?;
     writeln!(
       html,
-      "                <td><span class=\"{status_class}\">{}</span></td>",
+      "                    <td><span class=\"{status_class}\">{}</span></td>",
       escape_html(status_label)
     )?;
     writeln!(
       html,
-      "                <td class=\"ledger-mono\">{}</td>",
+      "                    <td class=\"ledger-mono\">{}</td>",
       escape_html(row.smoke_counts)
     )?;
-    writeln!(html, "                <td class=\"ledger-note\">{}</td>", escape_html(row.notes))?;
+    writeln!(
+      html,
+      "                    <td class=\"ledger-note\">{}</td>",
+      escape_html(row.notes)
+    )?;
+    writeln!(html, "                  </tr>")?;
+  }
+  writeln!(html, "                </tbody>")?;
+  writeln!(html, "              </table>")?;
+  writeln!(html, "            </div>")?;
+  writeln!(html, "          </div>")?;
+  writeln!(html, "        </details>")?;
+  writeln!(html, "      </div>")?;
+  writeln!(html, "    </section>")?;
+
+  // Section 4: Honest Selection Comparison
+  writeln!(html, "    <section id=\"compare\" class=\"section\">")?;
+  writeln!(html, "      <div class=\"shell\">")?;
+  writeln!(html, "        <div class=\"section-header\">")?;
+  writeln!(html, "          <h2>{}</h2>", escape_html(copy.compare_heading))?;
+  writeln!(html, "          <p>{}</p>", escape_html(copy.compare_intro))?;
+  writeln!(html, "        </div>")?;
+  writeln!(html, "        <div class=\"compare-wrap\">")?;
+  writeln!(html, "          <table class=\"compare-table\">")?;
+  writeln!(html, "            <thead>")?;
+  writeln!(html, "              <tr>")?;
+  writeln!(
+    html,
+    "                <th scope=\"col\">{}</th>",
+    escape_html(copy.compare_col_dimension)
+  )?;
+  writeln!(
+    html,
+    "                <th scope=\"col\" class=\"compare-featured-head\">{}</th>",
+    escape_html(copy.compare_col_dataomni)
+  )?;
+  writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.compare_col_jvm))?;
+  writeln!(
+    html,
+    "                <th scope=\"col\">{}</th>",
+    escape_html(copy.compare_col_commercial)
+  )?;
+  writeln!(html, "              </tr>")?;
+  writeln!(html, "            </thead>")?;
+  writeln!(html, "            <tbody>")?;
+  for row in copy.compare_rows {
+    writeln!(html, "              <tr>")?;
+    writeln!(
+      html,
+      "                <th scope=\"row\" class=\"compare-dim\">{}</th>",
+      escape_html(row.dimension)
+    )?;
+    writeln!(
+      html,
+      "                <td class=\"compare-featured-cell\">{}</td>",
+      escape_html(row.dataomni)
+    )?;
+    writeln!(html, "                <td>{}</td>", escape_html(row.jvm_clients))?;
+    writeln!(html, "                <td>{}</td>", escape_html(row.commercial_native))?;
     writeln!(html, "              </tr>")?;
   }
   writeln!(html, "            </tbody>")?;
   writeln!(html, "          </table>")?;
   writeln!(html, "        </div>")?;
+  writeln!(
+    html,
+    "        <p class=\"compare-footnote\">{}</p>",
+    escape_html(copy.compare_footnote)
+  )?;
   writeln!(html, "      </div>")?;
   writeln!(html, "    </section>")?;
 
-  // Install section
+  // Section 5: Accessible Native FAQ Accordion
+  writeln!(html, "    <section id=\"faq\" class=\"section\" aria-labelledby=\"faq-heading\">")?;
+  writeln!(html, "      <div class=\"shell\">")?;
+  writeln!(html, "        <div class=\"section-header\">")?;
+  writeln!(html, "          <h2 id=\"faq-heading\">{}</h2>", escape_html(copy.faq_heading))?;
+  writeln!(html, "          <p>{}</p>", escape_html(copy.faq_intro))?;
+  writeln!(html, "        </div>")?;
+  writeln!(html, "        <div class=\"faq-list\">")?;
+  for (index, item) in copy.faq_items.iter().enumerate() {
+    let open_attr = if index == 0 { " open" } else { "" };
+    writeln!(html, "          <details class=\"faq-item\"{open_attr}>")?;
+    writeln!(
+      html,
+      "            <summary class=\"faq-summary\">{}</summary>",
+      escape_html(item.question)
+    )?;
+    writeln!(html, "            <div class=\"faq-answer\">")?;
+    writeln!(html, "              <p>{}</p>", escape_html(item.answer))?;
+    writeln!(html, "            </div>")?;
+    writeln!(html, "          </details>")?;
+  }
+  writeln!(html, "        </div>")?;
+  writeln!(html, "      </div>")?;
+  writeln!(html, "    </section>")?;
+
+  // Section 6: Download & Install
   writeln!(html, "    <section id=\"install\" class=\"section\">")?;
   writeln!(html, "      <div class=\"shell\">")?;
   writeln!(html, "        <div class=\"section-header\">")?;

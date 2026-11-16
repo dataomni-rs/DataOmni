@@ -92,6 +92,38 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     cursor = &after[end + 1..];
   }
 
+  // Screen readers (JAWS/TalkBack) drop headings nested inside <summary>
+  let mut summary_scan = html;
+  while let Some(start) = summary_scan.find("<summary") {
+    let after = &summary_scan[start..];
+    let Some(end) = after.find("</summary>") else {
+      return Err(format!("{page_name}: unclosed <summary> element"));
+    };
+    let summary_block = &after[..end];
+    for heading in ["<h1", "<h2", "<h3", "<h4", "<h5", "<h6"] {
+      if summary_block.contains(heading) {
+        return Err(format!("{page_name}: <summary> must not contain heading element {heading}"));
+      }
+    }
+    summary_scan = &after[end + "</summary>".len()..];
+  }
+
+  // Every in-page anchor href="#..." must target a real id="..."
+  let mut anchor_scan = html;
+  while let Some(pos) = anchor_scan.find("href=\"#") {
+    let after = &anchor_scan[pos + "href=\"#".len()..];
+    let Some(end) = after.find('"') else {
+      return Err(format!("{page_name}: unclosed anchor href"));
+    };
+    let target_id = &after[..end];
+    if target_id.is_empty() || !html.contains(&format!("id=\"{target_id}\"")) {
+      return Err(format!(
+        "{page_name}: broken in-page anchor href=\"#{target_id}\" (no matching id)"
+      ));
+    }
+    anchor_scan = &after[end + 1..];
+  }
+
   for attr in ["src=\"/", "data-deferred-src=\"/", "href=\"/assets/", "href=\"/images/"] {
     let mut scan = html;
     while let Some(pos) = scan.find(attr) {
@@ -247,6 +279,15 @@ mod tests {
     // Reverse check: combining fetchpriority="high" with loading="lazy" must fail
     let lazy_lcp = en.replace("fetchpriority=\"high\"", "fetchpriority=\"high\" loading=\"lazy\"");
     assert!(verify_html_invariants("index.html", &lazy_lcp, &temp_dir).is_err());
+
+    // Reverse check: broken in-page anchor href="#..." must fail
+    let broken_anchor = en.replace("href=\"#faq\"", "href=\"#missing-section\"");
+    assert!(verify_html_invariants("index.html", &broken_anchor, &temp_dir).is_err());
+
+    // Reverse check: nesting a heading inside <summary> must fail
+    let heading_in_summary =
+      en.replace("<summary class=\"faq-summary\">", "<summary class=\"faq-summary\"><h3>");
+    assert!(verify_html_invariants("index.html", &heading_in_summary, &temp_dir).is_err());
 
     let _ = fs::remove_dir_all(&temp_dir);
   }
