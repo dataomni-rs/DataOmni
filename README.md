@@ -286,11 +286,11 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 - 整表流式导出：行从数据库直接落盘，不受行数上限截断，带进度、可取消、失败可
   重试；中途停下不会留下一份看上去完整的文件
 
-- 生成代码（下一版，v1.0.0 安装包尚未包含）：ER 图导出菜单的「生成代码…」，按图上看得到的表生成 Prisma schema、TypeORM / MikroORM 实体（NestJS）、
+- 生成代码：ER 图导出菜单的「生成代码…」，按图上看得到的表生成 Prisma schema、TypeORM / MikroORM 实体（NestJS）、
   SeaORM 实体或 sqlx 的 `FromRow` 结构体，不用 AI；映射不了的类型、生成不了的表在开头列出来，见 `rfcs/codegen.md`
-- 结构比对（下一版，v1.0.0 安装包尚未包含）：ER 图工具栏的「比对结构…」，和另一个连接（或同一个库里的另一个 schema）比表、列、主键、索引、外键，
+- 结构比对：ER 图工具栏的「比对结构…」，和另一个连接（或同一个库里的另一个 schema）比表、列、主键、索引、外键，
   逐项勾选后生成同步脚本；脚本放进编辑器由你执行，照常按连接环境确认。同种数据库之间才出脚本，见 `rfcs/schema-diff.md`
-- 绑定参数（下一版，v1.0.0 安装包尚未包含）：编辑器里写 `:name`，运行前弹框填值，由驱动绑定、不拼进 SQL；值按标签记住，关掉应用就没了。
+- 绑定参数：编辑器里写 `:name`，运行前弹框填值，由驱动绑定、不拼进 SQL；值按标签记住，关掉应用就没了。
   ClickHouse 与执行计划暂不支持，见 `rfcs/bind-parameters.md`
 - ER 关系图：整库的表都画出来（含没有外键的），每张列出全部字段与类型，
   有外键的表之间按具体字段连线；可搜索表名与列名、缩放平移、自由拖动卡片、
@@ -392,7 +392,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 - 输出是 JSON，退出码区分「数据库报错 / 参数错 / 被拒 / 连不上」；`dataomni cli guide` 打印一份
   给 Agent 读的说明，存成 `SKILL.md` 就能当 Claude Code 的 Skill 用
 - 每次调用留痕（`dataomni-cli.log`），记语句的摘要，不记原文
-- 不能跑 shell 的 Agent（Claude Desktop 之类）用 `dataomni mcp`（下一版，v1.0.0 安装包尚未包含，当前需从源码构建）：同一套只读命令包成 stdio 上的 MCP 服务，
+- 不能跑 shell 的 Agent（Claude Desktop 之类）用 `dataomni mcp`：同一套只读命令包成 stdio 上的 MCP 服务，
   工具与命令一一对应，走同一道门；不给 `export`、`backup`、`csv-preview`（会读写本机文件）。
   例：`claude mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp`
 
@@ -420,7 +420,7 @@ Tauri 本身跨平台，但**本项目只在下表记录的环境上实际验证
 | macOS (Apple Silicon / aarch64) | `DataOmni.app`、`DataOmni_<版本>_aarch64.dmg` | ✅ 已验证 | 2026-09-25 于 macOS 27.0 / arm64 执行 `bun run package`（带 Oracle Instant Client），退出码 0；装上后逐库回归，见 TODOs「发布里程碑」 |
 | macOS (Intel / x86_64) | — | ⚠️ 未验证 | 无 x86_64 机器，也未做交叉编译 |
 | Linux (Ubuntu 22.04 / x86_64) | `DataOmni_<版本>_amd64.deb`、`DataOmni-<版本>-1.x86_64.rpm` | ✅ 已验证（容器内） | 2026-09-25 执行 `bun tauri build --bundles deb,rpm --config src-tauri/tauri.oracle.conf.json`，退出码 0，包里的 Instant Client 与原件逐字节相同。**不发 AppImage**：打包工具会改 Instant Client 的 .so，而它的许可只许原样分发（TODOs 5.4）。以下为 2026-09-23 的验证记录：`.deb` 在干净的 Ubuntu 22.04 容器里装、升级、卸载都验过，在 Xvfb + openbox 里跑通界面、Ctrl+W 与 gnome-keyring 存取密码；AppImage 只以 `--appimage-extract-and-run` 跑过（容器里没有 FUSE）；`.rpm` 没装过。**没有在真实桌面会话（GNOME / Wayland）里验过** |
-| Windows (x86_64) | `DataOmni_<版本>_x64_en-US.msi`、`DataOmni_<版本>_x64-setup.exe` | ✅ 已验证（NSIS 逐项；MSI 人工装过） | 2026-10-06 起由 GitHub Actions（`release.yml`，windows-latest）打包，带 Oracle Instant Client。2026-10 在 Windows 11（非管理员）上走了 `docs/windows-checklist.md`：NSIS 安装、升级、降级、卸载、重装，凭据管理器，中文与 UNC 路径，SSH 隧道，MySQL / PostgreSQL / DuckDB / Oracle 冒烟都过；MSI 用户人工装过。之后十种库的连真库冒烟用例也在 Windows 上全跑过。打包版界面回归（R7-windows）：PostgreSQL 走满，其余各库走方言项，都过。**没测**：SmartScreen、多屏与缩放、真键盘快捷键与输入法。已知限制：DuckDB 库文件放在超过 260 字符的路径下打不开（SQLite 的已在 rc.1 之后修好；DuckDB 的随升级 2.0 在未发布版本里修好，CI 的 Windows 用例验过） |
+| Windows (x86_64) | `DataOmni_<版本>_x64_en-US.msi`、`DataOmni_<版本>_x64-setup.exe` | ✅ 已验证（NSIS 逐项；MSI 人工装过） | 2026-10-06 起由 GitHub Actions（`release.yml`，windows-latest）打包，带 Oracle Instant Client。2026-10 在 Windows 11（非管理员）上走了 `docs/windows-checklist.md`：NSIS 安装、升级、降级、卸载、重装，凭据管理器，中文与 UNC 路径，SSH 隧道，MySQL / PostgreSQL / DuckDB / Oracle 冒烟都过；MSI 用户人工装过。之后十种库的连真库冒烟用例也在 Windows 上全跑过。打包版界面回归（R7-windows）：PostgreSQL 走满，其余各库走方言项，都过。**没测**：SmartScreen、多屏与缩放、真键盘快捷键与输入法。超长路径（>260 字符，没开系统长路径）：SQLite 已在 rc.1 之后修好；DuckDB 已在 v1.1.0 随升级 2.0 修好，CI 的 Windows 用例每次验 |
 
 安装包由 GitHub Actions 打（`.github/workflows/release.yml`）：推 `v*` tag 时 macOS（Apple Silicon）、Linux、Windows
 各打一份，放进一个草稿 Release。都**没有签名**——没有 Apple Developer ID，也没有 Windows 代码签名证书。
@@ -589,6 +589,10 @@ bun install
 
 ### 未发布
 
+（暂无）
+
+### v1.1.0（2026-11-16）
+
 - 生成代码：ER 图（与 AI 设计页）的导出菜单里多了「生成代码…」。按图上看得到的表，生成以下几种：
   - Prisma schema；
   - TypeORM 与 MikroORM 实体（NestJS 用）；
@@ -618,10 +622,13 @@ bun install
   以及 `mongo`、`redis`、`neo4j`、`es`），权限门是命令行那一份：只看得到开放为只读的非生产连接，只放行读。
   会读写本机文件的 `export`、`backup`、`csv-preview` 不给。接法见用户手册「命令行与 Agent」。
 - 修正：MySQL 结构编辑把默认值改成 `CURRENT_TIMESTAMP` 时报语法错误（1064）。
-- 修正：另开一个 SQLite 连接再关掉时，当前的 SQLite 连接会跟着断开。
+- 修正：另开一个 SQLite 连接再关掉时，当前的 SQLite 连接会跟着断开；同时去掉前端直连 SQLite 插件权限，统一走后端连接池，缺失的库文件不再被悄悄新建。
+- 修正：对象树选表后自动预览查询的 100 ms 定时竞态。
 - 内带的 DuckDB 从 1.5.5 升到 2.0.0。随之修好：Windows 上 DuckDB 库文件放在超过 260 字符的路径下打不开
   （没开系统长路径时）。注意：已有的库文件打开、写入后**仍是原来的格式**，1.x 的工具照样能读；
   **在 DataOmni 里新建的库是 2.0 格式**，1.x 的 DuckDB（如 `pip install duckdb==1.*`）打不开。
+- 安全加固：启用 WebView CSP；文件读写命令拒绝访问应用配置目录（含 `..` 与符号链接解析）；命令行与 MCP 的只读门补拦 `dblink_*`、`pg_sleep`、`SLEEP`、`BENCHMARK`；连接表单在「优先 / 要求 TLS」两档明确提示不校验证书；修复 CI 发布构建未保留 macOS Hardened Runtime 与 Instant Client 授权的问题；升级 `rustls`、`russh`、`quinn-proto`、`vite` 等前后端依赖消除已知漏洞。
+- 性能：编辑器打字不再触发整棵界面树重渲染，工作区快照改为防抖写入（关窗口前补写）；二进制列十六进制编码改为单次分配查表并省掉行大小统计的重复序列化。
 
 ### v1.0.0（2026-11-05）
 
