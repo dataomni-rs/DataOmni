@@ -16,7 +16,9 @@
     "rust:clippy:no-ai": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "rust:test:databases": "cargo test --manifest-path src-tauri/Cargo.toml --test database_smoke -- --nocapture",
-    "check": "bun run lint && bun run typecheck && bun run test && bun run rust:fmt && bun run rust:clippy && bun run rust:test",
+    "site:build": "cargo run --manifest-path site/Cargo.toml",
+    "site:check": "cargo fmt --manifest-path site/Cargo.toml --check && cargo clippy --manifest-path site/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path site/Cargo.toml",
+    "check": "bun run lint && bun run typecheck && bun run test && bun run rust:fmt && bun run rust:clippy && bun run rust:test && bun run site:check",
     "preview": "vite preview",
     "tauri": "tauri",
     "package": "bash scripts/fetch-oracle-client.sh && tauri build --config src-tauri/tauri.oracle.conf.json"

@@ -75,6 +75,9 @@ jobs:
       - name: Test Rust
         run: bun run rust:test
 
+      - name: Check website crate
+        run: bun run site:check
+
   audit:
     runs-on: ubuntu-latest
 
