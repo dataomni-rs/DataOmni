@@ -98,14 +98,13 @@ jobs:
               version_config+=(--config "{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"${version%%-*}.$pre_number\"}}}}")
             fi
           fi
-          # macOS 要给整个 .app 做 ad-hoc 签名：只有链接器签的主程序时，包的签名校验不过，
-          # 下载下来 macOS 说「已损坏」，而且不给「仍要打开」。
-          # hardened runtime 要关：它只许加载同一开发者签的库，而 Instant Client 是 Oracle 签的，
-          # 开着时 dlopen 直接被拒（本机实测过）。ad-hoc 签名本来也过不了公证，它在这里没有用处
+          # macOS 签名与 hardened runtime 统一由 src-tauri/tauri.conf.json 控制：
+          # signingIdentity: "-"（给整个 .app 做 ad-hoc 签名，否则下载后报「已损坏」）、
+          # hardenedRuntime: true（挡住 DYLD_INSERT_LIBRARIES 冒用进程身份读钥匙串，见 rfcs/agent-cli.md §5.4 E7）、
+          # entitlements: Entitlements.plist（disable-library-validation，放行 Oracle 签名的 Instant Client）
           bun tauri build \
             --bundles ${{ matrix.bundles }} \
             --config src-tauri/tauri.oracle.conf.json \
-            --config '{"bundle":{"macOS":{"signingIdentity":"-","hardenedRuntime":false}}}' \
             "${version_config[@]}"
 
       - name: Verify the macOS bundle signature
@@ -113,8 +112,12 @@ jobs:
         run: |
           app=src-tauri/target/release/bundle/macos/DataOmni.app
           codesign --verify --deep --strict --verbose=2 "$app"
-          if codesign -dvv "$app" 2>&1 | grep -q 'flags=.*runtime'; then
-            echo "hardened runtime 开着，Instant Client 会加载不了" >&2
+          if ! codesign -dvv "$app" 2>&1 | grep -q 'flags=.*runtime'; then
+            echo "缺少 hardened runtime（flags=runtime），DYLD_INSERT_LIBRARIES 防护未生效" >&2
+            exit 1
+          fi
+          if ! codesign -d --entitlements :- "$app" 2>/dev/null | grep -q 'com.apple.security.cs.disable-library-validation'; then
+            echo "缺少 disable-library-validation entitlement，Oracle Instant Client 会加载失败" >&2
             exit 1
           fi
 

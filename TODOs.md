@@ -24,7 +24,7 @@
 | P5 | 统一桌面 UI 与交互 | [x]（5.4 的 Windows 验证 2026-11-05 完成） |
 | P6 | AI 设计、导出与备份 | [x] A0–A6c、A9 完成（A2b 当前版本不做；A7、A8 已在 1.x 做成 C1、C2） |
 | P7 | 更多数据库：国产库与云库 | [-] OceanBase、openGauss 完成；KingbaseES 缺安装包；B3 不做；B4 按触发条件 |
-| 加固 | 依赖与前端安全边界、持续真库回归、发布与文档一致性（2026-11-08 评估） | [ ] QS1–QS6、QT1–QT5、QR1–QR2 |
+| 加固 | 依赖与前端安全边界、持续真库回归、发布与文档一致性（2026-11-08 / 11-09 两轮评估） | [x] QS1–QS6、QT1–QT5、QR1–QR2、PA1–PA8 全部完成 |
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] v0.6.0 已发布（2026-10-07，tag 重打在 2b62b5f，含 R6、R7-mac 的修正）；v0.6.1 已发布（2026-10-07，2bf2499，R7-linux 的修正；CI 里 Windows 0.6.0 → 0.6.1 升级通过）；R5 的 CI 部分与 R6 完成；R7 的 macOS 与 Linux 部分完成；R7 Windows 2026-10-14 完成；R5 人工项 2026-11-05 完成；`v1.0.0` 2026-11-05 发布 |
 
 ---
@@ -319,7 +319,10 @@
     `not_found`；`schema` 列出 `items`。之后库里仍是 5 行，配置逐字节不变，留痕三行（查询、拒绝、结构；`not_found` 不留痕）。
     要加 `-c features.hooks=false`：本机 Codex 的 agent-archive 插件在会话开始的钩子里注入「先设置」，会劫持整个任务。
     脚本在会话目录 `scratch/codex_mcp_accept.sh`，没进仓库。
-  - 仍没验到：打包版（本机装的是 1.0.0-rc.2，还没有 `mcp`）、Claude Code、Windows、Linux。
+  - macOS 1.1.0 打包版验收（2026-11-16）：`DataOmni.app/Contents/MacOS/dataomni mcp` 在隔离 `HOME` 下经 stdio 跑通 `initialize`（`1.1.0`）、
+    `tools/list`（11 个工具，不含文件工具）、`connections`、`query` 读与截断、`DELETE` 与 `pg_sleep` 均报 `refused`、生产连接报 `not_found`、
+    `schema`；SQLite 行数与 `connections.json` 逐字节不变，`dataomni-cli.log` 无语句原文。
+  - 仍没验到：Claude Code（本机组织账号禁用了订阅访问；改用 Codex 验过）、Windows 与 Linux 打包版。
   - 做了：`dataomni mcp`，stdio 上手写的 JSON-RPC（不引 rmcp）。11 个工具与命令行只读命令一一对应，入参拼成参数后走同一个
     `dispatch`，MCP 层不碰权限。不给 `export`、`backup`、`csv-preview`。
   - 实现时补的（设计说明 §3.7）：`-`（命令行里读标准输入，MCP 的标准输入是协议本身）与恰好像选项的位置参数报 `usage`；
@@ -330,7 +333,6 @@
     拼参数那条用例当场抓出 `aggregate` 把管道传了两遍。
   - 调试构建经 stdio 端到端（临时 HOME）：初始化、列工具、列连接、查询截断、`DELETE` 被拒、生产连接 `not_found`、
     `-` 报 usage、ping 都对；库里行数不变、配置不变、留痕两行。
-  - 没验到：Claude Code（本机组织账号禁用了订阅访问；后来改用 Codex 验过，见上）。打包版、Windows、Linux 上没跑过。
 - [-] U2 winget（清单已备好，等用户提 PR）
   - 前提：v1.0.0 已发布。向 `microsoft/winget-pkgs` 提 PR 属于对外操作：用户 2026-11-06 定，仓库里备好清单，PR 由用户自己提。
   - Homebrew Cask 暂不做（用户 2026-11-05 定）。
@@ -371,6 +373,7 @@
     `rustls-pemfile`（RUSTSEC-2025-0134）、`zbus_names` / `zvariant`（RUSTSEC-2026-0370/0371/0372）、`glib`（RUSTSEC-2024-0429）。
   - 验证：`cargo audit -n -f src-tauri/Cargo.lock -D warnings` 退出码 0；`bun run rust:clippy`、`bun run rust:clippy:no-ai`、
     `bun run rust:test` 全过。留待：TLS 连接各网络真库手动连一次（随 CI / 定期冒烟验）。
+  - 2026-11-16 `v1.1.0` 发版前拉取最新 RustSec 库（1509 条）跟进（`552fbeb`）：升 `rustix` 1.1.5 → 1.1.6（RUSTSEC-2026-0486）、`quinn-proto` 0.11.18 → 0.11.19 与 `quinn-udp` 0.5.15 → 0.5.16（RUSTSEC-2026-0523/0524/0538）、`russh` 0.63.3 → 0.65.1（RUSTSEC-2026-0495）；`libsqlite3-sys` 0.30.1（RUSTSEC-2026-0459，经 `sqlx-sqlite` 0.8.6 锁死）因本机单用户桌面客户端无跨租户内存泄露通道写入 `.cargo/audit.toml` 待 `sqlx` 上游升级后移除。
 - [x] QS2 前端依赖漏洞：`bun audit` 报 48 条（3 critical、23 high）（`d2d6636`，2026-11-08）
   - 分类结果：进入安装包的运行时 `dependencies` 0 漏洞（原 `package.json` 把构建期的 `@tailwindcss/vite` 与 `tailwindcss`
     误放在 `dependencies` 下，已移入 `devDependencies`）。
@@ -401,7 +404,7 @@
     留待：三平台打包版界面走一遍 SQLite 全路径。
 - [x] QS6 开启 CSP（`tauri.conf.json` 现在是 `"csp": null`）（`b69500e`，2026-11-08）
   - 已做：`src-tauri/tauri.conf.json` 启用 `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self' blob:`（核查前端无任何 `fetch` / `XMLHttpRequest` / `WebSocket` 调用，AI 设计经后端 `reqwest` 发送，SVG 光栅化导出只用 `data:image/svg+xml`）；`src/utils/databaseHandle.test.ts` 新增配置门禁断言 CSP 非空且 `capabilities/default.json` 0 条 `sql:*` 权限。
-  - 留待：三平台打包版（macOS WKWebView、Windows WebView2、Linux WebKitGTK）各走一遍界面并确认控制台无 CSP 违规。
+  - 打包版验证：macOS `1.1.0` WKWebView（2026-11-16，独立 `com.dataomni.guitest` 与隔离 `HOME`）启动、渲染、IPC 与检查更新均正常，`dataomni.log` 0 条 CSP 违规与异常。留待：Windows WebView2、Linux WebKitGTK 打包版界面走查。
 
 ### QT 测试与 CI
 
@@ -433,11 +436,12 @@
 - [x] QR1 README 写了已有能力但最新发布版里还没有的（`122e91d`，2026-11-08）
   - 已做：`README.md` 与 `README.en.md` 功能列表里的生成代码（C1）、结构比对（D3）、绑定参数（D2）与 `dataomni mcp`（C2）全部注明
     「下一版，v1.0.0 安装包尚未包含」（发下一版时统一摘掉标签）；更新日志「未发布」一节已完整列出 `v1.0.0` 之后的全部新增与修复（含 G13 DuckDB 2.0.0 Windows 超长路径支持）。
-  - 下一版发版前待清尾项清单（引用已有条目，不重复开项）：
+  - 2026-11-16 准备 `v1.1.0` 发布：已摘除 `README.md` 与 `README.en.md` 四处「下一版」临时标记，将「未发布」及加固项归入 `v1.1.0（2026-11-16）` 更新日志。
+  - 后续平台 / 真库留待项（引用已有条目，不重复开项）：
     - D2：Oracle 绑定参数真库验证；
     - D3：Oracle、DuckDB 结构比对同步脚本真库往返验证（含 `is_constraint` 目录查询）；
-    - C2：`dataomni mcp` 在三平台打包版（macOS / Windows / Linux）上端到端跑通；
-    - QS5 / QS6：三平台打包版走一遍 SQLite 后端句柄全路径，并确认各平台 WebView 控制台 0 条 CSP 违规。
+    - C2：`dataomni mcp` 在 Windows / Linux 打包版上端到端跑通（macOS `1.1.0` 打包版已验）；
+    - QS5 / QS6：Windows / Linux 打包版走一遍 SQLite 后端句柄与 WebView CSP（macOS `1.1.0` 打包版已验）。
 - [x] QR2 前端包体积：主 JS 约 2.05 MB（gzip 约 605 KB），构建有分包警告（2026-11-08 评估完成，当前不拆）
   - 实测基线：`vite build` 耗时 2.28s，产出 `dist/assets/index-*.css`（40.52 kB / gzip 8.51 kB）与 `dist/assets/index-*.js`（2,051.18 kB / gzip 604.81 kB）；
     `src/stores/queryStore.ts` 同时被 27 处静态导入和 `connectionStore.ts` 动态导入（后者用于打破 store 初始化环，非按需分包）。
@@ -477,7 +481,7 @@
   - 已做：`capabilities/default.json` 撤掉 `opener:default` 与 `window-state:default`（窗口状态由 Rust 侧插件自动存取，
     前端从没调过它的命令）；`package.json` 删掉无人 import 的 `@tauri-apps/plugin-opener` 与 `@tauri-apps/plugin-cli`。现剩 5 条权限。
   - 验证：`databaseHandle.test.ts` 新增门——每条非 `core:` 权限和每个 `@tauri-apps/plugin-*` 依赖都要在 `src` 里有 import；
-    反向验证：删依赖前该门红（报 `cli`、`opener`），删后绿。`cargo check` 过。留待：打包版确认窗口位置大小仍能在重启后恢复。
+    反向验证：删依赖前该门红（报 `cli`、`opener`），删后绿。`cargo check` 过；macOS `1.1.0` 打包版（2026-11-16）验证退出时仍正常写出 `.window-state.json`。
 - [x] PA5 前端方言分支不穷尽：新增方言会悄悄走 MySQL / PG 的默认分支
   - 已做：`contracts/queryExecution.ts` 新增 `unhandledDialect(never)`；「选哪种写法」的五处改成列全七种方言的 `switch`：
     绑定占位符（`rowStatements` `createPlaceholderAllocator`）、展示时的占位符正则、分页子句（`tablePagination` `pageClause`）、
@@ -858,7 +862,7 @@ TiDB 的触发器与存储过程；openGauss 违反约束时不给约束名；Co
       修（`c85a272`）：开池子的同时，一秒后还没连上就探一次端口，被拒就立刻报 sqlx 的原话。新测试改前红、探测延迟调到
       10 秒也红；本机 MySQL / PG 上正常连接不变，停库后 1.3 秒报出。界面上的报错没在打包版里看过。
   - A8a 的 1.0 范围做完（第一、二批 + guide + 安装）。第三批（写）按设计文档 §6 等有人要再做；MCP 见 A8。
-    还没在 CI 上跑过的：打 tag 时 release.yml 的 hardened runtime 打包（要用户批准打 tag）。
+    2026-11-16 发版巡检发现 `.github/workflows/release.yml` 仍传旧的 `hardenedRuntime: false` 覆盖了 `tauri.conf.json`，已在 `2eadc9d` 移除覆盖并将签名校验门改为断言 `flags=.*runtime` 与 `disable-library-validation`（本机 `1.1.0` 打包产物已正反验证通过；打 `v1.1.0` tag 时将在 GitHub Actions macOS runner 上首次跑通）。
 - [!] B1b KingbaseES：**阻塞，没有安装包**。解除条件：拿到试用安装包。
 - [ ] ~~B3 云库认证~~ **不做**（2026-10-05 定）
 - [ ] B4 驱动按 Cargo feature 拆分
