@@ -124,7 +124,14 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     anchor_scan = &after[end + 1..];
   }
 
-  for attr in ["src=\"/", "data-deferred-src=\"/", "href=\"/assets/", "href=\"/images/"] {
+  for attr in [
+    "src=\"/",
+    "srcset=\"/",
+    "data-deferred-src=\"/",
+    "data-deferred-srcset=\"/",
+    "href=\"/assets/",
+    "href=\"/images/",
+  ] {
     let mut scan = html;
     while let Some(pos) = scan.find(attr) {
       let quote_start = pos + attr.find('"').map_or(0, |idx| idx + 1);
@@ -174,10 +181,12 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
     &out_dir.join("assets/favicon-32.png"),
   )?;
 
-  // Copy real Retina screenshots for both locales
+  // Copy real Retina screenshots (WebP primary + PNG fallback/OpenGraph) for both locales
   for tab in EN_COPY.tabs.iter().chain(ZH_COPY.tabs.iter()) {
-    let rel = tab.image_path.trim_start_matches('/');
-    copy_checked(&repo_root.join(rel), &out_dir.join(rel))?;
+    let png_rel = tab.image_path.trim_start_matches('/');
+    copy_checked(&repo_root.join(png_rel), &out_dir.join(png_rel))?;
+    let webp_rel = tab.webp_path.trim_start_matches('/');
+    copy_checked(&site_dir.join(webp_rel), &out_dir.join(webp_rel))?;
   }
 
   let en_html =
@@ -272,9 +281,11 @@ mod tests {
     assert!(!en.contains("yuxuetr"));
     assert!(!zh.contains("yuxuetr"));
 
-    // Reverse check: referencing a missing image must fail verify_html_invariants
+    // Reverse check: referencing a missing image or WebP source must fail verify_html_invariants
     let broken = en.replace("/images/en/overview.png", "/images/en/missing.png");
     assert!(verify_html_invariants("index.html", &broken, &temp_dir).is_err());
+    let broken_webp = en.replace("/assets/shots/en/overview.webp", "/assets/shots/en/missing.webp");
+    assert!(verify_html_invariants("index.html", &broken_webp, &temp_dir).is_err());
 
     // Reverse check: combining fetchpriority="high" with loading="lazy" must fail
     let lazy_lcp = en.replace("fetchpriority=\"high\"", "fetchpriority=\"high\" loading=\"lazy\"");

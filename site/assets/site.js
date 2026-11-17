@@ -39,6 +39,14 @@
 
   const hydratePanelImage = (panel) => {
     if (!panel) return;
+    const source = panel.querySelector('source[data-deferred-srcset]');
+    if (source) {
+      const deferredWebp = source.getAttribute('data-deferred-srcset');
+      if (deferredWebp) {
+        source.setAttribute('srcset', deferredWebp);
+        source.removeAttribute('data-deferred-srcset');
+      }
+    }
     const img = panel.querySelector('img[data-deferred-src]');
     if (!img) return;
     const deferred = img.getAttribute('data-deferred-src');
