@@ -102,22 +102,22 @@ jobs:
   redis:
     name: Redis 7.4
     runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7.4
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli -a redispassword ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-          --requirepass redispassword
     env:
       DATAOMNI_REQUIRE_NETWORK_DATABASE_TESTS: "1"
       DATAOMNI_REDIS_TEST_URL: "redis://default:redispassword@127.0.0.1:6379"
     steps:
       - uses: actions/checkout@v4
+      # GitHub Actions services 没有 command 字段，把 --requirepass 放进 options 会排在镜像名前面导致 docker create 报 125；
+      # 直接在步骤里起带口令的容器并等 PONG
+      - name: Start Redis 7.4 with password
+        run: |
+          docker run -d --name redis-smoke -p 6379:6379 redis:7.4 redis-server --requirepass redispassword
+          for _ in $(seq 1 30); do
+            docker exec redis-smoke redis-cli -a redispassword ping 2>/dev/null | grep -q PONG && exit 0
+            sleep 1
+          done
+          echo "Redis 7.4 failed to become ready" >&2
+          exit 1
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update

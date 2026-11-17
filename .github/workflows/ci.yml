@@ -10,7 +10,93 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      app_changed: ${{ steps.filter.outputs.app_changed }}
+      site_changed: ${{ steps.filter.outputs.site_changed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 仅改官网、文档或发布清单的 PR 不空跑重型 Tauri 编译、真库容器与 Windows Runner；
+      # main 分支 push 始终全量运行，README.md 因被 databaseSupport.test.ts 校验仍走 app_changed
+      - name: Detect changed scopes
+        id: filter
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "app_changed=true" >> "$GITHUB_OUTPUT"
+            echo "site_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t files < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "app_changed=true" >> "$GITHUB_OUTPUT"
+            echo "site_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          app_changed=false
+          site_changed=false
+
+          for file in "${files[@]}"; do
+            case "$file" in
+              site/*|images/*|docs/*|rfcs/*|packaging/*|scripts/winget-manifest.sh|TODOs.md|AGENTS.md|LICENSE|.github/workflows/site.yml|.github/workflows/nightly-databases.yml|.github/ISSUE_TEMPLATE/*)
+                ;;
+              *)
+                app_changed=true
+                ;;
+            esac
+
+            case "$file" in
+              site/*|images/*|src-tauri/tauri.conf.json|src-tauri/icons/*|package.json|bun.lock|eslint.config.js|rust-toolchain.toml|.github/workflows/ci.yml|.github/workflows/site.yml)
+                site_changed=true
+                ;;
+            esac
+          done
+
+          echo "app_changed=${app_changed}" >> "$GITHUB_OUTPUT"
+          echo "site_changed=${site_changed}" >> "$GITHUB_OUTPUT"
+
+  site:
+    needs: changes
+    if: needs.changes.outputs.site_changed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
+          components: clippy,rustfmt
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint website scripts
+        run: bunx eslint site/assets
+
+      - name: Check website crate
+        run: bun run site:check
+
   quality:
+    needs: changes
+    if: needs.changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -75,9 +161,6 @@ jobs:
       - name: Test Rust
         run: bun run rust:test
 
-      - name: Check website crate
-        run: bun run site:check
-
   audit:
     runs-on: ubuntu-latest
 
@@ -100,6 +183,8 @@ jobs:
         run: bun run rust:audit
 
   database-smoke:
+    needs: changes
+    if: needs.changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
     services:
@@ -180,6 +265,8 @@ jobs:
   # 测试二进制没有 longPathAware 清单，所以 runner 上开没开 LongPathsEnabled 都一样要靠 `\\?\`。
   # 只跑这几条：整套用例在 Windows 上没人维护过，全跑会把别的平台差异混进来（TODOs G13）
   windows-paths:
+    needs: changes
+    if: needs.changes.outputs.app_changed == 'true'
     runs-on: windows-latest
 
     steps:
