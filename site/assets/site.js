@@ -174,4 +174,36 @@
       }
     });
   });
+
+  // Documentation table-of-contents scrollspy (CSS scroll-target-group + IntersectionObserver fallback)
+  const tocLinks = Array.from(document.querySelectorAll('.docs-toc-list a[href^="#"]'));
+  const docSections = Array.from(document.querySelectorAll('.docs-section[id]'));
+  if (tocLinks.length > 0 && docSections.length > 0) {
+    if (typeof CSS !== 'undefined' && CSS.supports('scroll-target-group: auto')) {
+      const syncAriaCurrent = () => {
+        const current = document.querySelector('.docs-toc-list a:target-current');
+        tocLinks.forEach((link) => {
+          link.setAttribute('aria-current', link === current ? 'true' : 'false');
+        });
+      };
+      syncAriaCurrent();
+      document.addEventListener('scrollend', syncAriaCurrent);
+    } else if ('IntersectionObserver' in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            const activeHref = `#${entry.target.id}`;
+            tocLinks.forEach((link) => {
+              const active = link.getAttribute('href') === activeHref;
+              link.classList.toggle('target-current', active);
+              link.setAttribute('aria-current', String(active));
+            });
+          });
+        },
+        { rootMargin: '-20% 0px -65% 0px', threshold: 0 }
+      );
+      docSections.forEach((section) => observer.observe(section));
+    }
+  }
 })();
