@@ -281,6 +281,17 @@ mod tests {
     assert!(!en.contains("yuxuetr"));
     assert!(!zh.contains("yuxuetr"));
 
+    // Multi-tool MCP presets, static syntax tokens, and upgraded cards/tables
+    for html in [&en, &zh] {
+      assert!(html.contains("class=\"trust-icon\""));
+      assert!(html.contains("class=\"tok-kw\""));
+      assert!(html.contains("class=\"tok-err\""));
+      assert!(html.contains("class=\"smoke-triplet\""));
+      assert!(html.contains("codex mcp add dataomni"));
+      assert!(html.contains("gemini mcp add dataomni"));
+      assert!(html.contains("mcpServers"));
+    }
+
     // Reverse check: referencing a missing image or WebP source must fail verify_html_invariants
     let broken = en.replace("/images/en/overview.png", "/images/en/missing.png");
     assert!(verify_html_invariants("index.html", &broken, &temp_dir).is_err());
