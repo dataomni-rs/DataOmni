@@ -291,23 +291,37 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
       hidden_attr = hidden_attr,
     )?;
     if index == 0 {
+      writeln!(html, "              <picture>")?;
       writeln!(
         html,
-        "              <img class=\"workbench-shot\" src=\"{src}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" fetchpriority=\"high\">",
+        "                <source type=\"image/webp\" srcset=\"{webp}\">",
+        webp = escape_html(tab.webp_path),
+      )?;
+      writeln!(
+        html,
+        "                <img class=\"workbench-shot\" src=\"{src}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" fetchpriority=\"high\">",
         src = escape_html(tab.image_path),
         alt = escape_html(tab.alt),
         w = tab.width,
         h = tab.height,
       )?;
+      writeln!(html, "              </picture>")?;
     } else {
+      writeln!(html, "              <picture>")?;
       writeln!(
         html,
-        "              <img class=\"workbench-shot\" src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" data-deferred-src=\"{src}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" decoding=\"async\">",
+        "                <source type=\"image/webp\" data-deferred-srcset=\"{webp}\">",
+        webp = escape_html(tab.webp_path),
+      )?;
+      writeln!(
+        html,
+        "                <img class=\"workbench-shot\" src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" data-deferred-src=\"{src}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" decoding=\"async\">",
         src = escape_html(tab.image_path),
         alt = escape_html(tab.alt),
         w = tab.width,
         h = tab.height,
       )?;
+      writeln!(html, "              </picture>")?;
     }
     writeln!(html, "            </div>")?;
   }
