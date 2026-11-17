@@ -333,9 +333,9 @@
     拼参数那条用例当场抓出 `aggregate` 把管道传了两遍。
   - 调试构建经 stdio 端到端（临时 HOME）：初始化、列工具、列连接、查询截断、`DELETE` 被拒、生产连接 `not_found`、
     `-` 报 usage、ping 都对；库里行数不变、配置不变、留痕两行。
-- [-] U2 winget（清单已备好，等用户提 PR）
-  - 前提：v1.0.0 已发布。向 `microsoft/winget-pkgs` 提 PR 属于对外操作：用户 2026-11-06 定，仓库里备好清单，PR 由用户自己提。
-  - Homebrew Cask 暂不做（用户 2026-11-05 定）。
+- [-] U2 winget（已提 PR：`microsoft/winget-pkgs#481999`，等上游审核合入）
+  - 前提：v1.0.0 已发布。向 `microsoft/winget-pkgs` 提 PR 属于对外操作：用户 2026-11-06 定，仓库里备好清单，PR 由用户自己提；2026-11-17 用户确认提交。
+  - Homebrew Cask 暂不做（用户 2026-11-05 定；2026-11-17 维持待定，视 Apple Developer ID 申请进展再定）。
   - 做了：`scripts/winget-manifest.sh <版本>` 从 GitHub 发布页取安装包的 SHA-256（服务端 digest），写出
     `packaging/winget/manifests/y/yuxuetr/DataOmni/<版本>/` 下的 version / installer / locale 三个清单（1.10.0 格式）。
     ID `yuxuetr.DataOmni`；NSIS（按用户）与 MSI（按机器）都列上。草稿、预发布与带 `-rc` 的版本号拒绝生成。
@@ -344,7 +344,7 @@
   - 没验到：`winget validate` / `winget install --manifest` 要在 Windows 上跑；winget-pkgs 的自动校验要提了 PR 才跑。
   - 发现的问题（已解决）：仓库里从来没有 `LICENSE` 文件，README 两份写着 MIT 并链到它（链接是坏的），GitHub 也认不出许可证。
     用户 2026-11-06 定补 MIT：加了 `LICENSE`，脚本与 1.0.0 清单加上 `LicenseUrl`，重新对着 1.10.0 Schema 校验通过（`df9a149`）。
-  - 2026-11-17 更新：仓库迁移至 `dataomni-rs/DataOmni` 且官网 `https://dataomni.dev` 上线后，核实 `microsoft/winget-pkgs` 尚未收录旧名，将脚本与目录切换为 `DataOmni.DataOmni`（`manifests/d/DataOmni/DataOmni/1.1.0/`）并生成 `1.1.0` 正式版三份清单。
+  - 2026-11-17 更新：仓库迁移至 `dataomni-rs/DataOmni` 且官网 `https://dataomni.dev` 上线后，核实 `microsoft/winget-pkgs` 尚未收录旧名，将脚本与目录切换为 `DataOmni.DataOmni`（`manifests/d/DataOmni/DataOmni/1.1.0/`）；补充自动拆包提取 MSI `ProductCode`（`{75E35511-46C9-4B86-B5E1-2D4778A0E8E5}`）、`UpgradeCode`（`{391132B7-CBE4-52A0-93F4-8A125AC67486}`）、NSIS `ProductCode`（`DataOmni`）与 ARP `Publisher`（`dataomni`），经官方 1.10.0 JSON Schema 正反校验后提交上游 PR `microsoft/winget-pkgs#481999`。
 - 到社区发帖由用户自己做。
 - 路线第 2 条里的「已有库的 ER 图」早已实现（`9b63f19`），路线文档那条是旧的。
 

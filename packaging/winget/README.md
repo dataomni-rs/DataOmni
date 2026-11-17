@@ -5,8 +5,8 @@
 ## 发一个新版本
 
 1. 版本在 GitHub 上正式发布（不是草稿、不是预发布）。
-2. `scripts/winget-manifest.sh <版本>`：从发布页取安装包的 SHA-256，写出
-   `manifests/d/DataOmni/DataOmni/<版本>/` 下的三个文件。
+2. `scripts/winget-manifest.sh <版本>`：从发布页取安装包的 SHA-256，校验并拆开 `.msi` 的 OLE `Property` 表提取当次构建的 `ProductCode` 与 `UpgradeCode`，写出
+   `manifests/d/DataOmni/DataOmni/<版本>/` 下的三个文件（需要本机有 `gh`、`7z`、`python3`、`shasum`）。
 3. 提交 PR（对外操作，由维护者自己做）：
    - 用 [wingetcreate](https://github.com/microsoft/winget-create)：
      `wingetcreate submit --token <GitHub token> packaging/winget/manifests/d/DataOmni/DataOmni/<版本>`；
