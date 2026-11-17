@@ -1525,8 +1525,10 @@ export const zh = {
   'palette.placeholder': '搜索连接、表或命令…',
   'palette.empty': '没有匹配项',
   'palette.group.connection': '连接',
+  'palette.group.template': 'SQL 模板',
   'palette.group.action': '操作',
   'palette.action.newSql': '新建查询标签',
+  'palette.action.queryTemplates': '管理 SQL 查询模板…',
   'palette.action.newConnection': '新建连接',
   'palette.action.importConnections': '导入连接配置（DataOmni / Navicat / DBeaver）',
   'palette.action.openDatabaseFile': '打开数据库文件（SQLite / DuckDB）',
@@ -1992,7 +1994,32 @@ export const zh = {
   'error.backend.clickhouseWriteUnverified': '已经执行了，但执行后的核对对不上（期望 · 实际 = {detail}）。ClickHouse 没有事务，撤不回来：刷新看看实际是什么样。',
   'error.backend.clickhouseMalformedResult': 'ClickHouse 的回答有一行和表头对不上（行号: 字段数/列数 = {detail}），多半是服务端中途出了错而这里没认出来。重跑一次；还是这样，请把这条语句报给我们',
   'error.backend.esNoPermission': '这个账号没有列索引的权限，对象树列不出来（{detail}）。OpenSearch 的 read 不含 indices:admin/resolve/index，要再授予它；控制台里照样能查有权限的索引',
-  'error.backend.mongoUpdateNotOperators': '「怎么改」要用 $set 这类操作符或者一条管道；写成一整个文档是替换，按条件修改不能这样用'
+  'error.backend.mongoUpdateNotOperators': '「怎么改」要用 $set 这类操作符或者一条管道；写成一整个文档是替换，按条件修改不能这样用',
+
+  // SQL 查询模板
+  'templates.open': 'SQL 查询模板',
+  'templates.title': 'SQL 查询模板',
+  'templates.hint': '在 SQL 中写 :name 占位符（如 WHERE id = :id），插入后执行会自动弹出绑定参数填值框。',
+  'templates.saveCurrent': '保存当前 SQL',
+  'templates.newTemplate': '新建模板',
+  'templates.editTemplate': '编辑模板',
+  'templates.fieldTitle': '模板标题',
+  'templates.fieldTitlePlaceholder': '例如：按客户查近期订单',
+  'templates.fieldDbType': '适用库类型',
+  'templates.generalSql': '通用 SQL',
+  'templates.fieldSql': 'SQL 语句',
+  'templates.fieldSqlPlaceholder': 'SELECT * FROM orders WHERE customer_id = :customer_id;',
+  'templates.save': '保存模板',
+  'templates.searchPlaceholder': '搜索标题、SQL 或 :参数名…',
+  'templates.scopeCompatible': '当前兼容',
+  'templates.scopeAll': '全部',
+  'templates.empty': '还没有保存的 SQL 模板。可将常用带 :name 参数的查询存放在这里，随时在编辑器或命令面板（{shortcut}）中调用。',
+  'templates.noMatches': '没有匹配的模板',
+  'templates.insert': '插入',
+  'templates.insertAndRun': '插入并执行',
+  'templates.openInTab': '新标签打开',
+  'templates.edit': '编辑',
+  'templates.delete': '删除'
 } as const;
 
 export type TranslationKey = keyof typeof zh;
