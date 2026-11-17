@@ -55,7 +55,7 @@ pub async fn backup_embedded<'a>(
   let part = part_path(target);
   // VACUUM INTO / EXPORT DATABASE 不收绑定参数，路径只能写成字面量；单引号写两遍是两家共同的规则
   let (kind, statement) = match pool {
-    PoolRef::Sqlx(tauri_plugin_sql::DbPool::Sqlite(_)) => {
+    PoolRef::Sqlx(crate::services::DbPool::Sqlite(_)) => {
       // SQLite 不给超长路径加 `\\?\`，备份目标也得我们改写（见 `sqlite_path`）
       let part =
         crate::services::sqlite_path::sqlite_file_path(&part.to_string_lossy()).into_owned();
@@ -517,7 +517,7 @@ fn quote_literal(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use tauri_plugin_sql::DbPool;
+  use crate::services::DbPool;
 
   fn pg_profile() -> ConnectionProfile {
     ConnectionProfile {

@@ -684,8 +684,8 @@ pub(crate) fn part_path_for(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::services::DbPool;
   use serde_json::json;
-  use tauri_plugin_sql::DbPool;
 
   /// 前后端共用的语料。路径写死在编译期：运行时去找文件，文件没了测试会
   /// 「跳过」而不是变红，而一道不会红的门等于没有门。

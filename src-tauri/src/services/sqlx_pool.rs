@@ -1,19 +1,17 @@
-//! MySQL / PostgreSQL 的连接池由这里开，不用插件的 `Database.load`。
+//! MySQL / PostgreSQL / SQLite 的连接池与目录查询统一由这里管理。
 //!
-//! 插件那一份有两处不能接受：
-//! - 池子全用 sqlx 的默认值，空闲连接留 10 分钟。VPN、NAT、云负载均衡会把空闲了
-//!   几分钟的 TCP 流悄悄丢掉（实测经 Shadowrocket 隧道：3 分钟还在，6 分钟就没了），
-//!   而 sqlx 取连接前那一下 ping 没有超时——应用放着几分钟再回来，第一个操作要等满
-//!   30 秒，然后报「pool timed out while waiting for an open connection」。
-//! - 库不存在时它会 `CREATE DATABASE`：连接表单里库名打错一个字母，服务器上就多出
-//!   一个空库。
+//! 早期用过 `tauri-plugin-sql`，现已整包移除，原因有三：
+//! - 插件池子全用 sqlx 默认值（空闲连接留 10 分钟），VPN / NAT / 云负载均衡丢掉空闲 TCP 流后，
+//!   第一次操作要等满 30 秒才报 `pool timed out`；
+//! - 库或文件不存在时插件会自动 `CREATE DATABASE` 或在磁盘上新建空文件；
+//! - 插件自己的 `select` / `close` 持着读写锁等网络，一条断线连接就能把所有连接锁死（回归 F24），
+//!   且向前端暴露任意 SQL 执行面。
 //!
-//! 开好的池子照样登记进插件的 `DbInstances`，
-//! 目录查询与关池子也不走插件，走这里的 [`select`] / [`close`]：插件的
-//! 那两条命令持着 `DbInstances` 的读锁等网络，理由见 [`shared`]。SQLite 也走这里：
-//! 插件的 `select` 可执行任意语句、`load` 会替不存在的路径新建文件，撤掉前端 `sql:*` 权限后统一由后端打开。
+//! 现在池子登记进 [`SqlxRegistry`]（底层是 `std::sync::Mutex`，编译期即禁止跨 `.await` 持锁），
+//! 目录查询与关闭统一走 [`select`] / [`close`]。
 use crate::services::opengauss_relay;
 use crate::services::plugin_decode::{mysql_to_json, postgres_to_json};
+use crate::services::pool_registry::PoolRegistry;
 use crate::services::query_executor::encode_hex;
 use crate::services::QueryError;
 use indexmap::IndexMap;
@@ -22,8 +20,17 @@ use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Column, Row};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
-use tauri_plugin_sql::{DbInstances, DbPool};
+
+#[derive(Clone, Debug)]
+pub enum DbPool {
+  Sqlite(sqlx::SqlitePool),
+  MySql(sqlx::MySqlPool),
+  Postgres(sqlx::PgPool),
+}
+
+pub type SqlxRegistry = PoolRegistry<DbPool>;
 
 /// 空闲连接留多久。要比常见的空闲回收短：AWS NLB 350 秒、Azure 负载均衡 4 分钟、
 /// 家用路由器和各种隧道常见几分钟。代价是停下来超过一分钟后，第一条语句多一次握手
@@ -236,35 +243,27 @@ fn relay_tls(options: &PgConnectOptions, connection_string: &str) -> opengauss_r
   }
 }
 
-/// 这条连接串的池子，**拿到就放掉 `DbInstances` 的锁**。
+/// 取出这条连接串的池子副本，立刻释放注册表互斥锁。
 ///
-/// 池子本身是 `Arc`，复制一份很便宜。不能持着锁去等网络：一条查询挂在断掉的连接上
-/// （服务器停了、VPN 悄悄丢了流），读锁就一直不还；下一次开池子要拿写锁，就一直等；
-/// 而 tokio 的读写锁是公平的，排着的写者后面，新来的读者也进不去——一个库断了，
-/// 所有连接的查询、测试、新建一起卡住，只有重启应用能解（回归里的 F24）。
-pub async fn shared(instances: &DbInstances, connection_string: &str) -> Option<DbPool> {
-  let pools = instances.0.read().await;
-  pools.get(connection_string).map(|pool| match pool {
-    DbPool::Sqlite(pool) => DbPool::Sqlite(pool.clone()),
-    DbPool::MySql(pool) => DbPool::MySql(pool.clone()),
-    DbPool::Postgres(pool) => DbPool::Postgres(pool.clone()),
-  })
+/// `sqlx::Pool` 本身是 `Arc`，复制很便宜；注册表用同步 `Mutex` 而不是异步读写锁，
+/// 从类型上阻止持锁跨 `.await` 等网络（回归 F24：单个断线连接不得拖住其他连接）。
+pub fn shared(instances: &SqlxRegistry, connection_string: &str) -> Option<DbPool> {
+  instances.get(connection_string).map(|pool| (*pool).clone())
 }
 
 /// 登记一个池子。同一个串再开一次（测试连接之后真的连上）就换掉旧的；旧池子里被
 /// 会话借走的连接照常用完再关
-pub async fn register(instances: &DbInstances, connection_string: String, pool: DbPool) {
-  instances.0.write().await.insert(connection_string, pool);
+pub fn register(instances: &SqlxRegistry, connection_string: String, pool: DbPool) {
+  instances.insert(connection_string, Arc::new(pool));
 }
 
 /// 关掉并摘掉一个池子。sqlx 的 `close` 要等借出去的连接都还回来，一条挂住的连接
 /// 就能让它永远不返回，所以放到后台去等，界面上的「断开」不跟着挂
-pub async fn close(instances: &DbInstances, connection_string: &str) -> bool {
-  let removed = instances.0.write().await.remove(connection_string);
-  match removed {
+pub fn close(instances: &SqlxRegistry, connection_string: &str) -> bool {
+  match instances.take(connection_string) {
     Some(pool) => {
       tauri::async_runtime::spawn(async move {
-        match pool {
+        match pool.as_ref() {
           DbPool::Sqlite(pool) => pool.close().await,
           DbPool::MySql(pool) => pool.close().await,
           DbPool::Postgres(pool) => pool.close().await,
@@ -479,45 +478,37 @@ mod tests {
 
       let first = open("sqlite::memory:").await.expect("open first sqlite pool");
       let second = open("sqlite::memory:").await.expect("open second sqlite pool");
-      let instances = DbInstances::default();
-      register(&instances, "sqlite:first".to_string(), first).await;
-      register(&instances, "sqlite:second".to_string(), second).await;
+      let instances = SqlxRegistry::default();
+      register(&instances, "sqlite:first".to_string(), first);
+      register(&instances, "sqlite:second".to_string(), second);
 
-      assert!(close(&instances, "sqlite:second").await);
-      let remaining = shared(&instances, "sqlite:first").await.expect("first pool stays open");
+      assert!(close(&instances, "sqlite:second"));
+      let remaining = shared(&instances, "sqlite:first").expect("first pool stays open");
       let rows = select(&remaining, "SELECT 42 AS answer", vec![]).await.expect("query first pool");
       assert_eq!(rows.len(), 1);
       assert_eq!(rows[0].get("answer"), Some(&JsonValue::from(42)));
-      assert!(close(&instances, "sqlite:first").await);
+      assert!(close(&instances, "sqlite:first"));
     });
   }
 
   /// 池子要在运行时里建（`connect_lazy` 会起后台任务）
-  async fn sqlite_instances(key: &str) -> (DbInstances, sqlx::SqlitePool) {
+  async fn sqlite_instances(key: &str) -> (SqlxRegistry, sqlx::SqlitePool) {
     let pool = sqlx::sqlite::SqlitePoolOptions::new().connect_lazy("sqlite::memory:").unwrap();
-    let instances = DbInstances::default();
-    instances.0.write().await.insert(key.to_string(), DbPool::Sqlite(pool.clone()));
+    let instances = SqlxRegistry::default();
+    register(&instances, key.to_string(), DbPool::Sqlite(pool.clone()));
     (instances, pool)
   }
 
-  /// F24 的门：拿到池子之后锁必须已经放了，否则挂住的查询会挡住所有写者
+  /// F24 的门：拿到池子之后注册表锁必须已经放掉，后续写入与移除立即可执行
   #[test]
   fn a_shared_pool_does_not_keep_the_registry_locked() {
     tauri::async_runtime::block_on(async {
       let (instances, _pool) = sqlite_instances("sqlite:a").await;
-      let shared = shared(&instances, "sqlite:a").await;
-      assert!(shared.is_some());
-      assert!(instances.0.try_write().is_ok(), "holding a pool must not hold the lock");
-    });
-  }
-
-  /// 反向：持着读锁时写者确实进不去——上面那条绿不是因为 try_write 永远成功
-  #[test]
-  fn a_held_read_guard_does_block_writers() {
-    tauri::async_runtime::block_on(async {
-      let (instances, _pool) = sqlite_instances("sqlite:a").await;
-      let _guard = instances.0.read().await;
-      assert!(instances.0.try_write().is_err());
+      let shared_pool = shared(&instances, "sqlite:a");
+      assert!(shared_pool.is_some());
+      let other = sqlx::sqlite::SqlitePoolOptions::new().connect_lazy("sqlite::memory:").unwrap();
+      register(&instances, "sqlite:b".to_string(), DbPool::Sqlite(other));
+      assert!(shared(&instances, "sqlite:b").is_some());
     });
   }
 
@@ -525,9 +516,9 @@ mod tests {
   fn closing_removes_the_pool_and_closes_it() {
     tauri::async_runtime::block_on(async {
       let (instances, pool) = sqlite_instances("sqlite:a").await;
-      assert!(close(&instances, "sqlite:a").await);
-      assert!(shared(&instances, "sqlite:a").await.is_none());
-      assert!(!close(&instances, "sqlite:a").await);
+      assert!(close(&instances, "sqlite:a"));
+      assert!(shared(&instances, "sqlite:a").is_none());
+      assert!(!close(&instances, "sqlite:a"));
       // 关是在后台做的
       for _ in 0..50 {
         if pool.is_closed() {

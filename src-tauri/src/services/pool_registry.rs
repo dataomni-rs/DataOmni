@@ -1,8 +1,8 @@
 //! 后端自己持有的连接池，按连接串登记。
 //!
-//! sqlx 那三家的池子在插件的 `DbInstances` 里；插件接不了的驱动（SQL Server 的
-//! tiberius、Oracle 的 ODPI-C）由 `test_connection` 连上之后登记在这里，其余命令
-//! 按同一个不带口令的连接串取。和插件的 `DbInstances` 是同一个角色。
+//! MySQL / PostgreSQL / SQLite 的 sqlx 池子与其余驱动（SQL Server、Oracle、DuckDB、
+//! ClickHouse、MongoDB、Redis、Neo4j、Elasticsearch）统一用这一套注册表按不带口令
+//! （或标准连接串）的键登记；锁只在哈希表读写那几纳秒持有，绝不跨 `.await` 持锁。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,14 +37,18 @@ impl<P> PoolRegistry<P> {
     }
   }
 
-  pub fn remove(&self, key: &str) -> bool {
+  pub fn take(&self, key: &str) -> Option<Arc<P>> {
     match self.pools.lock() {
-      Ok(mut pools) => pools.remove(key).is_some(),
+      Ok(mut pools) => pools.remove(key),
       Err(_) => {
         log::error!("连接池注册表锁已中毒，无法移除连接池: {key}");
-        false
+        None
       }
     }
+  }
+
+  pub fn remove(&self, key: &str) -> bool {
+    self.take(key).is_some()
   }
 }
 
