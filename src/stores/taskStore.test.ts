@@ -73,4 +73,43 @@ describe('任务失败', () => {
     expect(task?.status).toBe('cancelled');
     expect(task?.detail).toBeNull();
   });
+
+  it('当前活动连接上的导出或导入遇到 CONNECTION_LOST 时把连接标成已断开，非当前连接或磁盘错误不误标', async () => {
+    const { useQueryStore } = await import('./queryStore');
+    useQueryStore.setState({
+      connectionId: 'active-conn',
+      database: {} as never,
+      connectionLost: false
+    });
+
+    // 1. 磁盘权限错不是断线
+    invokeMock.mockRejectedValueOnce('permission denied');
+    const diskFail = useTaskStore.getState().start({
+      kind: 'export',
+      title: 'e1',
+      payload: { connectionId: 'active-conn', sql: 'SELECT 1', path: '/x.csv', options: {} as never }
+    });
+    await settled(diskFail);
+    expect(useQueryStore.getState().connectionLost).toBe(false);
+
+    // 2. 用户已切走的旧连接导出断线，不把当前连接误标为已断开
+    invokeMock.mockRejectedValueOnce({ code: 'CONNECTION_LOST', message: 'DATAOMNI_CONNECTION_LOST: EOF' });
+    const otherConnFail = useTaskStore.getState().start({
+      kind: 'export',
+      title: 'e2',
+      payload: { connectionId: 'other-conn', sql: 'SELECT 1', path: '/x.csv', options: {} as never }
+    });
+    await settled(otherConnFail);
+    expect(useQueryStore.getState().connectionLost).toBe(false);
+
+    // 3. 当前活动连接的导出断线：立刻标为已断开，让重连按钮出现
+    invokeMock.mockRejectedValueOnce({ code: 'CONNECTION_LOST', message: 'DATAOMNI_CONNECTION_LOST: EOF' });
+    const activeConnFail = useTaskStore.getState().start({
+      kind: 'export',
+      title: 'e3',
+      payload: { connectionId: 'active-conn', sql: 'SELECT 1', path: '/x.csv', options: {} as never }
+    });
+    await settled(activeConnFail);
+    expect(useQueryStore.getState().connectionLost).toBe(true);
+  });
 });

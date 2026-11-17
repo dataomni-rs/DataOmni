@@ -249,13 +249,13 @@ pub async fn test_connection(
   Ok(connection_string)
 }
 
-/// 为 MySQL / PostgreSQL / SQLite 开池子并登记进 `DbInstances`。
-/// 为什么不用插件的 `Database.load`，见 `services::sqlx_pool`
+/// 为 MySQL / PostgreSQL / SQLite 开池子并登记进 `SqlxRegistry`。
+/// 池子配置与超时原因见 `services::sqlx_pool`
 #[tauri::command]
 pub async fn open_database_pool(
   connection_string: String,
   app_handle: AppHandle,
-  database_instances: State<'_, tauri_plugin_sql::DbInstances>,
+  database_instances: State<'_, crate::services::SqlxRegistry>,
 ) -> Result<(), String> {
   let resolved = match connection_string.strip_prefix("sqlite:") {
     Some(rest) if rest != ":memory:" && !std::path::Path::new(rest).is_absolute() => {
@@ -266,20 +266,19 @@ pub async fn open_database_pool(
     _ => connection_string.clone(),
   };
   let pool = crate::services::sqlx_pool::open(&resolved).await?;
-  crate::services::sqlx_pool::register(&database_instances, connection_string, pool).await;
+  crate::services::sqlx_pool::register(&database_instances, connection_string, pool);
   Ok(())
 }
 
-/// MySQL / PostgreSQL 的目录查询。代替插件的 `select`：那一条持着锁等网络
+/// MySQL / PostgreSQL / SQLite 的目录查询（取出池子副本后立即释放注册表锁）
 #[tauri::command]
 pub async fn sqlx_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  database_instances: State<'_, tauri_plugin_sql::DbInstances>,
+  database_instances: State<'_, crate::services::SqlxRegistry>,
 ) -> Result<Vec<indexmap::IndexMap<String, serde_json::Value>>, crate::services::QueryError> {
   let pool = crate::services::sqlx_pool::shared(&database_instances, &connection_string)
-    .await
     .ok_or_else(|| {
       crate::services::QueryError::message(
         crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
@@ -288,13 +287,13 @@ pub async fn sqlx_select(
   crate::services::sqlx_pool::select(&pool, &sql, params).await
 }
 
-/// 代替插件的 `close`：那一条持着锁等所有借出去的连接还回来
+/// 摘掉并在后台异步关闭 sqlx 池子，避免借出的挂起连接阻塞断开操作
 #[tauri::command]
 pub async fn close_sqlx_pool(
   connection_string: String,
-  database_instances: State<'_, tauri_plugin_sql::DbInstances>,
+  database_instances: State<'_, crate::services::SqlxRegistry>,
 ) -> Result<bool, String> {
-  Ok(crate::services::sqlx_pool::close(&database_instances, &connection_string).await)
+  Ok(crate::services::sqlx_pool::close(&database_instances, &connection_string))
 }
 
 /// SQL Server 连接上的目录查询：前端对另外三家走插件的 `select`，对这一家走这里。

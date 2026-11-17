@@ -9,11 +9,32 @@ pub const LOG_FILE_NAME: &str = "dataomni";
 pub const LOG_REVEAL_FAILED: &str = "DATAOMNI_LOG_REVEAL_FAILED";
 /// 没问到最新版本：离线、被墙、GitHub 限流，或者回答的形状不对。启动时的检查不显示它，只进日志
 pub const UPDATE_CHECK_FAILED: &str = "DATAOMNI_UPDATE_CHECK_FAILED";
+/// 系统浏览器没能打开固定外链
+pub const EXTERNAL_LINK_OPEN_FAILED: &str = "DATAOMNI_EXTERNAL_LINK_OPEN_FAILED";
 
 const LATEST_RELEASE_API: &str =
   "https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest";
 const RELEASE_PAGE: &str = "https://github.com/dataomni-rs/DataOmni/releases/tag/v";
 const UPDATE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 允许从设置或原生菜单打开的固定外部链接（拒绝前端传入任意网址）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectLink {
+  Website,
+  WebsiteZh,
+  Issues,
+}
+
+impl ProjectLink {
+  pub const fn url(self) -> &'static str {
+    match self {
+      Self::Website => "https://dataomni.dev/",
+      Self::WebsiteZh => "https://dataomni.dev/zh/",
+      Self::Issues => "https://github.com/dataomni-rs/DataOmni/issues",
+    }
+  }
+}
 
 #[derive(Debug, serde::Serialize)]
 pub struct Diagnostics {
@@ -105,9 +126,27 @@ pub fn open_release_page(version: String) -> Result<(), String> {
     .map_err(|error| format!("{UPDATE_CHECK_FAILED}: {error}"))
 }
 
+/// 在浏览器里打开官网或问题反馈页。目标写成枚举，不在 IPC 层暴露任意 URL
+#[tauri::command]
+pub fn open_project_link(target: ProjectLink) -> Result<(), String> {
+  tauri_plugin_opener::open_url(target.url(), None::<&str>)
+    .map_err(|error| format!("{EXTERNAL_LINK_OPEN_FAILED}: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn project_links_map_only_to_fixed_official_https_destinations() {
+    let en: ProjectLink = serde_json::from_str("\"website\"").expect("website enum");
+    let zh: ProjectLink = serde_json::from_str("\"websiteZh\"").expect("websiteZh enum");
+    let issues: ProjectLink = serde_json::from_str("\"issues\"").expect("issues enum");
+    assert_eq!(en.url(), "https://dataomni.dev/");
+    assert_eq!(zh.url(), "https://dataomni.dev/zh/");
+    assert_eq!(issues.url(), "https://github.com/dataomni-rs/DataOmni/issues");
+    assert!(serde_json::from_str::<ProjectLink>("\"https://evil.example\"").is_err());
+  }
 
   #[test]
   fn takes_the_version_from_the_latest_release() {

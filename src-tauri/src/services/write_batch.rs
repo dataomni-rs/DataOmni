@@ -9,10 +9,10 @@
 
 use crate::services::query_error::QueryError;
 use crate::services::query_executor::PoolRef;
+use crate::services::DbPool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::{Executor, MySql, Postgres, Sqlite, Transaction};
-use tauri_plugin_sql::DbPool;
 
 /// 绑不上去的参数类型。数据里带的是那个值的类型
 pub const UNSUPPORTED_PARAMETER_TYPE: &str = "DATAOMNI_UNSUPPORTED_PARAMETER_TYPE";

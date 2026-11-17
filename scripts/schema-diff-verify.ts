@@ -10,9 +10,11 @@
  * `--skip-kind` 是反向验证：不同步某一种差异，第二次比对就不该为空、退出码就该非零。
  */
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import type { SchemaMetadataQueries } from '../src/utils/catalogQueries';
 import { diffSchemas, type SchemaDiff, type SchemaDiffDialect, type SchemaDifference, type SchemaSnapshot } from '../src/utils/schemaDiff';
 import { listTables, loadSchemaSnapshot, readNativeDdl, type ErDiagramQueries } from '../src/utils/schemaSnapshot';
@@ -76,7 +78,78 @@ function sqliteCase(): Case {
       CREATE TABLE old_stuff (id INTEGER PRIMARY KEY);`),
     // SQLite 改不了列的类型、可空、默认值，也不能事后加删外键：这几种由单测钉住拒绝
     expectedKinds: ['table-added', 'table-removed', 'column-added', 'column-removed', 'index-added', 'index-removed'],
-    close: async () => {}
+    close: async () => { rmSync(dir, { recursive: true, force: true }); }
+  };
+}
+
+async function duckdbCase(): Promise<Case> {
+  const dir = mkdtempSync(join(tmpdir(), 'schema-diff-duckdb-'));
+  const child = spawn(
+    'cargo',
+    ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--quiet', '--test', 'catalog_queries_dump', '--', '--exact', 'duckdb_worker', '--nocapture'],
+    {
+      env: { ...process.env, DATAOMNI_DUCKDB_WORKER: '1' },
+      stdio: ['pipe', 'pipe', 'inherit']
+    }
+  );
+  let nextId = 1;
+  const pending = new Map<number, { resolve: (rows: unknown[]) => void; reject: (err: Error) => void }>();
+  const rl = createInterface({ input: child.stdout });
+  rl.on('line', (line) => {
+    if (!line.startsWith('DATAOMNI_RPC:')) return;
+    const msg = JSON.parse(line.slice('DATAOMNI_RPC:'.length)) as { id: number; rows?: unknown[]; error?: string };
+    const waiter = pending.get(msg.id);
+    if (!waiter) return;
+    pending.delete(msg.id);
+    if (msg.error) waiter.reject(new Error(msg.error));
+    else waiter.resolve(msg.rows ?? []);
+  });
+
+  const rpc = (path: string, op: 'select' | 'exec', sql: string, params: unknown[] = []) =>
+    new Promise<unknown[]>((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      child.stdin.write(`${JSON.stringify({ id, path, op, sql, params })}\n`);
+    });
+
+  const open = async (name: string, statements: string[]): Promise<Side> => {
+    const dbPath = join(dir, `${name}.duckdb`);
+    for (const stmt of statements) {
+      await rpc(dbPath, 'exec', stmt);
+    }
+    return {
+      select: (sql, params) => rpc(dbPath, 'select', sql, params),
+      exec: async (sql) => { await rpc(dbPath, 'exec', sql); },
+      database: null,
+      schema: 'main'
+    };
+  };
+
+  const src = await open('src', [
+    'CREATE TABLE users (id INTEGER PRIMARY KEY, email VARCHAR NOT NULL UNIQUE, name VARCHAR, score INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users (id), total DECIMAL(10,2) DEFAULT 0, note VARCHAR)',
+    'CREATE INDEX ix_orders_user ON orders (user_id)',
+    'CREATE TABLE tags (id INTEGER PRIMARY KEY, label VARCHAR NOT NULL UNIQUE)'
+  ]);
+  const dst = await open('dst', [
+    'CREATE TABLE users (id INTEGER PRIMARY KEY, email VARCHAR NOT NULL UNIQUE, legacy VARCHAR, score BIGINT)',
+    'CREATE INDEX ix_users_legacy ON users (legacy)',
+    'CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users (id), total DECIMAL(10,2) DEFAULT 0)',
+    'CREATE TABLE old_stuff (id INTEGER PRIMARY KEY)'
+  ]);
+
+  return {
+    dialect: 'duckdb',
+    src,
+    dst,
+    // DuckDB 支持建表、删表、增删列、改列类型/可空/默认值与增删普通索引；事后加删外键与约束索引由单测钉住拒绝
+    expectedKinds: ['table-added', 'table-removed', 'column-added', 'column-removed', 'column-changed', 'index-added', 'index-removed'],
+    close: async () => {
+      child.stdin.end();
+      await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      rl.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   };
 }
 
@@ -267,7 +340,7 @@ async function roundTrip(item: Case): Promise<boolean> {
   return true;
 }
 
-const cases: Array<() => Case | Promise<Case>> = [sqliteCase];
+const cases: Array<() => Case | Promise<Case>> = [sqliteCase, duckdbCase];
 const env = (name: string) => process.env[name]?.trim() || null;
 const pg = env('DATAOMNI_POSTGRES_TEST_URL');
 const my = env('DATAOMNI_MYSQL_TEST_URL');

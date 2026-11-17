@@ -294,6 +294,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libaio1t64
+          # Ubuntu 24.04 的 libaio1t64 只装 libaio.so.1t64，Instant Client 的 libclntsh.so 按 SONAME 找 libaio.so.1
+          if [[ ! -e /usr/lib/x86_64-linux-gnu/libaio.so.1 && -e /usr/lib/x86_64-linux-gnu/libaio.so.1t64 ]]; then
+            sudo ln -s /usr/lib/x86_64-linux-gnu/libaio.so.1t64 /usr/lib/x86_64-linux-gnu/libaio.so.1
+          fi
       - name: Fetch Oracle Instant Client
         run: bash scripts/fetch-oracle-client.sh
       - uses: dtolnay/rust-toolchain@stable
@@ -307,7 +311,7 @@ jobs:
       - name: Run Oracle smoke tests
         shell: bash
         run: |
-          export DATAOMNI_ORACLE_CLIENT_DIR="$PWD/src-tauri/resources/oracle-client"
+          export DATAOMNI_ORACLE_CLIENT_DIR="$PWD/src-tauri/vendor/instantclient"
           cargo test --manifest-path src-tauri/Cargo.toml --test oracle_smoke -- --test-threads=1 --nocapture 2>&1 | tee smoke.log
           test "${PIPESTATUS[0]}" -eq 0
           bash scripts/summarize-smoke-log.sh --header >> "$GITHUB_STEP_SUMMARY"

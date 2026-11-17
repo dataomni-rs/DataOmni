@@ -143,7 +143,7 @@ pub enum DatabaseType {
 impl DatabaseType {
   /// 这个类型现在能不能真的连上。
   ///
-  /// 唯一依据是编进去的驱动：`Cargo.toml` 里 `tauri-plugin-sql` 与 `sqlx` 开的
+  /// 唯一依据是编进去的驱动：`Cargo.toml` 里 `sqlx` 开的
   /// `sqlite, mysql, postgres`，加上各自独立的驱动（tiberius、oracle、duckdb …）。其余类型有连接表单、有默认端口、也能拼出 URL，
   /// 但 `Database.load` 认不出那个 scheme——不在这里挡住，用户看到的就是驱动层
   /// 的一句 "unsupported URL scheme"，而真正的原因是「这个版本没做」。

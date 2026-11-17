@@ -1306,9 +1306,9 @@ async fn find_culprit(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::services::DbPool;
   use sqlx::sqlite::SqlitePoolOptions;
   use sqlx::{Row, Sqlite};
-  use tauri_plugin_sql::DbPool;
 
   #[test]
   fn the_delimiter_is_the_one_that_cuts_even_rows() {

@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatQueryErrorReport,
+  isConnectionLostError,
   locateQueryError,
   reportedByDatabase,
   toQueryExecutionError
 } from './queryError';
+
+describe('isConnectionLostError', () => {
+  it('认出结构化断线码、字符串断线码与 SSH 隧道未建立错误，排除语法或行数冲突错误', () => {
+    expect(isConnectionLostError({ code: 'CONNECTION_LOST', message: 'DATAOMNI_CONNECTION_LOST: broken pipe' })).toBe(true);
+    expect(isConnectionLostError({ statement_index: 0, code: 'CONNECTION_LOST', message: 'DATAOMNI_CONNECTION_LOST: EOF' })).toBe(true);
+    expect(isConnectionLostError('DATAOMNI_CONNECTION_LOST: reset by peer')).toBe(true);
+    expect(isConnectionLostError('DATAOMNI_SSH_TUNNEL_NOT_ESTABLISHED')).toBe(true);
+
+    expect(isConnectionLostError({ code: '42601', message: 'syntax error' })).toBe(false);
+    expect(isConnectionLostError({ code: 'ROW_COUNT_MISMATCH', message: 'DATAOMNI_ROW_COUNT_MISMATCH: 1 · 0' })).toBe(false);
+    expect(isConnectionLostError('permission denied')).toBe(false);
+  });
+});
 
 describe('reportedByDatabase', () => {
   it('数据库给的错误码算，我们自己判出来的不算', () => {

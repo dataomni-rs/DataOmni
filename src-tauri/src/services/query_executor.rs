@@ -11,8 +11,7 @@ use sqlx::{
 };
 use std::future::Future;
 
-use crate::services::query_parameters;
-use tauri_plugin_sql::DbPool;
+use crate::services::{query_parameters, DbPool};
 use time::{Date, PrimitiveDateTime, Time};
 use tokio::time::{timeout, Duration};
 

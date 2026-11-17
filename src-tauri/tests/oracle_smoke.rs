@@ -1675,3 +1675,115 @@ async fn oracle_pool_reads_survive_the_server_dropping_its_connections() {
   let _ = pool.write_batch(&[update()]).await;
   pool.write_batch(&[update()]).await.expect("第二次写换一条新连接");
 }
+
+/// 编辑器里的绑定参数（rfcs/bind-parameters.md）：前端把 `:name` 换成按位置排的 `:1`、`:2`，
+/// 走 `execute_streaming_with_params` 绑定文本、数字与 NULL，`q'[…]'` 字面量里的冒号不被误当占位符
+#[tokio::test]
+async fn oracle_binds_editor_parameters() {
+  let Some(pool) = pool().await else { return };
+  drop_quietly(&pool, "om_bp_smoke").await;
+  run_all(
+    &pool,
+    &[
+      "CREATE TABLE om_bp_smoke (id NUMBER(10) PRIMARY KEY, code VARCHAR2(16))",
+      "INSERT INTO om_bp_smoke VALUES (1, '007')",
+      "INSERT INTO om_bp_smoke VALUES (2, '7')",
+    ],
+  )
+  .await;
+
+  let mut connection = session(&pool).await;
+  let mut run = async |sql: &str, params: Vec<JsonValue>| {
+    let mut rows: Vec<QueryRow> = Vec::new();
+    connection
+      .execute_streaming_with_params(
+        sql,
+        &params,
+        StreamOptions::limited(100, 1 << 20, 100),
+        &mut |batch| {
+          rows.extend(batch.rows);
+          Ok(())
+        },
+      )
+      .await
+      .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+    rows
+  };
+
+  assert_eq!(
+    run("SELECT id FROM om_bp_smoke WHERE code = :1", vec![json!("007")]).await.len(),
+    1,
+    "文本 007 不能被隐式转成数字 7"
+  );
+  assert_eq!(
+    run("SELECT id FROM om_bp_smoke WHERE id = :1 OR id = :2", vec![json!(1), json!(2)])
+      .await
+      .len(),
+    2
+  );
+  assert_eq!(
+    run("SELECT id FROM om_bp_smoke ORDER BY id FETCH FIRST :1 ROWS ONLY", vec![json!(1)])
+      .await
+      .len(),
+    1
+  );
+  let rows = run(
+    "SELECT CASE WHEN :1 IS NULL THEN 1 ELSE 0 END AS MISSING, q'[:not_a_bind]' AS LIT FROM DUAL",
+    vec![JsonValue::Null],
+  )
+  .await;
+  assert_eq!(text(&rows[0]["MISSING"]), "1");
+  assert_eq!(text(&rows[0]["LIT"]), ":not_a_bind");
+
+  drop_quietly(&pool, "om_bp_smoke").await;
+}
+
+/// 结构比对与同步（rfcs/schema-diff.md）：`ORACLE_INDEXES` 的 `is_constraint` 必须区分主键 / 唯一约束
+/// 背后的索引（删时走 `ALTER TABLE … DROP CONSTRAINT`）与普通索引（删时走 `DROP INDEX`）
+#[tokio::test]
+async fn oracle_index_catalog_distinguishes_constraints_from_plain_indexes() {
+  use dataomni_lib::models::DatabaseType;
+  use dataomni_lib::services::schema_metadata_queries;
+
+  let Some(pool) = pool().await else { return };
+  drop_quietly(&pool, "om_idx_kind").await;
+  run_all(
+    &pool,
+    &[
+      "CREATE TABLE om_idx_kind (
+         id NUMBER(10) CONSTRAINT pk_om_idx_kind PRIMARY KEY,
+         email VARCHAR2(64) CONSTRAINT uq_om_idx_email UNIQUE,
+         note VARCHAR2(64)
+       )",
+      "CREATE INDEX ix_om_idx_note ON om_idx_kind (note)",
+    ],
+  )
+  .await;
+
+  let queries = schema_metadata_queries(&DatabaseType::Oracle).expect("oracle metadata queries");
+  let rows = pool
+    .select(queries.indexes, &[json!("OM_IDX_KIND"), JsonValue::Null])
+    .await
+    .expect("query oracle indexes");
+
+  let flag_of = |name: &str| {
+    rows
+      .iter()
+      .find(|row| row.get("index_name").and_then(JsonValue::as_str) == Some(name))
+      .and_then(|row| row.get("is_constraint"))
+      .and_then(JsonValue::as_i64)
+  };
+  assert_eq!(flag_of("PK_OM_IDX_KIND"), Some(1));
+  assert_eq!(flag_of("UQ_OM_IDX_EMAIL"), Some(1));
+  assert_eq!(flag_of("IX_OM_IDX_NOTE"), Some(0));
+
+  run_all(
+    &pool,
+    &[
+      "ALTER TABLE \"OM_IDX_KIND\" DROP CONSTRAINT \"UQ_OM_IDX_EMAIL\"",
+      "DROP INDEX \"IX_OM_IDX_NOTE\"",
+    ],
+  )
+  .await;
+  drop_quietly(&pool, "om_idx_kind").await;
+}

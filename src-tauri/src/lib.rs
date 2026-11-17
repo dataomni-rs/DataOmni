@@ -47,12 +47,12 @@ pub fn run() {
     // 记住窗口大小与位置；默认在退出时保存、启动时恢复
     .plugin(tauri_plugin_window_state::Builder::default().build())
     .plugin(tauri_plugin_dialog::init())
-    .plugin(tauri_plugin_sql::Builder::new().build())
     .manage(ConnectionServiceState::default())
     .manage(QueryCancellationState::default())
     .manage(ImportPauseState::default())
     .manage(services::QuerySessionState::default())
     .manage(services::TunnelRegistry::default())
+    .manage(services::SqlxRegistry::default())
     .manage(services::SqlServerRegistry::default())
     .manage(services::oracle::OracleRegistry::default())
     .manage(services::mongodb::MongoRegistry::default())
@@ -82,6 +82,7 @@ pub fn run() {
       reveal_log_file,
       latest_release,
       open_release_page,
+      open_project_link,
       export_connections,
       import_connections,
       test_connection,

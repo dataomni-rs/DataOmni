@@ -65,6 +65,7 @@ pub use query_session::{QuerySessionState, StreamingQueryOptions, SESSION_TRANSA
 pub use schema_metadata::{schema_metadata_queries, DdlQuery, SchemaMetadataQueries};
 pub use session_target::{session_target_query, SessionTargetQuery};
 pub use sql_server::{SqlServerPool, SqlServerRegistry, SqlServerTarget, SQL_SERVER_SCHEME};
+pub use sqlx_pool::{DbPool, SqlxRegistry};
 pub use ssh_tunnel::{ActiveTunnel, TunnelError, TunnelRegistry};
 pub use transaction_state::{TransactionState, TransactionStatus};
 pub use write_batch::{

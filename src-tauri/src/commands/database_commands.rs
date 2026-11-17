@@ -9,7 +9,6 @@ use crate::services::{
 use serde::Deserialize;
 use std::collections::HashMap;
 use tauri::{ipc::Channel, State};
-use tauri_plugin_sql::DbInstances;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::Duration;
 
@@ -19,8 +18,10 @@ use crate::services::clickhouse::{ClickHouseRegistry, CLICKHOUSE_SCHEME};
 use crate::services::duckdb::{DuckDbRegistry, DUCKDB_SCHEME};
 use crate::services::oracle::{OracleRegistry, ORACLE_SCHEME};
 use crate::services::query_executor::PoolRef;
+use crate::services::{
+  DbPool, QueryError, SqlServerRegistry, SqlxRegistry, TunnelRegistry, SQL_SERVER_SCHEME,
+};
 use crate::services::{PlanDialect, SERVER_VERSION_QUERY};
-use crate::services::{QueryError, SqlServerRegistry, TunnelRegistry, SQL_SERVER_SCHEME};
 
 /// 池子按连接串做键，查不到说明前端 `Database.load` 用的串和这里算的不是
 /// 同一个。写成码是为了英文界面上不要印中文——见 `utils/backendError.ts`。
@@ -46,12 +47,11 @@ pub const SESSION_TARGET_UNSUPPORTED: &str = "DATAOMNI_SESSION_TARGET_UNSUPPORTE
 
 /// 这条连接串对应的池子在哪儿。
 ///
-/// sqlx 三家的池子在插件的 `DbInstances` 里（前端 `Database.load` 打开的），
-/// SQL Server 的在后端自己的 [`SqlServerRegistry`] 里（`test_connection` 打开的）。
-/// 键都是 `connection_string_via` 算出来的同一个串。sqlx 的池子是复制出来的，
-/// 不持着 `DbInstances` 的锁执行——理由见 `sqlx_pool::shared`。
+/// sqlx 三家的池子在 [`SqlxRegistry`] 里（`open_database_pool` 打开），
+/// SQL Server 等其余驱动在各自同构的 `PoolRegistry` 里（`test_connection` 打开）。
+/// 键都是 `connection_string_via` 算出来的同一个串；取出池子副本后不持锁等待网络。
 enum ResolvedPool {
-  Sqlx(Option<tauri_plugin_sql::DbPool>),
+  Sqlx(Option<DbPool>),
   SqlServer(std::sync::Arc<crate::services::SqlServerPool>),
   Oracle(std::sync::Arc<crate::services::oracle::OraclePool>),
   DuckDb(std::sync::Arc<crate::services::duckdb::DuckDbPool>),
@@ -61,7 +61,7 @@ enum ResolvedPool {
 impl ResolvedPool {
   async fn resolve(
     connection_string: String,
-    database_instances: &DbInstances,
+    database_instances: &SqlxRegistry,
     sql_server: &SqlServerRegistry,
     oracle: &OracleRegistry,
     duckdb: &DuckDbRegistry,
@@ -91,9 +91,10 @@ impl ResolvedPool {
         .map(ResolvedPool::SqlServer)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
-    Ok(ResolvedPool::Sqlx(
-      crate::services::sqlx_pool::shared(database_instances, &connection_string).await,
-    ))
+    Ok(ResolvedPool::Sqlx(crate::services::sqlx_pool::shared(
+      database_instances,
+      &connection_string,
+    )))
   }
 
   fn pool_ref(&self) -> Result<PoolRef<'_>, QueryError> {
@@ -174,7 +175,7 @@ pub async fn execute_query(
   on_batch: Channel<QueryResultBatch>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, DbInstances>,
+  database_instances: State<'_, SqlxRegistry>,
   cancellation_state: State<'_, QueryCancellationState>,
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
@@ -256,7 +257,7 @@ pub async fn execute_write_batch(
   statements: Vec<WriteStatement>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, DbInstances>,
+  database_instances: State<'_, SqlxRegistry>,
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
@@ -322,7 +323,7 @@ pub async fn export_query_to_file(
   on_progress: Channel<ExportProgress>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, DbInstances>,
+  database_instances: State<'_, SqlxRegistry>,
   cancellation_state: State<'_, QueryCancellationState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
@@ -389,7 +390,7 @@ pub async fn backup_database(
   database: Option<String>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, DbInstances>,
+  database_instances: State<'_, SqlxRegistry>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
@@ -531,7 +532,7 @@ pub async fn import_csv_file(
   on_progress: Channel<ImportProgress>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, DbInstances>,
+  database_instances: State<'_, SqlxRegistry>,
   cancellation_state: State<'_, QueryCancellationState>,
   pause_state: State<'_, ImportPauseState>,
   query_session_state: State<'_, QuerySessionState>,
@@ -679,7 +680,7 @@ pub async fn explain_query(
   request: ExplainRequest,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, DbInstances>,
+  database_instances: State<'_, SqlxRegistry>,
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,

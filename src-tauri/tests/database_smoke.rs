@@ -1,3 +1,4 @@
+use dataomni_lib::services::DbPool;
 use dataomni_lib::services::{
   execute_query, execute_query_with_limit, execute_query_with_limits, execute_query_with_timeout,
   export_query, ExportFormat, ExportOptions, ExportSummary, QueryError, QueryExecutionResult,
@@ -9,7 +10,6 @@ use sqlx::{
   TypeInfo,
 };
 use std::time::Duration;
-use tauri_plugin_sql::DbPool;
 
 const REQUIRE_NETWORK_DATABASES_ENV: &str = "DATAOMNI_REQUIRE_NETWORK_DATABASE_TESTS";
 const MYSQL_URL_ENV: &str = "DATAOMNI_MYSQL_TEST_URL";
@@ -234,8 +234,7 @@ async fn opengauss_sha256_user_logs_in_through_the_relay() {
   wrong.set_password(Some("not-the-password")).expect("set password");
   let error = dataomni_lib::services::sqlx_pool::open(wrong.as_str())
     .await
-    .err()
-    .expect("wrong password must fail");
+    .expect_err("wrong password must fail");
   assert!(error.contains("28P01") || error.contains("Invalid username/password"), "{error}");
 }
 
@@ -2105,19 +2104,14 @@ fn ui_catalog_params(
 // 目录查询的结果：界面那一侧的解码器认不认
 // ---------------------------------------------------------------------------
 
-/// 目录查询在应用里不走 `query_executor`：SQLite 经 `tauri-plugin-sql` 的 `select`，
-/// MySQL / PostgreSQL 经 `sqlx_pool::select`，解码用的是 `services/plugin_decode.rs`
-/// ——插件 2.4.1 那两份解码器的照抄，类型表与插件相同。上面那些用例拿 sqlx 的
-/// `row.get::<T>` 取值，走的是第三套解码——所以「SQL 在真库上跑得通」与
-/// 「界面上显示得出来」之间一直隔着一道没人比过的缝。84495ab 就掉在这道缝里：
-/// MySQL 的 `information_schema` 标识符列是 VARBINARY，查询本身没错，界面报
-/// `unsupported datatype`。
+/// 目录查询在应用里不走 `query_executor`：MySQL / PostgreSQL / SQLite 统一走 `sqlx_pool::select`，
+/// 解码用的是 `services/plugin_decode.rs`（MySQL / PostgreSQL）与 `sqlx_pool::sqlite_to_json`。
+/// 上面那些用例拿 sqlx 的 `row.get::<T>` 取值，走的是另一套解码——所以「SQL 在真库上跑得通」与
+/// 「界面上显示得出来」之间需要这道门盯住：MySQL 的 `information_schema` 标识符列是 VARBINARY，
+/// 若解码分支漏掉就会报 `unsupported datatype`（84495ab）。
 ///
-/// 这里是 `decode/{mysql,postgres,sqlite}.rs` 里**有专门分支**的类型名。
-/// PostgreSQL 那份从 2.4 起对不认识的类型会退回 `try_decode_unchecked::<String>`
-/// 硬解，只打一条 warn——那不算认：二进制协议下一个 OID 是四个字节，按
-/// 字符串硬解出来的不是它的值。所以门按有分支的算，不按「碰巧没报错」算。
-const PLUGIN_SQL_VERSION: &str = "2.4.1";
+/// 这里是解码器里**有专门分支**的类型名；门按有分支的算，不按退回 `try_decode_unchecked::<String>`
+/// 硬解碰巧没报错算。
 const PLUGIN_DECODES_MYSQL: &[&str] = &[
   "CHAR",
   "VARCHAR",
@@ -2174,26 +2168,6 @@ const PLUGIN_DECODES_POSTGRES: &[&str] = &[
 ];
 const PLUGIN_DECODES_SQLITE: &[&str] =
   &["TEXT", "REAL", "INTEGER", "NUMERIC", "BOOLEAN", "DATE", "TIME", "DATETIME", "BLOB", "NULL"];
-
-/// 上面三张表是照着某一个版本的源码抄的。插件一升级，这条先红——
-/// 去 `~/.cargo/registry/src/*/tauri-plugin-sql-<新版本>/src/decode/` 重核一遍
-/// 再改版本号，而不是只改版本号。MySQL / PostgreSQL 那两份已经照抄进
-/// `plugin_decode.rs`，升级时要决定它们跟不跟。
-#[test]
-fn plugin_decoder_tables_were_read_from_the_locked_version() {
-  let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock"))
-    .expect("read Cargo.lock");
-  let locked = lock
-    .split("[[package]]")
-    .find(|package| package.contains("name = \"tauri-plugin-sql\""))
-    .and_then(|package| package.lines().find_map(|line| line.strip_prefix("version = ")))
-    .map(|version| version.trim_matches('"').to_string());
-  assert_eq!(
-    locked.as_deref(),
-    Some(PLUGIN_SQL_VERSION),
-    "tauri-plugin-sql 换了版本：先重核它的 decode/*.rs，再更新这里的类型表"
-  );
-}
 
 /// 界面会发出去的一段目录查询，连同它绑的参数。
 struct CatalogRequest {

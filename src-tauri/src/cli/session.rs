@@ -17,12 +17,11 @@ use crate::services::query_executor::{
 };
 use crate::services::ssh_tunnel::{default_known_hosts, TunnelRegistry};
 use crate::services::DEFAULT_QUERY_BATCH_SIZE;
-use crate::services::{clickhouse, duckdb, oracle, sqlx_pool, QueryError};
+use crate::services::{clickhouse, duckdb, oracle, sqlx_pool, DbPool, QueryError};
 use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri_plugin_sql::DbPool;
 
 pub(super) enum Failure {
   /// 还没执行语句就失败了：隧道、连接、打开文件

@@ -3,12 +3,11 @@ use crate::services::query_executor::PoolRef;
 use crate::services::query_executor::QUERY_TIMEOUT;
 use crate::services::{
   transaction_state::{autocommit_assignment, TransactionState},
-  QueryError, QueryExecutionResult, QueryExecutionSummary, QueryResultBatch, SessionConnection,
-  StreamOptions, QUERY_TIMEOUT_CODE,
+  DbPool, QueryError, QueryExecutionResult, QueryExecutionSummary, QueryResultBatch,
+  SessionConnection, StreamOptions, QUERY_TIMEOUT_CODE,
 };
 use sqlx::Executor;
 use std::{collections::HashMap, sync::Arc};
-use tauri_plugin_sql::DbPool;
 use tokio::{
   sync::Mutex,
   task::JoinHandle,

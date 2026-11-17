@@ -64,6 +64,24 @@ describe('断线之后', () => {
     expect(useQueryStore.getState().connectionLost).toBe(true);
   });
 
+  it('表数据读取与行级提交遇到断线同样切成已断开，让侧边栏浮现重连按钮', async () => {
+    const { runReadQuery } = await import('./queryStore');
+    invokeMock.mockRejectedValueOnce({ code: 'CONNECTION_LOST', message: 'DATAOMNI_CONNECTION_LOST: broken pipe' });
+    await expect(runReadQuery('SELECT * FROM items')).rejects.toBeDefined();
+    expect(useQueryStore.getState().connectionLost).toBe(true);
+
+    connectedStore();
+    invokeMock.mockRejectedValueOnce({
+      statement_index: 0,
+      code: 'CONNECTION_LOST',
+      message: 'DATAOMNI_CONNECTION_LOST: EOF'
+    });
+    await expect(
+      useQueryStore.getState().commitRowChanges('s1', [{ sql: 'UPDATE items SET a = 1', params: [], expectRows: 1 }])
+    ).rejects.toBeDefined();
+    expect(useQueryStore.getState().connectionLost).toBe(true);
+  });
+
   // R7-mac 看到的：服务端结束了会话，下一条语句在结果区只剩一行 SQL——没有红字，
   // 也没有失败的图标；错误只进了日志
   it('出错的那条语句上说得出连接断了', async () => {

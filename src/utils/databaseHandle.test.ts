@@ -59,6 +59,11 @@ describe('Tauri 安全边界配置', () => {
     const csp = tauriConfig.app?.security?.csp ?? '';
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("script-src 'self'");
+
+    const cargoToml = readFileSync('src-tauri/Cargo.toml', 'utf8');
+    expect(cargoToml).not.toContain('tauri-plugin-sql');
+    const libRs = readFileSync('src-tauri/src/lib.rs', 'utf8');
+    expect(libRs).not.toContain('tauri_plugin_sql');
   });
   // 权限和前端依赖都要有消费者：插件的 JS 包在 src 里没人 import，前端就调不到它的命令，
   // 那条权限只是白白放大一旦脚本注入后能做的事（opener / window-state 都是这样留下来的）
