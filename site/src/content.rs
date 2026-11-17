@@ -32,6 +32,27 @@ impl Locale {
       Self::Zh => "EN",
     }
   }
+
+  pub fn og_locale(self) -> &'static str {
+    match self {
+      Self::En => "en_US",
+      Self::Zh => "zh_CN",
+    }
+  }
+
+  pub fn og_alternate_locale(self) -> &'static str {
+    match self {
+      Self::En => "zh_CN",
+      Self::Zh => "en_US",
+    }
+  }
+
+  pub fn og_image_path(self) -> &'static str {
+    match self {
+      Self::En => "/assets/og-en.png",
+      Self::Zh => "/assets/og-zh.png",
+    }
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +162,7 @@ pub struct PageCopy {
   pub locale: Locale,
   pub meta_title: &'static str,
   pub meta_description: &'static str,
+  pub og_image_alt: &'static str,
   pub skip_to_content: &'static str,
   pub nav_workflows: &'static str,
   pub nav_compatibility: &'static str,
@@ -1106,8 +1128,9 @@ const ZH_FAQ: &[FaqItem] = &[
 
 pub static EN_COPY: PageCopy = PageCopy {
   locale: Locale::En,
-  meta_title: "DataOmni — Native Rust database client for SQL, MongoDB, Redis, Neo4j & Elasticsearch",
-  meta_description: "Fast, MIT-licensed native desktop client built with Tauri 2 and Rust. Connect to PostgreSQL, MySQL, Oracle, SQL Server, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch with previewed SQL guardrails, OS keychain security, and read-only MCP access for AI coding tools.",
+  meta_title: "DataOmni — Native Rust GUI for SQL, MongoDB, Redis & Oracle",
+  meta_description: "MIT open-source database client (Tauri 2 + Rust) for PostgreSQL, MySQL, Oracle, MongoDB, Redis, Neo4j & ES. Previewed SQL, OS keychain, and read-only MCP.",
+  og_image_alt: "DataOmni native desktop database client for SQL, MongoDB, Redis, Neo4j, and Elasticsearch",
   skip_to_content: "Skip to main content",
   nav_workflows: "Workflows",
   nav_compatibility: "Databases",
@@ -1230,8 +1253,9 @@ pub static EN_COPY: PageCopy = PageCopy {
 
 pub static ZH_COPY: PageCopy = PageCopy {
   locale: Locale::Zh,
-  meta_title: "DataOmni — 原生轻量的跨平台数据库客户端（支持关系库、MongoDB、Redis、Neo4j 与 ES）",
-  meta_description: "基于 Tauri 2 与 Rust 构建的 MIT 开源桌面数据库客户端。一个应用连齐 PostgreSQL、MySQL、Oracle、SQL Server、ClickHouse、MongoDB、Redis、Neo4j 与 Elasticsearch；改表预览真实 SQL、口令只进系统钥匙串、内置适配各类 AI 工具的只读 MCP 服务。",
+  meta_title: "DataOmni — 原生 Rust 数据库客户端 | SQL · MongoDB · Redis",
+  meta_description: "MIT 开源跨平台数据库客户端（Tauri 2 + Rust），连齐 PostgreSQL、MySQL、Oracle、ClickHouse、MongoDB、Redis、Neo4j 与 ES。改表先审 SQL、钥匙串存密、内置只读 MCP。",
+  og_image_alt: "DataOmni 原生跨平台桌面数据库客户端界面预览（支持关系库、MongoDB、Redis、Neo4j 与 ES）",
   skip_to_content: "跳到主要内容",
   nav_workflows: "核心体验",
   nav_compatibility: "支持引擎",
