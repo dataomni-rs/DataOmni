@@ -38,10 +38,9 @@
 
 - [x] S0 `TODOs.md` 第三次归档（2026-11-17；归档前 112 KB → 归档后 17.6 KB）
   - 已把验收完成的 `v1.0`、`1.x`（已结项条目）、`QS/QT/QR`、`PA1–PA8`、`G1–G13` 与 `A8a` 全文原样归档至 `docs/archive/TODOs-2026-11-17.md`，同步更新 `AGENTS.md` 权威来源表；根目录 `TODOs.md` 只保留本路线任务、在途外部项与未触发的可执行重估条件。
-- [ ] S1 移除后端残留的 `tauri-plugin-sql`（收口 `2.4` 与 `QS5`）
-  - 现状：前端已零 `sql:*` 权限，后端仅借用 `tauri_plugin_sql::{DbPool, DbInstances}` 存连接池，却把 `plugin:sql|*` 命令留在二进制里。
-  - 做法：`services/sqlx_pool.rs` 定义本地 `SqlxPool` 并复用 `PoolRegistry` 替换 `DbInstances`；从 `src-tauri/Cargo.toml` 与 `src-tauri/src/lib.rs` 移除 `tauri-plugin-sql`，删除 `database_smoke.rs` 中扫描 `Cargo.lock` 盯防插件版本的测试，关结下方 `2.4` 旧条目。
-  - 验收：`bun run check`、`bun run rust:clippy:no-ai`、`bun run rust:audit` 及 SQLite 真库冒烟全过。
+- [x] S1 移除后端残留的 `tauri-plugin-sql`（收口 `2.4` 与 `QS5`）（`b3ca533`，2026-11-17）
+  - 已做：在 `services/sqlx_pool.rs` 定义本地 `DbPool`（`Sqlite` / `MySql` / `Postgres`）并复用同步 `PoolRegistry` 作为 `SqlxRegistry`（`std::sync::Mutex` 从编译期阻止跨 `.await` 持锁，彻底杜绝 F24）；`PoolRegistry` 补 `take` 供 `close` 摘池后异步关闭；从 `src-tauri/Cargo.toml` 与 `src-tauri/src/lib.rs` 移除 `tauri-plugin-sql`，删除 `database_smoke.rs` 对 `Cargo.lock` 插件版本号的字符串锁测试；`databaseHandle.test.ts` 新增门禁断言 `Cargo.toml` 与 `lib.rs` 不再出现该插件。
+  - 验证：实现前 `databaseHandle.test.ts` 反向变红；实现后 `bun run lint`、`bun run typecheck`、前端 186 个文件 2305 条单测、后端 451 条单测与冒烟测试、双模式 `clippy` 及 `cargo audit` 全绿。
 - [ ] S2 解耦官网公开版本号与开发期 `src-tauri/tauri.conf.json`，消除发版窗口期 404 隐患
   - 现状：`site/src/main.rs` 直接读 `tauri.conf.json` 的 `version` 拼 GitHub Releases 下载地址，且 `.github/workflows/site.yml` 监听该文件推送自动上线；下次升开发版本号而草稿 Release 尚未点 Publish 时，官网下载按钮会提前指向未公开 tag 返回 404。
   - 做法：为 `site/` 引入独立的已公开发布版本配置源，从 `site.yml` 的 push 监听路径摘除 `src-tauri/tauri.conf.json`，支持在 Release `published` 后更新部署，并补单测钉住版本校验。
@@ -118,8 +117,8 @@
 
 ### 2.4 表数据浏览
 
-- [-] 元数据与表数据查询彻底离开 `tauri-plugin-sql`
-  - 前端 `@tauri-apps/plugin-sql` 与 `sql:*` 权限已由 `QS5` 撤除；后端残留的 `tauri-plugin-sql` 连接池容器在 **`S1`** 中移除收口。
+- [x] 元数据与表数据查询彻底离开 `tauri-plugin-sql`（`QS5` `b4464a1` + `S1` `b3ca533`，2026-11-17 收口）
+  - 前端 `@tauri-apps/plugin-sql` 与 `sql:*` 权限已由 `QS5` 撤除；后端残留的 `tauri-plugin-sql` 连接池容器已在 `S1` 中整包移除，目录查询统一走后端 `sqlx_pool::select`。
 
 ### 3.1 结构与对象管理
 
