@@ -82,6 +82,7 @@ pub fn run() {
       reveal_log_file,
       latest_release,
       open_release_page,
+      open_project_link,
       export_connections,
       import_connections,
       test_connection,

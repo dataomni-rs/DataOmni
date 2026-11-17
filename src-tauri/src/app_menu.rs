@@ -20,6 +20,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 pub const CLOSE_TAB_EVENT: &str = "menu://close-tab";
 const CLOSE_TAB_ID: &str = "close-tab";
 const CLOSE_WINDOW_ID: &str = "close-window";
+const OPEN_WEBSITE_ID: &str = "open-website";
+const REPORT_ISSUE_ID: &str = "report-issue";
 /// `src/utils/shortcuts.test.ts` 读这两个常量，比对 `SHORTCUTS.closeTab`
 const CLOSE_TAB_ACCELERATOR: &str = "CmdOrCtrl+W";
 const CLOSE_WINDOW_ACCELERATOR: &str = "CmdOrCtrl+Shift+W";
@@ -32,6 +34,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     version: Some(package.version.to_string()),
     copyright: config.bundle.copyright.clone(),
     authors: config.bundle.publisher.clone().map(|publisher| vec![publisher]),
+    license: Some("MIT".to_string()),
+    website: Some("https://dataomni.dev".to_string()),
+    website_label: Some("dataomni.dev".to_string()),
     ..Default::default()
   };
 
@@ -39,6 +44,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     MenuItem::with_id(app, CLOSE_TAB_ID, "Close Tab", true, Some(CLOSE_TAB_ACCELERATOR))?;
   let close_window =
     MenuItem::with_id(app, CLOSE_WINDOW_ID, "Close Window", true, Some(CLOSE_WINDOW_ACCELERATOR))?;
+  let open_website =
+    MenuItem::with_id(app, OPEN_WEBSITE_ID, "DataOmni Website", true, None::<&str>)?;
+  let report_issue =
+    MenuItem::with_id(app, REPORT_ISSUE_ID, "Report an Issue…", true, None::<&str>)?;
 
   Menu::with_items(
     app,
@@ -84,7 +93,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         &[&PredefinedMenuItem::minimize(app, None)?, &PredefinedMenuItem::maximize(app, None)?],
       )?,
-      &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+      &Submenu::with_id_and_items(
+        app,
+        HELP_SUBMENU_ID,
+        "Help",
+        true,
+        &[&open_website, &report_issue],
+      )?,
     ],
   )
 }
@@ -104,6 +119,20 @@ pub fn handle_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         if let Err(error) = window.close() {
           log::warn!("关闭窗口失败: {error}");
         }
+      }
+    }
+    OPEN_WEBSITE_ID => {
+      if let Err(error) =
+        crate::commands::open_project_link(crate::commands::app_commands::ProjectLink::Website)
+      {
+        log::warn!("打开官网失败: {error}");
+      }
+    }
+    REPORT_ISSUE_ID => {
+      if let Err(error) =
+        crate::commands::open_project_link(crate::commands::app_commands::ProjectLink::Issues)
+      {
+        log::warn!("打开问题反馈页失败: {error}");
       }
     }
     _ => {}

@@ -48,6 +48,11 @@ export function AboutSection() {
     invoke('reveal_log_file').catch((caught) => setError(describeError(caught)));
   };
 
+  const openProjectLink = (target: 'website' | 'websiteZh' | 'issues') => {
+    setError(null);
+    invoke('open_project_link', { target }).catch((caught) => setError(describeError(caught)));
+  };
+
   return (
     <div className="border-t border-line px-5 py-4">
       <h3 className="text-sm font-medium text-fg">{t('settings.about.title')}</h3>
@@ -80,6 +85,20 @@ export function AboutSection() {
         </button>
         <button type="button" onClick={reveal} className={BUTTON_CLASS}>
           {t('settings.about.revealLog')}
+        </button>
+        <button
+          type="button"
+          onClick={() => openProjectLink(language === 'zh' ? 'websiteZh' : 'website')}
+          className={BUTTON_CLASS}
+        >
+          {t('settings.about.website')}
+        </button>
+        <button
+          type="button"
+          onClick={() => openProjectLink('issues')}
+          className={BUTTON_CLASS}
+        >
+          {t('settings.about.reportIssue')}
         </button>
       </div>
       {error && <p className="mt-2 px-2 text-xs text-danger">{error}</p>}
