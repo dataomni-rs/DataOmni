@@ -1,6 +1,7 @@
 use crate::content::{
-  PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory, EN_COPY, ZH_COPY,
+  Locale, PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory, EN_COPY, ZH_COPY,
 };
+use crate::docs::{CalloutTone, DocBlock, DocPage, DocSlug, ALL_DOC_SLUGS};
 use std::fmt::Write;
 
 pub const SITE_ORIGIN: &str = "https://dataomni.dev";
@@ -328,6 +329,18 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   )?;
 
   // Top utility bar
+  let docs_root = DocSlug::Quickstart.path(copy.locale);
+  let changelog_path = DocSlug::Changelog.path(copy.locale);
+  let docs_label = match copy.locale {
+    Locale::En => "Docs",
+    Locale::Zh => "使用文档",
+  };
+  let docs_short_label = match copy.locale {
+    Locale::En => "Docs",
+    Locale::Zh => "文档",
+  };
+  let changelog_label = DocSlug::Changelog.nav_label(copy.locale);
+
   writeln!(html, "  <header class=\"topbar\">")?;
   writeln!(html, "    <div class=\"shell topbar-inner\">")?;
   writeln!(html, "      <a class=\"brand\" href=\"{}\">", copy.locale.canonical_path())?;
@@ -343,9 +356,16 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "        <a href=\"#compatibility\">{}</a>", escape_html(copy.nav_compatibility))?;
   writeln!(html, "        <a href=\"#compare\">{}</a>", escape_html(copy.nav_compare))?;
   writeln!(html, "        <a href=\"#faq\">{}</a>", escape_html(copy.nav_faq))?;
+  writeln!(html, "        <a href=\"{docs_root}\">{}</a>", escape_html(docs_label))?;
+  writeln!(html, "        <a href=\"{changelog_path}\">{}</a>", escape_html(changelog_label))?;
   writeln!(html, "        <a href=\"#install\">{}</a>", escape_html(copy.nav_install))?;
   writeln!(html, "      </nav>")?;
   writeln!(html, "      <div class=\"topbar-actions\">")?;
+  writeln!(
+    html,
+    "        <a class=\"control-btn mobile-docs-btn\" href=\"{docs_root}\">{}</a>",
+    escape_html(docs_short_label)
+  )?;
   writeln!(
     html,
     "        <a class=\"control-btn\" href=\"{}\">{}</a>",
@@ -1045,20 +1065,39 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "  </main>")?;
 
   // Footer
+  render_footer(&mut html, copy, copy.locale.alternate_path())?;
+
+  writeln!(html, "  <script src=\"/assets/site.js\" defer></script>")?;
+  writeln!(html, "</body>")?;
+  writeln!(html, "</html>")?;
+
+  Ok(html)
+}
+
+fn alternate_locale(locale: Locale) -> Locale {
+  match locale {
+    Locale::En => Locale::Zh,
+    Locale::Zh => Locale::En,
+  }
+}
+
+fn render_footer(
+  html: &mut String,
+  copy: &PageCopy,
+  alternate_href: &str,
+) -> Result<(), std::fmt::Error> {
   writeln!(html, "  <footer class=\"site-footer\">")?;
   writeln!(html, "    <div class=\"shell footer-inner\">")?;
   writeln!(html, "      <span>{}</span>", escape_html(copy.footer_summary))?;
   writeln!(html, "      <div class=\"footer-links\">")?;
-  writeln!(
-    html,
-    "        <a href=\"{REPO_URL}/blob/main/docs/user-manual.md\">{}</a>",
-    escape_html(copy.footer_manual)
-  )?;
-  writeln!(
-    html,
-    "        <a href=\"{REPO_URL}/blob/main/rfcs/agent-cli.md\">{}</a>",
-    escape_html(copy.footer_cli_rfc)
-  )?;
+  for slug in ALL_DOC_SLUGS {
+    writeln!(
+      html,
+      "        <a href=\"{}\">{}</a>",
+      slug.path(copy.locale),
+      escape_html(slug.nav_label(copy.locale))
+    )?;
+  }
   writeln!(
     html,
     "        <a href=\"{REPO_URL}/releases\">{}</a>",
@@ -1073,17 +1112,626 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(
     html,
     "        <a href=\"{}\">{}</a>",
-    copy.locale.alternate_path(),
+    escape_html(alternate_href),
     escape_html(copy.locale.alternate_label())
   )?;
   writeln!(html, "      </div>")?;
   writeln!(html, "    </div>")?;
-  writeln!(html, "  </footer>")?;
+  writeln!(html, "  </footer>")
+}
+
+fn highlight_doc_code(raw: &str) -> String {
+  let mut out = String::with_capacity(raw.len() + 128);
+  for (index, line) in raw.lines().enumerate() {
+    if index > 0 {
+      out.push('\n');
+    }
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+      let _ = write!(out, "<span class=\"code-comment\">{}</span>", escape_html(line));
+    } else if let Some(rest) = line.strip_prefix("$ ") {
+      let _ = write!(
+        out,
+        "<span class=\"tok-prompt\">$</span> <span class=\"tok-cmd\">{}</span>",
+        escape_html(rest)
+      );
+    } else {
+      out.push_str(&escape_html(line));
+    }
+  }
+  out
+}
+
+fn render_doc_structured_data(
+  page: &DocPage,
+  canonical_url: &str,
+  og_image_url: &str,
+) -> Result<String, std::fmt::Error> {
+  let home_url = format!("{SITE_ORIGIN}{}", page.locale.canonical_path());
+  let home_name = match page.locale {
+    Locale::En => "DataOmni",
+    Locale::Zh => "DataOmni 首页",
+  };
+  let docs_url = format!("{SITE_ORIGIN}{}", DocSlug::Quickstart.path(page.locale));
+
+  let mut json = String::with_capacity(2048);
+  write!(json, "{{\"@context\":\"https://schema.org\",\"@graph\":[")?;
+  write!(
+    json,
+    "{{\"@type\":\"WebSite\",\"@id\":\"{SITE_ORIGIN}/#website\",\"name\":\"DataOmni\",\"alternateName\":\"DataOmni Database Client\",\"url\":\"{SITE_ORIGIN}/\",\"inLanguage\":[\"en\",\"zh-CN\"]}},"
+  )?;
+  write!(json, "{{\"@type\":\"BreadcrumbList\",\"itemListElement\":[")?;
+  write!(
+    json,
+    "{{\"@type\":\"ListItem\",\"position\":1,\"name\":\"{}\",\"item\":\"{}\"}},",
+    escape_json_str(home_name),
+    escape_json_str(&home_url)
+  )?;
+  if page.slug.is_changelog() {
+    write!(
+      json,
+      "{{\"@type\":\"ListItem\",\"position\":2,\"name\":\"{}\",\"item\":\"{}\"}}",
+      escape_json_str(page.title),
+      escape_json_str(canonical_url)
+    )?;
+  } else {
+    write!(
+      json,
+      "{{\"@type\":\"ListItem\",\"position\":2,\"name\":\"{}\",\"item\":\"{}\"}},{{\"@type\":\"ListItem\",\"position\":3,\"name\":\"{}\",\"item\":\"{}\"}}",
+      escape_json_str(page.breadcrumb_group),
+      escape_json_str(&docs_url),
+      escape_json_str(page.title),
+      escape_json_str(canonical_url)
+    )?;
+  }
+  write!(json, "]}},")?;
+  write!(
+    json,
+    "{{\"@type\":\"TechArticle\",\"headline\":\"{}\",\"description\":\"{}\",\"url\":\"{}\",\"inLanguage\":\"{}\",\"image\":\"{}\",\"dateModified\":\"2026-11-17\",\"author\":{{\"@type\":\"Organization\",\"name\":\"DataOmni\",\"url\":\"{REPO_URL}\"}},\"about\":{{\"@id\":\"{SITE_ORIGIN}/#software\"}}}}",
+    escape_json_str(page.title),
+    escape_json_str(page.meta_description),
+    escape_json_str(canonical_url),
+    escape_json_str(page.locale.html_lang()),
+    escape_json_str(og_image_url),
+  )?;
+  write!(json, "]}}")?;
+  Ok(json)
+}
+
+pub fn render_doc_page(page: &DocPage, version: &str) -> Result<String, std::fmt::Error> {
+  let copy = match page.locale {
+    Locale::En => &EN_COPY,
+    Locale::Zh => &ZH_COPY,
+  };
+  let alt_locale = alternate_locale(page.locale);
+  let en_path = page.slug.path(Locale::En);
+  let zh_path = page.slug.path(Locale::Zh);
+  let canonical_path = page.slug.path(page.locale);
+  let alternate_path = page.slug.path(alt_locale);
+  let canonical_url = format!("{SITE_ORIGIN}{canonical_path}");
+  let og_image_url = format!("{SITE_ORIGIN}{}", page.locale.og_image_path());
+  let structured_data = render_doc_structured_data(page, &canonical_url, &og_image_url)?;
+  let install_href = format!("{}#install", page.locale.canonical_path());
+  let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
+
+  let mut html = String::with_capacity(40_960);
+  writeln!(html, "<!DOCTYPE html>")?;
+  writeln!(html, "<html lang=\"{}\">", page.locale.html_lang())?;
+  writeln!(html, "<head>")?;
+  writeln!(html, "  <meta charset=\"utf-8\">")?;
+  writeln!(html, "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")?;
+  writeln!(html, "  <title>{}</title>", escape_html(page.meta_title))?;
+  writeln!(
+    html,
+    "  <meta name=\"description\" content=\"{}\">",
+    escape_html(page.meta_description)
+  )?;
+  writeln!(html, "  <link rel=\"canonical\" href=\"{}\">", escape_html(&canonical_url))?;
+  writeln!(html, "  <link rel=\"alternate\" hreflang=\"en\" href=\"{SITE_ORIGIN}{en_path}\">")?;
+  writeln!(html, "  <link rel=\"alternate\" hreflang=\"zh-CN\" href=\"{SITE_ORIGIN}{zh_path}\">")?;
+  writeln!(
+    html,
+    "  <link rel=\"alternate\" hreflang=\"x-default\" href=\"{SITE_ORIGIN}{en_path}\">"
+  )?;
+  writeln!(html, "  <meta property=\"og:type\" content=\"article\">")?;
+  writeln!(html, "  <meta property=\"og:site_name\" content=\"DataOmni\">")?;
+  writeln!(html, "  <meta property=\"og:locale\" content=\"{}\">", page.locale.og_locale())?;
+  writeln!(
+    html,
+    "  <meta property=\"og:locale:alternate\" content=\"{}\">",
+    page.locale.og_alternate_locale()
+  )?;
+  writeln!(html, "  <meta property=\"og:title\" content=\"{}\">", escape_html(page.meta_title))?;
+  writeln!(
+    html,
+    "  <meta property=\"og:description\" content=\"{}\">",
+    escape_html(page.meta_description)
+  )?;
+  writeln!(html, "  <meta property=\"og:url\" content=\"{}\">", escape_html(&canonical_url))?;
+  writeln!(html, "  <meta property=\"og:image\" content=\"{}\">", escape_html(&og_image_url))?;
+  writeln!(html, "  <meta property=\"og:image:type\" content=\"image/png\">")?;
+  writeln!(html, "  <meta property=\"og:image:width\" content=\"1200\">")?;
+  writeln!(html, "  <meta property=\"og:image:height\" content=\"630\">")?;
+  writeln!(
+    html,
+    "  <meta property=\"og:image:alt\" content=\"{}\">",
+    escape_html(copy.og_image_alt)
+  )?;
+  writeln!(html, "  <meta name=\"twitter:card\" content=\"summary_large_image\">")?;
+  writeln!(html, "  <meta name=\"twitter:title\" content=\"{}\">", escape_html(page.meta_title))?;
+  writeln!(
+    html,
+    "  <meta name=\"twitter:description\" content=\"{}\">",
+    escape_html(page.meta_description)
+  )?;
+  writeln!(html, "  <meta name=\"twitter:image\" content=\"{}\">", escape_html(&og_image_url))?;
+  writeln!(
+    html,
+    "  <meta name=\"twitter:image:alt\" content=\"{}\">",
+    escape_html(copy.og_image_alt)
+  )?;
+  writeln!(html, "  <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\">")?;
+  writeln!(
+    html,
+    "  <link rel=\"icon\" type=\"image/png\" sizes=\"96x96\" href=\"/assets/favicon-96.png\">"
+  )?;
+  writeln!(
+    html,
+    "  <link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/assets/favicon-32.png\">"
+  )?;
+  writeln!(
+    html,
+    "  <link rel=\"apple-touch-icon\" sizes=\"256x256\" href=\"/assets/icon-256.png\">"
+  )?;
+  writeln!(html, "  <script type=\"application/ld+json\">{structured_data}</script>")?;
+  writeln!(html, "  <script>")?;
+  writeln!(
+    html,
+    "    try {{ const s = localStorage.getItem('dataomni-site-theme'); const d = s ? s === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches; if (d) document.documentElement.setAttribute('data-theme', 'dark'); }} catch {{}}"
+  )?;
+  writeln!(html, "  </script>")?;
+  writeln!(html, "  <link rel=\"stylesheet\" href=\"/assets/style.css\">")?;
+  writeln!(html, "</head>")?;
+  writeln!(html, "<body>")?;
+  writeln!(
+    html,
+    "  <a class=\"skip-link\" href=\"#main\">{}</a>",
+    escape_html(copy.skip_to_content)
+  )?;
+
+  // Topbar
+  writeln!(html, "  <header class=\"topbar\">")?;
+  writeln!(html, "    <div class=\"shell topbar-inner\">")?;
+  writeln!(html, "      <a class=\"brand\" href=\"{}\">", page.locale.canonical_path())?;
+  writeln!(
+    html,
+    "        <img class=\"brand-icon\" src=\"/assets/icon-256.png\" alt=\"DataOmni icon\" width=\"28\" height=\"28\">"
+  )?;
+  writeln!(html, "        <span>DataOmni</span>")?;
+  writeln!(html, "        <span class=\"version-pill\">v{}</span>", escape_html(version))?;
+  writeln!(html, "      </a>")?;
+  writeln!(html, "      <nav class=\"topnav\" aria-label=\"Primary\">")?;
+  for slug in ALL_DOC_SLUGS {
+    let current = if *slug == page.slug { " aria-current=\"page\"" } else { "" };
+    writeln!(
+      html,
+      "        <a href=\"{}\"{current}>{}</a>",
+      slug.path(page.locale),
+      escape_html(slug.nav_label(page.locale))
+    )?;
+  }
+  writeln!(html, "        <a href=\"{install_href}\">{}</a>", escape_html(copy.nav_install))?;
+  writeln!(html, "      </nav>")?;
+  writeln!(html, "      <div class=\"topbar-actions\">")?;
+  writeln!(
+    html,
+    "        <a class=\"control-btn\" href=\"{alternate_path}\">{}</a>",
+    escape_html(page.locale.alternate_label())
+  )?;
+  writeln!(
+    html,
+    "        <button id=\"theme-toggle\" class=\"control-btn\" type=\"button\" aria-pressed=\"false\" data-label-light=\"{}\" data-label-dark=\"{}\">{}</button>",
+    escape_html(copy.theme_light),
+    escape_html(copy.theme_dark),
+    escape_html(copy.theme_dark)
+  )?;
+  writeln!(
+    html,
+    "        <a class=\"control-btn\" href=\"{REPO_URL}\" rel=\"noopener\">GitHub</a>"
+  )?;
+  writeln!(html, "      </div>")?;
+  writeln!(html, "    </div>")?;
+  writeln!(html, "  </header>")?;
+
+  // Main Documentation Shell
+  let sidebar_aria = match page.locale {
+    Locale::En => "Documentation pages",
+    Locale::Zh => "文档页面导航",
+  };
+  let home_crumb = match page.locale {
+    Locale::En => "Home",
+    Locale::Zh => "首页",
+  };
+
+  writeln!(html, "  <main id=\"main\" class=\"docs-main\">")?;
+  writeln!(html, "    <div class=\"shell docs-layout\">")?;
+  writeln!(html, "      <aside class=\"docs-sidebar\">")?;
+  writeln!(
+    html,
+    "        <nav class=\"docs-page-nav\" aria-label=\"{}\">",
+    escape_html(sidebar_aria)
+  )?;
+  for slug in ALL_DOC_SLUGS {
+    let current = if *slug == page.slug { " aria-current=\"page\"" } else { "" };
+    writeln!(
+      html,
+      "          <a class=\"docs-nav-link\" href=\"{}\"{current}>{}</a>",
+      slug.path(page.locale),
+      escape_html(slug.nav_label(page.locale))
+    )?;
+  }
+  writeln!(html, "        </nav>")?;
+
+  writeln!(
+    html,
+    "        <nav class=\"docs-toc\" aria-label=\"{}\">",
+    escape_html(page.toc_heading)
+  )?;
+  writeln!(html, "          <p class=\"docs-toc-title\">{}</p>", escape_html(page.toc_heading))?;
+  writeln!(html, "          <ul class=\"docs-toc-list\">")?;
+  for section in page.sections {
+    writeln!(
+      html,
+      "            <li><a href=\"#{}\">{}</a></li>",
+      escape_html(section.id),
+      escape_html(section.toc_label)
+    )?;
+  }
+  writeln!(html, "          </ul>")?;
+  writeln!(html, "        </nav>")?;
+  writeln!(html, "      </aside>")?;
+
+  writeln!(html, "      <article class=\"docs-article\">")?;
+  writeln!(html, "        <nav class=\"docs-breadcrumb\" aria-label=\"Breadcrumb\">")?;
+  writeln!(
+    html,
+    "          <a href=\"{}\">{}</a><span aria-hidden=\"true\">/</span>",
+    page.locale.canonical_path(),
+    escape_html(home_crumb)
+  )?;
+  if !page.slug.is_changelog() {
+    writeln!(
+      html,
+      "          <a href=\"{}\">{}</a><span aria-hidden=\"true\">/</span>",
+      DocSlug::Quickstart.path(page.locale),
+      escape_html(page.breadcrumb_group)
+    )?;
+  }
+  writeln!(html, "          <span aria-current=\"page\">{}</span>", escape_html(page.title))?;
+  writeln!(html, "        </nav>")?;
+
+  writeln!(html, "        <header class=\"docs-hero\">")?;
+  writeln!(html, "          <h1 class=\"docs-title\">{}</h1>", escape_html(page.title))?;
+  writeln!(html, "          <p class=\"docs-lead\">{}</p>", escape_html(page.lead))?;
+  writeln!(html, "        </header>")?;
+
+  for (sec_idx, section) in page.sections.iter().enumerate() {
+    writeln!(
+      html,
+      "        <section id=\"{}\" class=\"docs-section\" tabindex=\"-1\">",
+      escape_html(section.id)
+    )?;
+    writeln!(
+      html,
+      "          <h2 class=\"docs-h2\">{} <a class=\"docs-anchor\" href=\"#{}\" aria-label=\"{}\">#</a></h2>",
+      escape_html(section.heading),
+      escape_html(section.id),
+      escape_html(section.heading)
+    )?;
+
+    for (blk_idx, block) in section.blocks.iter().enumerate() {
+      match block {
+        DocBlock::Paragraph(text) => {
+          writeln!(html, "          <p class=\"docs-p\">{}</p>", escape_html(text))?;
+        }
+        DocBlock::Bullets(items) => {
+          writeln!(html, "          <ul class=\"docs-list\">")?;
+          for item in *items {
+            writeln!(html, "            <li>{}</li>", escape_html(item))?;
+          }
+          writeln!(html, "          </ul>")?;
+        }
+        DocBlock::Steps(steps) => {
+          writeln!(html, "          <ol class=\"docs-steps\">")?;
+          for (step_title, step_body) in *steps {
+            writeln!(html, "            <li>")?;
+            writeln!(
+              html,
+              "              <strong class=\"docs-step-title\">{}</strong>",
+              escape_html(step_title)
+            )?;
+            writeln!(html, "              <p>{}</p>", escape_html(step_body))?;
+            writeln!(html, "            </li>")?;
+          }
+          writeln!(html, "          </ol>")?;
+        }
+        DocBlock::Callout { tone, title, body } => {
+          let tone_class = match tone {
+            CalloutTone::Note => "docs-callout docs-callout-note",
+            CalloutTone::Guardrail => "docs-callout docs-callout-guardrail",
+          };
+          writeln!(html, "          <div class=\"{tone_class}\">")?;
+          writeln!(html, "            <p class=\"docs-callout-title\">{}</p>", escape_html(title))?;
+          writeln!(html, "            <p class=\"docs-callout-body\">{}</p>", escape_html(body))?;
+          writeln!(html, "          </div>")?;
+        }
+        DocBlock::Code { label, copy_text, raw_code } => {
+          writeln!(html, "          <div class=\"code-panel docs-code-panel\">")?;
+          writeln!(html, "            <div class=\"code-panel-bar\">")?;
+          writeln!(
+            html,
+            "              <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+            escape_html(label)
+          )?;
+          if let Some(copy_cmd) = copy_text {
+            writeln!(
+              html,
+              "              <button class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
+              escape_html(copy_cmd),
+              escape_html(copy.copy_label),
+              escape_html(copy.copied_label),
+              escape_html(copy.copy_label)
+            )?;
+          }
+          writeln!(html, "            </div>")?;
+          writeln!(html, "            <pre><code>{}</code></pre>", highlight_doc_code(raw_code))?;
+          writeln!(html, "          </div>")?;
+        }
+        DocBlock::Table { caption, headers, rows } => {
+          let cap_id = format!("tbl-{}-{sec_idx}-{blk_idx}", section.id);
+          writeln!(
+            html,
+            "          <div class=\"docs-table-wrap\" tabindex=\"0\" role=\"region\" aria-labelledby=\"{cap_id}\">"
+          )?;
+          writeln!(html, "            <table class=\"docs-table\">")?;
+          writeln!(
+            html,
+            "              <caption id=\"{cap_id}\" class=\"sr-only\">{}</caption>",
+            escape_html(caption)
+          )?;
+          writeln!(html, "              <thead>")?;
+          writeln!(html, "                <tr>")?;
+          for head in *headers {
+            writeln!(html, "                  <th scope=\"col\">{}</th>", escape_html(head))?;
+          }
+          writeln!(html, "                </tr>")?;
+          writeln!(html, "              </thead>")?;
+          writeln!(html, "              <tbody>")?;
+          for row in *rows {
+            writeln!(html, "                <tr>")?;
+            for (col_idx, cell) in row.iter().enumerate() {
+              if col_idx == 0 {
+                writeln!(
+                  html,
+                  "                  <th scope=\"row\" class=\"docs-row-head\">{}</th>",
+                  escape_html(cell)
+                )?;
+              } else {
+                writeln!(html, "                  <td>{}</td>", escape_html(cell))?;
+              }
+            }
+            writeln!(html, "                </tr>")?;
+          }
+          writeln!(html, "              </tbody>")?;
+          writeln!(html, "            </table>")?;
+          writeln!(html, "          </div>")?;
+        }
+        DocBlock::McpPresets => {
+          writeln!(html, "          <div class=\"code-panel docs-code-panel\">")?;
+          writeln!(html, "            <div class=\"code-panel-bar\">")?;
+          writeln!(
+            html,
+            "              <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+            escape_html(copy.agents_terminal_bar)
+          )?;
+          writeln!(html, "              <span class=\"env-pill-prod\">PROD HIDDEN</span>")?;
+          writeln!(html, "            </div>")?;
+          writeln!(html, "            <div class=\"mcp-switcher docs-mcp-switcher\">")?;
+          writeln!(html, "              <div class=\"mcp-switcher-head\">")?;
+          writeln!(
+            html,
+            "                <span class=\"mcp-switcher-note\">{}</span>",
+            escape_html(copy.agents_mcp_cmd_note)
+          )?;
+          writeln!(
+            html,
+            "                <div class=\"mcp-client-tabs\" role=\"group\" aria-label=\"{}\">",
+            escape_html(copy.agents_mcp_aria_label)
+          )?;
+          for (index, preset) in copy.mcp_presets.iter().enumerate() {
+            let pressed = if index == 0 { "true" } else { "false" };
+            writeln!(
+              html,
+              "                  <button class=\"mcp-client-tab\" type=\"button\" aria-pressed=\"{pressed}\" data-mcp-preset=\"{id}\" data-mcp-cmd=\"{cmd}\">{label}</button>",
+              pressed = pressed,
+              id = escape_html(preset.id),
+              cmd = escape_html(preset.command),
+              label = escape_html(preset.label),
+            )?;
+          }
+          writeln!(html, "                </div>")?;
+          writeln!(html, "              </div>")?;
+          writeln!(html, "              <div class=\"copy-cmd-row\">")?;
+          writeln!(
+            html,
+            "                <code id=\"mcp-cmd-display\">{}</code>",
+            escape_html(default_mcp_cmd)
+          )?;
+          writeln!(
+            html,
+            "                <button id=\"mcp-copy-btn\" class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
+            escape_html(default_mcp_cmd),
+            escape_html(copy.copy_label),
+            escape_html(copy.copied_label),
+            escape_html(copy.copy_label)
+          )?;
+          writeln!(html, "              </div>")?;
+          writeln!(html, "            </div>")?;
+          writeln!(html, "          </div>")?;
+        }
+        DocBlock::CompatibilityMatrix => {
+          writeln!(html, "          <div class=\"docs-ledger-box\">")?;
+          writeln!(html, "            <div class=\"ledger-controls\">")?;
+          writeln!(
+            html,
+            "              <div class=\"filter-group\" role=\"group\" aria-label=\"Database category\">"
+          )?;
+          writeln!(
+            html,
+            "                <button class=\"filter-btn\" type=\"button\" aria-pressed=\"true\" data-ledger-filter=\"all\">{}</button>",
+            escape_html(copy.filter_all)
+          )?;
+          writeln!(
+            html,
+            "                <button class=\"filter-btn\" type=\"button\" aria-pressed=\"false\" data-ledger-filter=\"relational\">{}</button>",
+            escape_html(copy.filter_relational)
+          )?;
+          writeln!(
+            html,
+            "                <button class=\"filter-btn\" type=\"button\" aria-pressed=\"false\" data-ledger-filter=\"workspace\">{}</button>",
+            escape_html(copy.filter_workspaces)
+          )?;
+          writeln!(html, "              </div>")?;
+          writeln!(html, "            </div>")?;
+          writeln!(
+            html,
+            "            <div class=\"ledger-wrap\" tabindex=\"0\" role=\"region\" aria-label=\"{}\">",
+            escape_html(copy.compatibility_heading)
+          )?;
+          writeln!(html, "              <table class=\"ledger-table\">")?;
+          writeln!(html, "                <thead>")?;
+          writeln!(html, "                  <tr>")?;
+          writeln!(
+            html,
+            "                    <th scope=\"col\">{}</th>",
+            escape_html(copy.col_server)
+          )?;
+          writeln!(
+            html,
+            "                    <th scope=\"col\">{}</th>",
+            escape_html(copy.col_version)
+          )?;
+          writeln!(
+            html,
+            "                    <th scope=\"col\">{}</th>",
+            escape_html(copy.col_driver)
+          )?;
+          writeln!(
+            html,
+            "                    <th scope=\"col\">{}</th>",
+            escape_html(copy.col_status)
+          )?;
+          writeln!(
+            html,
+            "                    <th scope=\"col\">{}</th>",
+            escape_html(copy.col_smoke)
+          )?;
+          writeln!(
+            html,
+            "                    <th scope=\"col\">{}</th>",
+            escape_html(copy.col_notes)
+          )?;
+          writeln!(html, "                  </tr>")?;
+          writeln!(html, "                </thead>")?;
+          writeln!(html, "                <tbody>")?;
+          for row in copy.servers {
+            let (status_class, status_label) = match row.level {
+              SupportLevel::Supported => ("status-ok", copy.status_supported),
+              SupportLevel::UsableWithGaps => ("status-gap", copy.status_gaps),
+            };
+            writeln!(html, "                  <tr data-ledger-kind=\"{}\">", row.kind.as_attr())?;
+            writeln!(
+              html,
+              "                    <td class=\"ledger-server\">{}</td>",
+              escape_html(row.server)
+            )?;
+            writeln!(
+              html,
+              "                    <td class=\"ledger-mono\">{}</td>",
+              escape_html(row.tested_version)
+            )?;
+            writeln!(
+              html,
+              "                    <td><span class=\"driver-chip\">{}</span></td>",
+              escape_html(row.connection_type)
+            )?;
+            writeln!(
+              html,
+              "                    <td><span class=\"{status_class}\">{}</span></td>",
+              escape_html(status_label)
+            )?;
+            write!(html, "                    <td class=\"ledger-mono\">")?;
+            render_smoke_counts(&mut html, row.smoke_counts)?;
+            writeln!(html, "</td>")?;
+            writeln!(
+              html,
+              "                    <td class=\"ledger-note\">{}</td>",
+              escape_html(row.notes)
+            )?;
+            writeln!(html, "                  </tr>")?;
+          }
+          writeln!(html, "                </tbody>")?;
+          writeln!(html, "              </table>")?;
+          writeln!(html, "            </div>")?;
+          writeln!(html, "          </div>")?;
+        }
+      }
+    }
+
+    writeln!(html, "        </section>")?;
+  }
+
+  // Prev / Next pager
+  let prev_word = match page.locale {
+    Locale::En => "Previous",
+    Locale::Zh => "上一篇",
+  };
+  let next_word = match page.locale {
+    Locale::En => "Next",
+    Locale::Zh => "下一篇",
+  };
+  writeln!(html, "        <nav class=\"docs-pager\" aria-label=\"Pagination\">")?;
+  if let Some(prev_slug) = page.slug.prev() {
+    writeln!(
+      html,
+      "          <a class=\"docs-pager-card\" href=\"{}\"><span class=\"docs-pager-dir\">{}</span><strong class=\"docs-pager-label\">{}</strong></a>",
+      prev_slug.path(page.locale),
+      escape_html(prev_word),
+      escape_html(prev_slug.nav_label(page.locale))
+    )?;
+  } else {
+    writeln!(html, "          <span></span>")?;
+  }
+  if let Some(next_slug) = page.slug.next() {
+    writeln!(
+      html,
+      "          <a class=\"docs-pager-card docs-pager-next\" href=\"{}\"><span class=\"docs-pager-dir\">{}</span><strong class=\"docs-pager-label\">{}</strong></a>",
+      next_slug.path(page.locale),
+      escape_html(next_word),
+      escape_html(next_slug.nav_label(page.locale))
+    )?;
+  }
+  writeln!(html, "        </nav>")?;
+
+  writeln!(html, "      </article>")?;
+  writeln!(html, "    </div>")?;
+  writeln!(html, "  </main>")?;
+
+  render_footer(&mut html, copy, alternate_path)?;
 
   writeln!(html, "  <script src=\"/assets/site.js\" defer></script>")?;
   writeln!(html, "</body>")?;
   writeln!(html, "</html>")?;
-
   Ok(html)
 }
 
@@ -1104,7 +1752,7 @@ pub fn render_not_found() -> &'static str {
   <main class=\"shell hero\">\n\
     <h1 class=\"hero-title\">Page not found (404)</h1>\n\
     <p class=\"hero-lead\">The requested path does not exist on dataomni.dev.</p>\n\
-    <p><a class=\"btn-primary\" href=\"/\">English home</a> <a class=\"btn-secondary\" href=\"/zh/\">中文首页</a></p>\n\
+    <p><a class=\"btn-primary\" href=\"/\">English home</a> <a class=\"btn-secondary\" href=\"/docs/quickstart/\">Documentation</a> <a class=\"btn-secondary\" href=\"/zh/\">中文首页</a></p>\n\
   </main>\n\
 </body>\n\
 </html>\n"
@@ -1115,7 +1763,7 @@ pub fn render_robots_txt() -> String {
 }
 
 pub fn render_sitemap_xml() -> String {
-  let mut xml = String::with_capacity(2048);
+  let mut xml = String::with_capacity(6144);
   let _ = writeln!(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
   let _ = writeln!(
     xml,
@@ -1145,6 +1793,33 @@ pub fn render_sitemap_xml() -> String {
     }
     let _ = writeln!(xml, "  </url>");
   }
+
+  for slug in ALL_DOC_SLUGS {
+    let en_url = format!("{SITE_ORIGIN}{}", slug.path(Locale::En));
+    let zh_url = format!("{SITE_ORIGIN}{}", slug.path(Locale::Zh));
+    for loc in [&en_url, &zh_url] {
+      let _ = writeln!(xml, "  <url>");
+      let _ = writeln!(xml, "    <loc>{}</loc>", escape_html(loc));
+      let _ = writeln!(xml, "    <lastmod>2026-11-17</lastmod>");
+      let _ = writeln!(
+        xml,
+        "    <xhtml:link rel=\"alternate\" hreflang=\"en\" href=\"{}\"/>",
+        escape_html(&en_url)
+      );
+      let _ = writeln!(
+        xml,
+        "    <xhtml:link rel=\"alternate\" hreflang=\"zh-CN\" href=\"{}\"/>",
+        escape_html(&zh_url)
+      );
+      let _ = writeln!(
+        xml,
+        "    <xhtml:link rel=\"alternate\" hreflang=\"x-default\" href=\"{}\"/>",
+        escape_html(&en_url)
+      );
+      let _ = writeln!(xml, "  </url>");
+    }
+  }
+
   let _ = writeln!(xml, "</urlset>");
   xml
 }

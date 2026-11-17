@@ -1,8 +1,12 @@
 mod content;
+mod docs;
 mod render;
 
-use content::{EN_COPY, ZH_COPY};
-use render::{render_not_found, render_page, render_robots_txt, render_sitemap_xml};
+use content::{Locale, EN_COPY, ZH_COPY};
+use docs::{doc_page, ALL_DOC_SLUGS};
+use render::{
+  render_doc_page, render_not_found, render_page, render_robots_txt, render_sitemap_xml,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -78,9 +82,10 @@ fn write_checked(path: &Path, contents: &str) -> Result<(), String> {
 
 pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Result<(), String> {
   let high_priority_count = html.matches("fetchpriority=\"high\"").count();
-  if page_name != "404.html" && high_priority_count != 1 {
+  let expected_high_priority = usize::from(matches!(page_name, "index.html" | "zh/index.html"));
+  if high_priority_count != expected_high_priority {
     return Err(format!(
-      "{page_name}: expected exactly 1 fetchpriority=\"high\" LCP image, found {high_priority_count}"
+      "{page_name}: expected {expected_high_priority} fetchpriority=\"high\" LCP image(s), found {high_priority_count}"
     ));
   }
 
@@ -217,6 +222,53 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     og_scan = &after[end + 1..];
   }
 
+  // Every internal page route href="/..." must resolve to a generated HTML page (and fragment if any)
+  let mut route_scan = html;
+  while let Some(pos) = route_scan.find("href=\"/") {
+    let after = &route_scan[pos + "href=\"".len()..];
+    let Some(end) = after.find('"') else {
+      return Err(format!("{page_name}: unclosed root-relative href"));
+    };
+    let raw_href = &after[..end];
+    if !raw_href.starts_with("/favicon.ico")
+      && !raw_href.starts_with("/assets/")
+      && !raw_href.starts_with("/images/")
+    {
+      let (route_path, fragment) = match raw_href.split_once('#') {
+        Some((path, frag)) => (path, Some(frag)),
+        None => (raw_href, None),
+      };
+      if !route_path.ends_with('/') {
+        return Err(format!(
+          "{page_name}: internal route href `{raw_href}` must end with trailing slash `/`"
+        ));
+      }
+      let trimmed = route_path.trim_matches('/');
+      let target_html = if trimmed.is_empty() {
+        out_dir.join("index.html")
+      } else {
+        out_dir.join(trimmed).join("index.html")
+      };
+      if !target_html.is_file() {
+        return Err(format!(
+          "{page_name}: internal route `{raw_href}` does not exist at {}",
+          target_html.display()
+        ));
+      }
+      if let Some(frag) = fragment {
+        let target_contents = fs::read_to_string(&target_html)
+          .map_err(|err| format!("failed to read {}: {err}", target_html.display()))?;
+        if frag.is_empty() || !target_contents.contains(&format!("id=\"{frag}\"")) {
+          return Err(format!(
+            "{page_name}: cross-page anchor `{raw_href}` missing id=\"{frag}\" in {}",
+            target_html.display()
+          ));
+        }
+      }
+    }
+    route_scan = &after[end + 1..];
+  }
+
   Ok(())
 }
 
@@ -262,6 +314,17 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
     render_page(&ZH_COPY, &version).map_err(|err| format!("render ZH failed: {err}"))?;
   let not_found_html = render_not_found();
 
+  let mut generated_docs: Vec<(&'static str, String)> = Vec::with_capacity(ALL_DOC_SLUGS.len() * 2);
+  for slug in ALL_DOC_SLUGS {
+    for locale in [Locale::En, Locale::Zh] {
+      let rel = slug.output_rel_html(locale);
+      let html = render_doc_page(doc_page(*slug, locale), &version)
+        .map_err(|err| format!("render {rel} failed: {err}"))?;
+      write_checked(&out_dir.join(rel), &html)?;
+      generated_docs.push((rel, html));
+    }
+  }
+
   write_checked(&out_dir.join("index.html"), &en_html)?;
   write_checked(&out_dir.join("zh/index.html"), &zh_html)?;
   write_checked(&out_dir.join("404.html"), not_found_html)?;
@@ -273,6 +336,9 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
   verify_html_invariants("index.html", &en_html, out_dir)?;
   verify_html_invariants("zh/index.html", &zh_html, out_dir)?;
   verify_html_invariants("404.html", not_found_html, out_dir)?;
+  for (rel, html) in &generated_docs {
+    verify_html_invariants(rel, html, out_dir)?;
+  }
 
   Ok(version)
 }
@@ -437,6 +503,66 @@ mod tests {
     let heading_in_summary =
       en.replace("<summary class=\"faq-summary\">", "<summary class=\"faq-summary\"><h3>");
     assert!(verify_html_invariants("index.html", &heading_in_summary, &temp_dir).is_err());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+  }
+
+  #[test]
+  fn builds_bilingual_docs_and_changelog_pages_and_verifies_cross_links() {
+    let repo_root = repo_root_from_manifest().unwrap();
+    let temp_dir =
+      std::env::temp_dir().join(format!("dataomni-site-docs-test-{}", std::process::id()));
+    let _version = build_site(&repo_root, &temp_dir).unwrap();
+
+    let expected_pages = [
+      ("docs/quickstart/index.html", "/zh/docs/quickstart/"),
+      ("zh/docs/quickstart/index.html", "/docs/quickstart/"),
+      ("docs/mcp/index.html", "/zh/docs/mcp/"),
+      ("zh/docs/mcp/index.html", "/docs/mcp/"),
+      ("docs/cli/index.html", "/zh/docs/cli/"),
+      ("zh/docs/cli/index.html", "/docs/cli/"),
+      ("docs/databases/index.html", "/zh/docs/databases/"),
+      ("zh/docs/databases/index.html", "/docs/databases/"),
+      ("changelog/index.html", "/zh/changelog/"),
+      ("zh/changelog/index.html", "/changelog/"),
+    ];
+
+    let sitemap = fs::read_to_string(temp_dir.join("sitemap.xml")).unwrap();
+    for (rel_html, alternate_href) in expected_pages {
+      let path = temp_dir.join(rel_html);
+      assert!(path.is_file(), "missing generated page {rel_html}");
+      let html = fs::read_to_string(&path).unwrap();
+      assert!(html.contains("\"@type\":\"BreadcrumbList\""), "{rel_html}: missing BreadcrumbList");
+      assert!(html.contains("\"@type\":\"TechArticle\""), "{rel_html}: missing TechArticle");
+      assert!(html.contains("aria-current=\"page\""), "{rel_html}: missing aria-current");
+      assert!(
+        html.contains(&format!("href=\"{alternate_href}\"")),
+        "{rel_html}: missing exact locale switch {alternate_href}"
+      );
+      assert!(!html.contains("yuxuetr"), "{rel_html}: stale owner reference");
+    }
+
+    for url in [
+      "https://dataomni.dev/docs/quickstart/",
+      "https://dataomni.dev/zh/docs/quickstart/",
+      "https://dataomni.dev/docs/mcp/",
+      "https://dataomni.dev/zh/docs/mcp/",
+      "https://dataomni.dev/docs/cli/",
+      "https://dataomni.dev/zh/docs/cli/",
+      "https://dataomni.dev/docs/databases/",
+      "https://dataomni.dev/zh/docs/databases/",
+      "https://dataomni.dev/changelog/",
+      "https://dataomni.dev/zh/changelog/",
+    ] {
+      assert!(sitemap.contains(&format!("<loc>{url}</loc>")), "sitemap missing {url}");
+    }
+
+    // Reverse check: broken internal route link or cross-page anchor must fail verify_html_invariants
+    let mcp_en = fs::read_to_string(temp_dir.join("docs/mcp/index.html")).unwrap();
+    let broken_route = mcp_en.replace("href=\"/docs/cli/\"", "href=\"/docs/nonexistent/\"");
+    assert!(verify_html_invariants("docs/mcp/index.html", &broken_route, &temp_dir).is_err());
+    let broken_cross_anchor = mcp_en.replace("href=\"/#install\"", "href=\"/#nonexistent-anchor\"");
+    assert!(verify_html_invariants("docs/mcp/index.html", &broken_cross_anchor, &temp_dir).is_err());
 
     let _ = fs::remove_dir_all(&temp_dir);
   }
