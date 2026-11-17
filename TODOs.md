@@ -26,6 +26,8 @@
 | P7 | 更多数据库：国产库与云库 | [-] OceanBase、openGauss 完成；KingbaseES 缺安装包；B3 不做；B4 按触发条件 |
 | 加固 | 依赖与前端安全边界、持续真库回归、发布与文档一致性（2026-11-08 / 11-09 两轮评估） | [x] QS1–QS6、QT1–QT5、QR1–QR2、PA1–PA8 全部完成 |
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] v0.6.0 已发布（2026-10-07，tag 重打在 2b62b5f，含 R6、R7-mac 的修正）；v0.6.1 已发布（2026-10-07，2bf2499，R7-linux 的修正；CI 里 Windows 0.6.0 → 0.6.1 升级通过）；R5 的 CI 部分与 R6 完成；R7 的 macOS 与 Linux 部分完成；R7 Windows 2026-10-14 完成；R5 人工项 2026-11-05 完成；`v1.0.0` 2026-11-05 发布 |
+| v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [-] U1、C1、D3、D2、C2 完成，`v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev`（含多 Agent 预设与 GSC 技术 SEO，`10d0872`）2026-11-17 上线；U2 winget（`#481999`）与搜索引擎收录外部推进中 |
+| v1.2 路线 | 扫清遗留、巩固稳定、官网文档与实用扩展（`rfcs/roadmap-1.2.md`） | [ ] 2026-11-17 定稿：严格按 S（扫清遗留）→ V（巩固验证）→ W（官网文档）→ E（实用扩展）顺序推进 |
 
 ---
 
@@ -347,6 +349,69 @@
   - 2026-11-17 更新：仓库迁移至 `dataomni-rs/DataOmni` 且官网 `https://dataomni.dev` 上线后，核实 `microsoft/winget-pkgs` 尚未收录旧名，将脚本与目录切换为 `DataOmni.DataOmni`（`manifests/d/DataOmni/DataOmni/1.1.0/`）；补充自动拆包提取 MSI `ProductCode`（`{75E35511-46C9-4B86-B5E1-2D4778A0E8E5}`）、`UpgradeCode`（`{391132B7-CBE4-52A0-93F4-8A125AC67486}`）、NSIS `ProductCode`（`DataOmni`）与 ARP `Publisher`（`dataomni`），经官方 1.10.0 JSON Schema 正反校验后提交上游 PR `microsoft/winget-pkgs#481999`。
 - 到社区发帖由用户自己做。
 - 路线第 2 条里的「已有库的 ER 图」早已实现（`9b63f19`），路线文档那条是旧的。
+
+---
+
+## v1.2 路线：扫清遗留、巩固稳定与实用扩展（2026-11-17 定）
+
+规划、理由与「明确不做」见 `rfcs/roadmap-1.2.md`。在途外部事项（GSC / Bing 提交、winget 上游审核、Apple Developer ID 审批）由用户并行推进；仓内研发严格遵守**「实用、好用、易用、功能稳定」**总纲，按 **S → V → W → E** 四阶段顺序执行，前一阶段阻塞问题未清零不开下一阶段新功能。
+
+### 第一阶段（S）：扫清技术债与工程遗留
+
+- [ ] S0 `TODOs.md` 第三次归档（当前已超 100 KB 归档阈值）
+  - 把已验收完成的 `v1.0`、`1.x`（已结项条目）、`QS/QT/QR`、`PA1–PA8`、`G1–G13` 原样归档至 `docs/archive/TODOs-2026-11-17.md`，同步更新 `AGENTS.md` 权威来源表；`TODOs.md` 只保留在途项、未触发重估条件的保留项与本路线任务。
+- [ ] S1 移除后端残留的 `tauri-plugin-sql`（收口 `2.4` 与 `QS5`）
+  - 现状：前端已零 `sql:*` 权限，后端仅借用 `tauri_plugin_sql::{DbPool, DbInstances}` 存连接池，却把 `plugin:sql|*` 命令留在二进制里。
+  - 做法：`services/sqlx_pool.rs` 定义本地 `SqlxPool` 并复用 `PoolRegistry` 替换 `DbInstances`；从 `src-tauri/Cargo.toml` 与 `src-tauri/src/lib.rs` 移除 `tauri-plugin-sql`，删除 `database_smoke.rs` 中扫描 `Cargo.lock` 盯防插件版本的测试，关结下方 `2.4` 旧条目。
+  - 验收：`bun run check`、`bun run rust:clippy:no-ai`、`bun run rust:audit` 及 SQLite 真库冒烟全过。
+- [ ] S2 解耦官网公开版本号与开发期 `src-tauri/tauri.conf.json`，消除发版窗口期 404 隐患
+  - 现状：`site/src/main.rs` 直接读 `tauri.conf.json` 的 `version` 拼 GitHub Releases 下载地址，且 `.github/workflows/site.yml` 监听该文件推送自动上线；下次升开发版本号而草稿 Release 尚未点 Publish 时，官网下载按钮会提前指向未公开 tag 返回 404。
+  - 做法：为 `site/` 引入独立的已公开发布版本配置源，从 `site.yml` 的 push 监听路径摘除 `src-tauri/tauri.conf.json`，支持在 Release `published` 后更新部署，并补单测钉住版本校验。
+- [ ] S3 补齐包元数据与应用内「官网 / 问题反馈」直达入口
+  - `src-tauri/Cargo.toml` 补齐 `license = "MIT"`、`homepage = "https://dataomni.dev"`、`repository = "https://github.com/dataomni-rs/DataOmni"`（`tauri.conf.json` 的 `bundle.publisher` 在 `microsoft/winget-pkgs#481999` 合入前保持不动，留待下次发版连同 `scripts/winget-manifest.sh` 对齐）。
+  - 设置「关于与诊断」（`src/components/AboutSection.tsx`）与 macOS `Help` 菜单（`src-tauri/src/app_menu.rs`）补充「官方网站（`dataomni.dev`）」与「问题反馈（GitHub Issues）」入口，走后端受控 `open_url`，前端权限条数保持 5 条不变，渲染核对中英界面。
+- [ ] S4 外部渠道落地后的仓内同步（事件触发即收口）
+  - WinGet：`microsoft/winget-pkgs#481999` 合入后，在 `site/` Windows 卡片、`README.md` 与 `README.en.md` 补上 `winget install DataOmni.DataOmni`，勾选 `U2`。
+  - macOS 签名公证与 Homebrew：视 Apple Developer ID 进展接入 `release.yml` 签名公证与 `Homebrew/homebrew-cask`（或启用 `dataomni-rs/homebrew-tap` 兜底），同步更新官网 macOS 安装提示。
+
+### 第二阶段（V）：巩固稳定已有功能（跨平台与真库闭环）
+
+- [ ] V1 Windows 与 Linux 打包版 `v1.1.0` 增量能力实机闭环（补齐 `C2`、`QS5`、`QS6` 留待项）
+  - 在 Linux（WebKitGTK 桌面容器，deb/rpm）与 Windows 11（WebView2，MSI/NSIS）打包产物上逐项验证：
+    1. SQLite 经后端连接池打开、对象树与结构页读取、编辑提交、多句柄独立关闭、缺失路径不误建空文件；
+    2. 开启严格 CSP 后，编辑器、ER 图 PNG 导出、四大 NoSQL 工作区及更新检查正常，`dataomni.log` 零 CSP 报错；
+    3. 打包二进制执行 `dataomni mcp` 经 stdio 跑通只读查询、写语句 `refused` 与生产库 `not_found`。
+- [ ] V2 DuckDB 与 Oracle 23ai 真库补验绑定参数及结构比对（补齐 `D2`、`D3` 留待项）
+  - DuckDB：接入 `scripts/schema-diff-verify.sh`（或独立真库往返测试），验证两个 DuckDB 库比对与同步脚本执行后再比为空，含 `--skip-kind` 反向验证。
+  - Oracle 23ai Free：容器真库验证 `D2` `:name` 绑定参数（含 `q'[...]'` 字面量排除、NULL/数字绑定、报错参数名还原）及 `D3` `is_constraint` 目录查询与结构比对往返，纳入 `oracle_smoke.rs`。
+- [ ] V3 持续真库回归（Nightly Smoke）稳定性收口（跟进 `QT3`）
+  - 跟踪 `.github/workflows/nightly-databases.yml` 连续四周定时运行记录；按服务端真实能力裁剪兼容库上的不支持类型夹具（如 CockroachDB / openGauss 的 `INT[][]`、`XML`），确保「红 = 真实退化」。
+- [ ] V4 日常高频交互稳态巡检
+  - 实机复核 `PA2` 工作区快照防抖：连续打字、切标签、直接退出重开后草稿零丢失。
+  - 复核网络闪断 / SSH 跳板机重启后，在表数据页提交修改或导出失败时的错误提示与重连引导（对应 `R6` 观察项；提示不足以引导重连时补明确重连入口）。
+
+### 第三阶段（W）：官网实用文档体系（`dataomni.dev` 易用性承接）
+
+- [ ] W1 `site/` 纯 Rust 静态生成器扩展多页文档布局（不引入第三方前端框架）
+  - 新增文档共用布局（顶栏、侧边目录、标题锚点、代码块语法高亮与一键复制、中英对应页互跳），自动纳入 `sitemap.xml`、`BreadcrumbList` / `TechArticle` JSON-LD 与 `verify_html_invariants` 死链/长度门禁，双主题桌面与移动端渲染核对。
+- [ ] W2 上线首批 4 篇核心双语实用文档页（内容与当前代码逐字对齐）
+  - `/docs/quickstart/`（及 `/zh/docs/quickstart/`）：三平台安装、系统钥匙串授权、SSH 跳板机与 TLS 四档含义、生产环境护栏与单事务提交流程；
+  - `/docs/mcp/`（及 `/zh/docs/mcp/`）：只读 Agent 访问开启、生产库物理隔离机制、7 种主流 AI 编程工具配置与排错；
+  - `/docs/cli/`（及 `/zh/docs/cli/`）：`dataomni` 命令行配置、SQL 与四大 NoSQL 只读命令、JSON 输出与退出码（`0`–`4`）速查；
+  - `/docs/databases/`（及 `/zh/docs/databases/`）：17 种数据库连接指南（Oracle 内置驱动免配、openGauss sha256 转发、DuckDB 直查 Parquet/JSON、MySQL 5.7 TLS）与完整真库兼容性矩阵。
+- [ ] W3 上线 `/changelog/`（及 `/zh/changelog/`）双语版本更新记录页
+  - 呈现 `v1.0.0`、`v1.1.0` 及后续版本的实用改进与兼容性说明，打通官网导航与应用更新提示。
+- [ ] W4 外部技术生态目录标准材料就绪
+  - 备齐提交 MCP 目录（`modelcontextprotocol/servers`、Smithery、Glama）与 `awesome-tauri` / `awesome-rust` 所需的英文简介、安全边界说明与标准配置示例。
+
+### 第四阶段（E）：审慎扩展高价值实用能力（`v1.2.0` 候选池，前置 S + V 清零后开启）
+
+- [ ] E1 从主流客户端导入连接配置（Navicat `.ncx` / DBeaver `data-sources.json`）
+  - 先写最小设计说明：只解析连接名、库类型、主机、端口、库名、用户名、SSH 隧道信息等非机密字段，默认关闭 Agent 访问；绝不破解第三方加密口令，首次连接时引导输入口令存入系统钥匙串。纯函数解析过正反单测后接入导入预览对话框。
+- [ ] E2 本地参数化查询模板 / 常用 SQL 片段（承接 `4.4`，复用 `D2` `:name` 绑定参数）
+  - 先写最小设计说明：本地落盘（纳入 `R1` 兼容样本门），支持在编辑器与命令面板（`⌘K`）检索插入并直接触发 `:name` 参数填值执行；不做云同步与复杂模板脚本语法。
+- [ ] E3 签名公证就绪后的应用内平滑更新（承接 `roadmap-1.0` `R3`，按签名落地条件触发）
+- [ ] E4 国产与更多数据库按证据扩展（承接 `P7`：拿到安装包后接 KingbaseES `B1b`；出现达梦需求时先做 `B4` 驱动按 feature 拆分）
 
 ---
 
