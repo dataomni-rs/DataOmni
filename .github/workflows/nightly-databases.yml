@@ -312,6 +312,8 @@ jobs:
         shell: bash
         run: |
           export DATAOMNI_ORACLE_CLIENT_DIR="$PWD/src-tauri/vendor/instantclient"
+          # build.rs 的 DT_RPATH 只写进主程序二进制，集成测试二进制需经 LD_LIBRARY_PATH 让 libclntsh.so 找到同目录的 libnnz.so
+          export LD_LIBRARY_PATH="$DATAOMNI_ORACLE_CLIENT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           cargo test --manifest-path src-tauri/Cargo.toml --test oracle_smoke -- --test-threads=1 --nocapture 2>&1 | tee smoke.log
           test "${PIPESTATUS[0]}" -eq 0
           bash scripts/summarize-smoke-log.sh --header >> "$GITHUB_STEP_SUMMARY"
