@@ -34,7 +34,16 @@ impl Locale {
   }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustIcon {
+  License,
+  Offline,
+  Keychain,
+  Oracle,
+}
+
 pub struct TrustFact {
+  pub icon: TrustIcon,
   pub label: &'static str,
   pub detail: &'static str,
 }
@@ -75,6 +84,7 @@ pub struct ScreenshotTab {
 
 pub struct SpecItem {
   pub term: &'static str,
+  pub tag: &'static str,
   pub detail: &'static str,
 }
 
@@ -82,6 +92,12 @@ pub struct WorkflowStory {
   pub title: &'static str,
   pub lead: &'static str,
   pub bullets: &'static [&'static str],
+}
+
+pub struct McpClientPreset {
+  pub id: &'static str,
+  pub label: &'static str,
+  pub command: &'static str,
 }
 
 pub struct CompareRow {
@@ -92,10 +108,11 @@ pub struct CompareRow {
 }
 
 pub struct EcosystemCard {
+  pub kind: ServerKind,
   pub title: &'static str,
   pub count_badge: &'static str,
   pub summary: &'static str,
-  pub engines: &'static str,
+  pub engines: &'static [&'static str],
   pub capabilities: &'static [&'static str],
 }
 
@@ -159,7 +176,10 @@ pub struct PageCopy {
   pub schema_panel_note: &'static str,
   pub wf_agents: WorkflowStory,
   pub agents_terminal_bar: &'static str,
+  pub agents_cli_comment: &'static str,
   pub agents_mcp_cmd_note: &'static str,
+  pub agents_mcp_aria_label: &'static str,
+  pub mcp_presets: &'static [McpClientPreset],
   pub copy_label: &'static str,
   pub copied_label: &'static str,
   pub compare_heading: &'static str,
@@ -211,15 +231,22 @@ pub struct PageCopy {
 
 const EN_TRUST_FACTS: &[TrustFact] = &[
   TrustFact {
+    icon: TrustIcon::License,
     label: "MIT open source",
     detail: "Free for personal & commercial teams, unlimited tabs",
   },
   TrustFact {
+    icon: TrustIcon::Offline,
     label: "Zero telemetry",
     detail: "Direct local connections, no account or cloud sync",
   },
-  TrustFact { label: "OS keychain only", detail: "Zero plaintext passwords or API keys on disk" },
   TrustFact {
+    icon: TrustIcon::Keychain,
+    label: "OS keychain only",
+    detail: "Zero plaintext passwords or API keys on disk",
+  },
+  TrustFact {
+    icon: TrustIcon::Oracle,
     label: "Oracle OCI bundled",
     detail: "Connect immediately without separate driver setup",
   },
@@ -227,16 +254,24 @@ const EN_TRUST_FACTS: &[TrustFact] = &[
 
 const ZH_TRUST_FACTS: &[TrustFact] = &[
   TrustFact {
-    label: "MIT 开源免费", detail: "个人与企业商业环境零费用，不限连接与标签数"
+    icon: TrustIcon::License,
+    label: "MIT 开源免费",
+    detail: "个人与企业商业环境零费用，不限连接与标签数",
   },
   TrustFact {
-    label: "零遥测离线直连", detail: "不设云端账号，查询语句与表数据绝不出本机"
+    icon: TrustIcon::Offline,
+    label: "零遥测离线直连",
+    detail: "不设云端账号，查询语句与表数据绝不出本机",
   },
   TrustFact {
-    label: "系统钥匙串存储", detail: "口令、私钥密码与 API Key 从不落盘明文"
+    icon: TrustIcon::Keychain,
+    label: "系统钥匙串存储",
+    detail: "口令、私钥密码与 API Key 从不落盘明文",
   },
   TrustFact {
-    label: "内置 Oracle 驱动", detail: "随包集成 Instant Client，装完直连免配环境"
+    icon: TrustIcon::Oracle,
+    label: "内置 Oracle 驱动",
+    detail: "随包集成 Instant Client，装完直连免配环境",
   },
 ];
 
@@ -413,22 +448,27 @@ const ZH_TABS: &[ScreenshotTab] = &[
 const EN_NATIVE_SPECS: &[SpecItem] = &[
   SpecItem {
     term: "Desktop shell",
+    tag: "WebView",
     detail: "Tauri 2 + Rust + system WebView — no bundled JVM or Chromium bloat",
   },
   SpecItem {
     term: "Oracle & DuckDB",
+    tag: "Bundled",
     detail: "Oracle Instant Client (Basic Light), DuckDB 2.0, and SQLite compiled right in",
   },
   SpecItem {
     term: "Auth & network",
+    tag: "SSH · TLS",
     detail: "Built-in SSH jump-host tunnel, TLS/X.509 verification, and openGauss sha256 relay",
   },
   SpecItem {
     term: "OS Keychain",
+    tag: "Keyring",
     detail: "macOS Keychain, Windows Credential Manager, and Linux Secret Service only",
   },
   SpecItem {
     term: "Actionable errors",
+    tag: "Diagnostic",
     detail:
       "Separates DNS failure, port refusal, handshake drop, SSH host-key mismatch, and bad auth",
   },
@@ -437,23 +477,51 @@ const EN_NATIVE_SPECS: &[SpecItem] = &[
 const ZH_NATIVE_SPECS: &[SpecItem] = &[
   SpecItem {
     term: "原生桌面架构",
+    tag: "WebView",
     detail: "Tauri 2 + Rust + 系统原生 WebView，告别数百 MB 的 JVM 或浏览器内核常驻开销",
   },
   SpecItem {
     term: "内置重型驱动",
+    tag: "Bundled",
     detail: "安装包自带 Oracle Instant Client（Basic Light）、DuckDB 2.0 与 SQLite，免配环境变量",
   },
   SpecItem {
     term: "隧道与特殊认证",
+    tag: "SSH · TLS",
     detail: "内置 SSH 跳板机隧道、TLS / X.509 双向校验，以及 openGauss 默认 sha256 口令本地转发口",
   },
   SpecItem {
     term: "凭据零明文",
+    tag: "Keyring",
     detail: "仅写入 macOS 钥匙串、Windows 凭据管理器与 Linux Secret Service，配置文件零明文",
   },
   SpecItem {
     term: "诊断说人话",
+    tag: "Layer ID",
     detail: "连不上时精准区分域名不存、端口拒绝、TLS 握手中断、SSH 指纹变更或账号口令错误",
+  },
+];
+
+const MCP_PRESETS: &[McpClientPreset] = &[
+  McpClientPreset {
+    id: "claude",
+    label: "Claude Code",
+    command: "claude mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp",
+  },
+  McpClientPreset {
+    id: "codex",
+    label: "Codex CLI",
+    command: "codex mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp",
+  },
+  McpClientPreset {
+    id: "gemini",
+    label: "Gemini CLI",
+    command: "gemini mcp add dataomni /Applications/DataOmni.app/Contents/MacOS/dataomni mcp",
+  },
+  McpClientPreset {
+    id: "json",
+    label: "Cursor / Desktop (mcp.json)",
+    command: "{\"mcpServers\":{\"dataomni\":{\"command\":\"/Applications/DataOmni.app/Contents/MacOS/dataomni\",\"args\":[\"mcp\"]}}}",
   },
 ];
 
@@ -497,7 +565,7 @@ const EN_COMPARE_ROWS: &[CompareRow] = &[
   },
   CompareRow {
     dimension: "AI Agent CLI & MCP",
-    dataomni: "Built-in read-only cli & stdio mcp; dual read-only gates, PROD hidden",
+    dataomni: "Built-in read-only cli & standard stdio mcp; dual read-only gates, PROD hidden",
     jvm_clients: "Requires external MCP server with separate DB credentials",
     commercial_native: "Requires external MCP server with separate DB credentials",
   },
@@ -541,19 +609,66 @@ const ZH_COMPARE_ROWS: &[CompareRow] = &[
     commercial_native: "存系统钥匙串或自有加密配置文件",
   },
   CompareRow {
-    dimension: "本地 AI Agent 接入",
-    dataomni: "内置只读 dataomni cli 与 stdio mcp，双层只读闸门且物理隐藏 PROD",
+    dimension: "本地 AI 工具接入",
+    dataomni: "内置标准 stdio MCP 与只读 CLI，适配各类 AI 工具且物理隐藏 PROD",
     jvm_clients: "需额外部署第三方 MCP 服务并单独填写明文数据库账密",
     commercial_native: "无内置本地 MCP，需另配外部工具与账密",
   },
 ];
 
+const EN_SQL_ENGINES: &[&str] = &[
+  "PostgreSQL 16",
+  "MySQL 8.4 & 5.7",
+  "Oracle 23ai",
+  "SQL Server 2022",
+  "SQLite",
+  "DuckDB 2.0",
+  "ClickHouse",
+  "MariaDB",
+  "TiDB",
+  "OceanBase",
+  "CockroachDB",
+  "openGauss",
+];
+
+const EN_WORKSPACE_ENGINES: &[&str] = &[
+  "MongoDB 8.0",
+  "Redis 7.4 (Standalone / Sentinel / Cluster)",
+  "Neo4j 5.26 / 2026",
+  "Elasticsearch 8 / 9",
+  "OpenSearch 3",
+];
+
+const ZH_SQL_ENGINES: &[&str] = &[
+  "PostgreSQL 16",
+  "MySQL 8.4 / 5.7",
+  "Oracle 23ai",
+  "SQL Server 2022",
+  "SQLite",
+  "DuckDB 2.0",
+  "ClickHouse",
+  "MariaDB",
+  "TiDB",
+  "OceanBase",
+  "CockroachDB",
+  "openGauss",
+];
+
+const ZH_WORKSPACE_ENGINES: &[&str] = &[
+  "MongoDB 8.0",
+  "Redis 7.4（单机 / Sentinel / 集群）",
+  "Neo4j 5.26 / 2026",
+  "Elasticsearch 8 / 9",
+  "OpenSearch 3",
+];
+
 const EN_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
   EcosystemCard {
+    kind: ServerKind::Relational,
     title: "Relational & Analytical SQL",
     count_badge: "13 tested servers",
     summary: "One full-featured SQL workbench across OLTP databases, embedded analytics, and distributed SQL compatible servers.",
-    engines: "PostgreSQL · MySQL 8.4 & 5.7 · Oracle 23ai · SQL Server 2022 · SQLite · DuckDB 2.0 · ClickHouse · MariaDB · TiDB · OceanBase · CockroachDB · openGauss",
+    engines: EN_SQL_ENGINES,
     capabilities: &[
       "Dialect-aware statement splitting (including SSMS GO batches and stored procedures) plus live catalog completion",
       "Queued grid edits & table designer with exact DDL/DML preview and optimistic concurrency checks",
@@ -562,10 +677,11 @@ const EN_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
     ],
   },
   EcosystemCard {
+    kind: ServerKind::Workspace,
     title: "Document, KV, Graph & Search Workspaces",
     count_badge: "5 dedicated workspaces",
     summary: "Purpose-built native workspaces instead of forcing non-relational engines into fake SQL tables.",
-    engines: "MongoDB 8.0 · Redis 7.4 (Standalone, Sentinel & Cluster) · Neo4j 5.26 / 2026 · Elasticsearch 8/9 · OpenSearch 3",
+    engines: EN_WORKSPACE_ENGINES,
     capabilities: &[
       "MongoDB: mongosh filter/sort/projection bar, document edits, aggregation pipeline runner, index inspector, and db.runCommand console",
       "Redis: non-blocking SCAN across cluster shards, editors for all 6 types, automatic JSON & Python pickle decoding, and redis-cli console",
@@ -577,10 +693,11 @@ const EN_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
 
 const ZH_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
   EcosystemCard {
+    kind: ServerKind::Relational,
     title: "关系型与分析型 SQL 工作台",
     count_badge: "13 种实测服务端",
     summary: "一套完整的 SQL 工作台，覆盖主流事务库、本地嵌入式分析库，以及国内外分布式协议兼容数据库。",
-    engines: "PostgreSQL · MySQL 8.4 / 5.7 · Oracle 23ai · SQL Server 2022 · SQLite · DuckDB 2.0 · ClickHouse · MariaDB · TiDB · OceanBase · CockroachDB · openGauss",
+    engines: ZH_SQL_ENGINES,
     capabilities: &[
       "按方言精准切分语句（含 SQL Server GO 分批与存储过程体），基于实时目录补全表、列与表别名",
       "表格数据增删改与可视化改表结构均先生成精确 SQL 预览，带原值乐观并发检查与单事务行数核对",
@@ -589,10 +706,11 @@ const ZH_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
     ],
   },
   EcosystemCard {
+    kind: ServerKind::Workspace,
     title: "文档、键值、图与搜索专属工作区",
     count_badge: "5 类原生工作区",
     summary: "不为非关系型数据库套用勉强的 SQL 外壳，而是按各自原生的查询心智打造专属工作区。",
-    engines: "MongoDB 8.0 · Redis 7.4（单机 / Sentinel / 集群）· Neo4j 5.26 / 2026 · Elasticsearch 8/9 · OpenSearch 3",
+    engines: ZH_WORKSPACE_ENGINES,
     capabilities: &[
       "MongoDB：支持 mongosh 语法筛选、排序与修改文档，运行聚合管道、查看索引与校验规则，内置 db.runCommand 命令台",
       "Redis：基于 SCAN 安全跨分片翻键，支持 6 种数据类型可视化编辑，自动解码高亮 JSON 与 Python pickle，内置命令行",
@@ -834,7 +952,7 @@ const ZH_SERVERS: &[ServerRow] = &[
   ServerRow {
     server: "Oracle",
     tested_version: "23ai Free (23.26)",
-    connection_type: "Oracle（随包内置 OCI）",
+    connection_type: "Oracle（内置 OCI）",
     kind: ServerKind::Relational,
     level: SupportLevel::Supported,
     smoke_counts: "29 / 1 / 0",
@@ -842,7 +960,7 @@ const ZH_SERVERS: &[ServerRow] = &[
   },
   ServerRow {
     server: "DuckDB",
-    tested_version: "2.0.0（编进应用）",
+    tested_version: "2.0.0（内置）",
     connection_type: "DuckDB",
     kind: ServerKind::Relational,
     level: SupportLevel::Supported,
@@ -851,7 +969,7 @@ const ZH_SERVERS: &[ServerRow] = &[
   },
   ServerRow {
     server: "OceanBase",
-    tested_version: "4.4.2 CE（MySQL 模式）",
+    tested_version: "4.4.2 CE（MySQL）",
     connection_type: "MySQL",
     kind: ServerKind::Relational,
     level: SupportLevel::UsableWithGaps,
@@ -869,7 +987,7 @@ const ZH_SERVERS: &[ServerRow] = &[
   },
   ServerRow {
     server: "openGauss",
-    tested_version: "5.0.3（PG 兼容模式）",
+    tested_version: "5.0.3（PG 模式）",
     connection_type: "PostgreSQL",
     kind: ServerKind::Relational,
     level: SupportLevel::UsableWithGaps,
@@ -950,8 +1068,8 @@ const EN_FAQ: &[FaqItem] = &[
     answer: "Installers are built reproducibly on GitHub Actions from public source, and the project has not yet purchased an Apple Developer ID or Windows EV code-signing certificate. On macOS, click \"Open Anyway\" in System Settings → Privacy & Security (or run xattr -dr com.apple.quarantine /Applications/DataOmni.app once). On Windows, click \"More info\" → \"Run anyway\". Subsequent launches open normally.",
   },
   FaqItem {
-    question: "Is it safe to connect Claude Code, Codex, or Cursor via dataomni mcp?",
-    answer: "Agent access is disabled on every connection by default. When you opt a non-production connection into read-only access, DataOmni stores an HMAC capability bound to the keychain secret so editing connections.json on disk cannot bypass it. Production (PROD) connections are unconditionally hidden from CLI/MCP listings and queries. Every query must pass both a dialect-specific read-only lexer gate and a database-level read-only transaction that always ends in ROLLBACK.",
+    question: "Which AI tools work with DataOmni MCP & CLI, and how is PROD protected?",
+    answer: "DataOmni implements standard stdio MCP (JSON-RPC 2.0) alongside structured CLI JSON output, so it works out of the box with Claude Code, Codex, Cursor, Windsurf, GitHub Copilot, Gemini CLI, Zed, and Claude Desktop. Agent access is off by default on every connection; enabling read-only access binds an HMAC capability to your keychain secret so editing connections.json cannot bypass it. Production (PROD) connections are unconditionally hidden, and every query must pass both a dialect-specific read-only lexer gate and a database read-only transaction ending in ROLLBACK.",
   },
   FaqItem {
     question: "Will upgrading (or rolling back) wipe my saved connections, open tabs, or query history?",
@@ -977,8 +1095,8 @@ const ZH_FAQ: &[FaqItem] = &[
     answer: "安装包全部由 GitHub Actions 从公开源码自动构建，目前尚未购买 Apple Developer ID 与 Windows 代码签名证书。macOS 首次打开可在「系统设置 → 隐私与安全性」底部点一次「仍要打开」（或终端执行 xattr -dr com.apple.quarantine /Applications/DataOmni.app）；Windows 在弹窗点「更多信息」→「仍要运行」即可，之后打开不再提示。",
   },
   FaqItem {
-    question: "把 DataOmni 挂给 Claude Code、Codex 或 Cursor 查库安全吗？会误删表或读到生产库吗？",
-    answer: "每条连接的「命令行与 Agent 访问」默认关闭。手动开启只读时，系统会用钥匙串口令对连接指纹计算 HMAC 签名，光靠篡改磁盘上的 JSON 文件无法越权解锁；标为生产环境（PROD）的连接在架构层对 CLI 与 MCP 彻底隐身。放行的每条查询都必须同时通过「方言词法白名单闸门」与「以 ROLLBACK 收尾的数据库只读事务」双保险。",
+    question: "除了 Claude Code，还能适配 Codex、Cursor 等其他 AI 工具吗？会不会误触生产库？",
+    answer: "全部原生适配。dataomni mcp 实现的是标准 stdio MCP 协议，dataomni cli 输出标准结构化 JSON，可直接接入 Claude Code、Codex、Cursor、Windsurf、GitHub Copilot、Gemini CLI、Zed 与 Claude Desktop 等任意支持 MCP 或命令行的工具。每条连接的 Agent 访问默认关闭；开启只读时由钥匙串口令签发 HMAC 凭证，篡改本地 JSON 无法越权；生产环境（PROD）连接在架构层彻底隐身，且所有查询均经过「方言词法白名单 + 数据库只读事务 ROLLBACK」双保险。",
   },
   FaqItem {
     question: "以后升级新版本（或者临时退回旧版本）会丢连接配置、工作区标签和历史记录吗？",
@@ -989,7 +1107,7 @@ const ZH_FAQ: &[FaqItem] = &[
 pub static EN_COPY: PageCopy = PageCopy {
   locale: Locale::En,
   meta_title: "DataOmni — Native Rust database client for SQL, MongoDB, Redis, Neo4j & Elasticsearch",
-  meta_description: "Fast, MIT-licensed native desktop client built with Tauri 2 and Rust. Connect to PostgreSQL, MySQL, Oracle, SQL Server, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch with previewed SQL guardrails, OS keychain security, and read-only MCP access for AI agents.",
+  meta_description: "Fast, MIT-licensed native desktop client built with Tauri 2 and Rust. Connect to PostgreSQL, MySQL, Oracle, SQL Server, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch with previewed SQL guardrails, OS keychain security, and read-only MCP access for AI coding tools.",
   skip_to_content: "Skip to main content",
   nav_workflows: "Workflows",
   nav_compatibility: "Databases",
@@ -999,7 +1117,7 @@ pub static EN_COPY: PageCopy = PageCopy {
   theme_light: "Light",
   theme_dark: "Dark",
   hero_title: "One native client for your SQL, document, KV, graph, and search databases.",
-  hero_lead: "Built with Tauri 2 and Rust — no 1.5 GB JVM, no tab caps, and zero plaintext passwords on disk. Preview every grid edit as exact SQL before commit, connect to Oracle out of the box, and give AI agents strictly read-only MCP access while keeping PROD invisible.",
+  hero_lead: "Built with Tauri 2 and Rust — no 1.5 GB JVM, no tab caps, and zero plaintext passwords on disk. Preview every grid edit as exact SQL before commit, connect to Oracle out of the box, and give Claude Code, Codex, Cursor, or any MCP client strictly read-only access while keeping PROD invisible.",
   primary_download_default: "Download DataOmni",
   primary_cta_macos: "Download for macOS (.dmg)",
   primary_cta_windows: "Download for Windows (.exe)",
@@ -1048,8 +1166,8 @@ pub static EN_COPY: PageCopy = PageCopy {
   schema_panel_bar: "Schema diff & deterministic Rust / TypeScript codegen",
   schema_panel_note: "Generated directly from live catalog metadata — 100% deterministic, offline, and repeatable.",
   wf_agents: WorkflowStory {
-    title: "Read-only CLI and MCP server for AI agents, with PROD physically hidden",
-    lead: "Let Claude Code, Codex, or Claude Desktop inspect schemas and run diagnostic SELECTs using your existing desktop connections and SSH tunnels — without ever exposing a password.",
+    title: "Standard MCP & CLI for every AI coding tool, with PROD physically hidden",
+    lead: "Connect Claude Code, Codex, Cursor, Windsurf, Copilot, Gemini CLI, or Claude Desktop directly to your configured connections and SSH tunnels — without ever pasting a password into a config file.",
     bullets: &[
       "Off by default per connection. Enabling read-only access binds an HMAC capability to your OS keychain secret — editing JSON on disk cannot unlock it.",
       "Production (PROD) connections are structurally invisible to both dataomni cli and dataomni mcp.",
@@ -1057,7 +1175,10 @@ pub static EN_COPY: PageCopy = PageCopy {
     ],
   },
   agents_terminal_bar: "dataomni mcp & dataomni cli",
-  agents_mcp_cmd_note: "Register DataOmni as a local stdio MCP server in one command:",
+  agents_cli_comment: "# Export full CLI schema & usage for any terminal agent",
+  agents_mcp_cmd_note: "Standard stdio MCP — pick your AI tool and copy:",
+  agents_mcp_aria_label: "MCP client configuration presets",
+  mcp_presets: MCP_PRESETS,
   copy_label: "Copy",
   copied_label: "Copied",
   compare_heading: "How DataOmni compares",
@@ -1110,7 +1231,7 @@ pub static EN_COPY: PageCopy = PageCopy {
 pub static ZH_COPY: PageCopy = PageCopy {
   locale: Locale::Zh,
   meta_title: "DataOmni — 原生轻量的跨平台数据库客户端（支持关系库、MongoDB、Redis、Neo4j 与 ES）",
-  meta_description: "基于 Tauri 2 与 Rust 构建的 MIT 开源桌面数据库客户端。一个应用连齐 PostgreSQL、MySQL、Oracle、SQL Server、ClickHouse、MongoDB、Redis、Neo4j 与 Elasticsearch；改表预览真实 SQL、口令只进系统钥匙串、内置生产隔离的只读 MCP 服务。",
+  meta_description: "基于 Tauri 2 与 Rust 构建的 MIT 开源桌面数据库客户端。一个应用连齐 PostgreSQL、MySQL、Oracle、SQL Server、ClickHouse、MongoDB、Redis、Neo4j 与 Elasticsearch；改表预览真实 SQL、口令只进系统钥匙串、内置适配各类 AI 工具的只读 MCP 服务。",
   skip_to_content: "跳到主要内容",
   nav_workflows: "核心体验",
   nav_compatibility: "支持引擎",
@@ -1120,7 +1241,7 @@ pub static ZH_COPY: PageCopy = PageCopy {
   theme_light: "浅色",
   theme_dark: "深色",
   hero_title: "一个原生轻量客户端，连齐关系库与 MongoDB、Redis、Neo4j、ES。",
-  hero_lead: "基于 Tauri 2 与 Rust 原生构建——告别上 GB 的 JVM 内存占用、标签页数量限制与明文落盘密码。装完直连 Oracle，每一次改表先审真实 SQL 再进单事务提交，还能一键为 Claude Code 开启物理隔离生产库的只读 MCP。",
+  hero_lead: "基于 Tauri 2 与 Rust 原生构建——告别上 GB 的 JVM 内存占用、标签页数量限制与明文落盘密码。装完直连 Oracle，每一次改表先审真实 SQL 再进单事务提交，还能为 Claude Code、Codex、Cursor 等各类 AI 工具开启物理隔离生产库的只读 MCP。",
   primary_download_default: "免费下载 DataOmni",
   primary_cta_macos: "下载 macOS 版（Apple Silicon .dmg）",
   primary_cta_windows: "下载 Windows 版（x64 .exe）",
@@ -1169,8 +1290,8 @@ pub static ZH_COPY: PageCopy = PageCopy {
   schema_panel_bar: "双库结构差异同步 & 确定性模型代码生成",
   schema_panel_note: "直接从实时表目录元数据确定性推导——完全离线、零幻觉、每次输出一致。",
   wf_agents: WorkflowStory {
-    title: "一行命令接入 Claude Code / Codex，生产库在架构层彻底隐身",
-    lead: "让终端与桌面 AI Agent 直接复用你配好的开发库与 SSH 隧道查表结构、跑诊断查询——全程无需在任何配置文件里粘贴数据库密码。",
+    title: "标准 MCP 与 CLI 适配各类 AI 工具，生产库在架构层彻底隐身",
+    lead: "支持 Claude Code、Codex、Cursor、Windsurf、GitHub Copilot、Gemini CLI 与 Claude Desktop——直接复用已配好的开发库与 SSH 隧道查结构、跑诊断查询，全程无需在任何配置文件里粘贴数据库密码。",
     bullets: &[
       "每条连接默认关闭 Agent 访问；手动开启只读时用钥匙串口令签发 HMAC 凭证，只改磁盘上的 connections.json 无法越权。",
       "标记为生产环境（PROD）的连接在任何参数下对 dataomni cli 与 dataomni mcp 均不可见，从根源杜绝误连线上库。",
@@ -1178,7 +1299,10 @@ pub static ZH_COPY: PageCopy = PageCopy {
     ],
   },
   agents_terminal_bar: "dataomni mcp 与 dataomni cli",
-  agents_mcp_cmd_note: "一行命令将 DataOmni 注册为本地 stdio MCP 服务：",
+  agents_cli_comment: "# 导出完整调用规范，供任意支持命令行的 AI 工具直接读取",
+  agents_mcp_cmd_note: "标准 stdio MCP 协议，点选对应工具即可复制接入配置：",
+  agents_mcp_aria_label: "MCP 客户端配置预设切换",
+  mcp_presets: MCP_PRESETS,
   copy_label: "复制",
   copied_label: "已复制",
   compare_heading: "客观选型对比",
@@ -1207,7 +1331,7 @@ pub static ZH_COPY: PageCopy = PageCopy {
   status_gaps: "可用，有已知边界",
   servers: ZH_SERVERS,
   faq_heading: "常见问题",
-  faq_intro: "关于开源商用授权、数据与密码隐私、首次打开系统提示以及 AI Agent 安全边界的直接解答。",
+  faq_intro: "关于开源商用授权、数据与密码隐私、首次打开系统提示以及 AI 工具安全边界的直接解答。",
   faq_items: ZH_FAQ,
   install_heading: "下载安装 DataOmni",
   install_intro: "各平台安装包均已内置 Oracle Instant Client（Basic Light）。当前构建尚未购买 Apple Developer ID 与 Windows 代码签名证书，首次启动按下方提示放行一次即可。",

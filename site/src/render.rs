@@ -1,4 +1,4 @@
-use crate::content::{Locale, PageCopy, ServerKind, SupportLevel, WorkflowStory};
+use crate::content::{Locale, PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory};
 use std::fmt::Write;
 
 pub const SITE_ORIGIN: &str = "https://dataomni.dev";
@@ -60,6 +60,23 @@ impl ReleaseAssets {
   }
 }
 
+fn trust_icon_svg(icon: TrustIcon) -> &'static str {
+  match icon {
+    TrustIcon::License => {
+      "<svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M10 2.5 16 5v4.6c0 4-2.6 6.9-6 8-3.4-1.1-6-4-6-8V5l6-2.5Z\"/><path d=\"m7.5 10.1 1.8 1.8 3.4-3.6\"/></svg>"
+    }
+    TrustIcon::Offline => {
+      "<svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"4\" width=\"14\" height=\"9.5\" rx=\"1.8\"/><path d=\"M6.8 16.5h6.4M10 13.5v3\"/><path d=\"m7.6 8.8 1.6 1.6 3.2-3.2\"/></svg>"
+    }
+    TrustIcon::Keychain => {
+      "<svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"7.2\" cy=\"10\" r=\"3.4\"/><path d=\"M10.6 10h6.4M14.6 10v2.4M17 10v1.8\"/></svg>"
+    }
+    TrustIcon::Oracle => {
+      "<svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><ellipse cx=\"10\" cy=\"5.2\" rx=\"5.8\" ry=\"2.4\"/><path d=\"M4.2 5.2v4.8c0 1.3 2.6 2.4 5.8 2.4s5.8-1.1 5.8-2.4V5.2\"/><path d=\"M4.2 10v4.8c0 1.3 2.6 2.4 5.8 2.4s5.8-1.1 5.8-2.4V10\"/></svg>"
+    }
+  }
+}
+
 fn render_workflow_story(html: &mut String, story: &WorkflowStory) -> Result<(), std::fmt::Error> {
   writeln!(html, "            <div class=\"workflow-story\">")?;
   writeln!(html, "              <h3>{}</h3>", escape_html(story.title))?;
@@ -73,6 +90,78 @@ fn render_workflow_story(html: &mut String, story: &WorkflowStory) -> Result<(),
   Ok(())
 }
 
+fn render_guardrails_sql() -> &'static str {
+  concat!(
+    "<span class=\"code-comment\">-- Previewed before execution; bound via driver parameters</span>\n",
+    "<span class=\"tok-kw\">BEGIN</span>;\n\n",
+    "<span class=\"tok-kw\">UPDATE</span> <span class=\"tok-ident\">&quot;public&quot;.&quot;products&quot;</span>\n",
+    "   <span class=\"tok-kw\">SET</span> <span class=\"tok-ident\">&quot;price&quot;</span> = <span class=\"tok-param\">$1</span>          <span class=\"code-comment\">-- 489</span>\n",
+    " <span class=\"tok-kw\">WHERE</span> <span class=\"tok-ident\">&quot;id&quot;</span> = <span class=\"tok-param\">$2</span>             <span class=\"code-comment\">-- 1 (primary key)</span>\n",
+    "   <span class=\"tok-kw\">AND</span> <span class=\"tok-ident\">&quot;price&quot;</span> = <span class=\"tok-param\">$3</span>;         <span class=\"code-comment\">-- 429 (optimistic check)</span>\n\n",
+    "<span class=\"code-comment\">-- Verify affected_rows == 1, then:</span>\n",
+    "<span class=\"tok-kw\">COMMIT</span>;"
+  )
+}
+
+fn render_schema_codegen() -> &'static str {
+  concat!(
+    "<span class=\"code-comment\">-- 1. Schema diff sync script (staging -&gt; dev)</span>\n",
+    "<span class=\"tok-kw\">ALTER TABLE</span> <span class=\"tok-ident\">&quot;public&quot;.&quot;orders&quot;</span>\n",
+    "  <span class=\"tok-kw\">ADD COLUMN</span> <span class=\"tok-ident\">&quot;currency&quot;</span> <span class=\"tok-type\">varchar</span>(<span class=\"tok-num\">3</span>) <span class=\"tok-kw\">NOT NULL DEFAULT</span> <span class=\"tok-str\">&#39;USD&#39;</span>;\n",
+    "<span class=\"tok-kw\">CREATE INDEX</span> <span class=\"tok-ident\">&quot;idx_orders_customer_created&quot;</span>\n",
+    "  <span class=\"tok-kw\">ON</span> <span class=\"tok-ident\">&quot;public&quot;.&quot;orders&quot;</span> (<span class=\"tok-ident\">&quot;customer_id&quot;</span>, <span class=\"tok-ident\">&quot;created_at&quot;</span>);\n\n",
+    "<span class=\"code-comment\">// 2. Deterministic ER -&gt; sqlx / Prisma / SeaORM / TypeORM</span>\n",
+    "<span class=\"tok-attr\">#[derive(</span><span class=\"tok-type\">Debug</span>, <span class=\"tok-type\">Clone</span>, <span class=\"tok-attr\">sqlx::</span><span class=\"tok-type\">FromRow</span><span class=\"tok-attr\">)]</span>\n",
+    "<span class=\"tok-kw\">pub struct</span> <span class=\"tok-type\">Order</span> {\n",
+    "  <span class=\"tok-kw\">pub</span> <span class=\"tok-prop\">id</span>: <span class=\"tok-type\">i64</span>,\n",
+    "  <span class=\"tok-kw\">pub</span> <span class=\"tok-prop\">customer_id</span>: <span class=\"tok-type\">i64</span>,\n",
+    "  <span class=\"tok-kw\">pub</span> <span class=\"tok-prop\">currency</span>: <span class=\"tok-type\">String</span>,\n",
+    "  <span class=\"tok-kw\">pub</span> <span class=\"tok-prop\">total_cents</span>: <span class=\"tok-type\">i64</span>,\n",
+    "}"
+  )
+}
+
+fn render_agents_cli(cli_comment: &str) -> String {
+  format!(
+    concat!(
+      "<span class=\"tok-prompt\">$</span> <span class=\"tok-cmd\">dataomni cli connections</span>\n",
+      "[{{<span class=\"tok-prop\">&quot;name&quot;</span>:<span class=\"tok-str\">&quot;shop_dev&quot;</span>,<span class=\"tok-prop\">&quot;db_type&quot;</span>:<span class=\"tok-str\">&quot;postgres&quot;</span>,<span class=\"tok-prop\">&quot;access&quot;</span>:<span class=\"tok-str\">&quot;read_only&quot;</span>}}]\n\n",
+      "<span class=\"tok-prompt\">$</span> <span class=\"tok-cmd\">dataomni cli query</span> shop_dev <span class=\"tok-str\">&quot;SELECT id, total FROM orders LIMIT 2&quot;</span>\n",
+      "{{<span class=\"tok-prop\">&quot;columns&quot;</span>:[<span class=\"tok-str\">&quot;id&quot;</span>,<span class=\"tok-str\">&quot;total&quot;</span>],\n",
+      " <span class=\"tok-prop\">&quot;rows&quot;</span>:[[<span class=\"tok-num\">1</span>,<span class=\"tok-num\">1467</span>],[<span class=\"tok-num\">2</span>,<span class=\"tok-num\">1032.5</span>]],<span class=\"tok-prop\">&quot;truncated&quot;</span>:<span class=\"tok-num\">false</span>}}\n\n",
+      "<span class=\"tok-prompt\">$</span> <span class=\"tok-cmd\">dataomni cli query</span> shop_dev <span class=\"tok-str\">&quot;DELETE FROM orders&quot;</span>\n",
+      "<span class=\"tok-err\">refused: statement is not read-only (exit code 3)</span>\n\n",
+      "<span class=\"code-comment\">{}</span>\n",
+      "<span class=\"tok-prompt\">$</span> <span class=\"tok-cmd\">dataomni cli guide</span>"
+    ),
+    escape_html(cli_comment)
+  )
+}
+
+fn render_smoke_counts(html: &mut String, counts: &str) -> Result<(), std::fmt::Error> {
+  let parts: Vec<&str> = counts.split('/').map(str::trim).collect();
+  if let [passed, skipped, unsupported] = parts.as_slice() {
+    let classify_secondary = |val: &str| {
+      if val == "0" || val == "0*" {
+        "smoke-zero"
+      } else {
+        "smoke-warn"
+      }
+    };
+    write!(
+      html,
+      "<span class=\"smoke-triplet\"><span class=\"smoke-pass\">{}</span><span class=\"smoke-sep\">/</span><span class=\"{}\">{}</span><span class=\"smoke-sep\">/</span><span class=\"{}\">{}</span></span>",
+      escape_html(passed),
+      classify_secondary(skipped),
+      escape_html(skipped),
+      classify_secondary(unsupported),
+      escape_html(unsupported),
+    )
+  } else {
+    write!(html, "{}", escape_html(counts))
+  }
+}
+
 pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::Error> {
   let assets = ReleaseAssets::for_version(version);
   let canonical_url = format!("{SITE_ORIGIN}{}", copy.locale.canonical_path());
@@ -80,12 +169,11 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
     Locale::En => format!("{SITE_ORIGIN}/images/en/overview.png"),
     Locale::Zh => format!("{SITE_ORIGIN}/images/zh/overview.png"),
   };
-  let mcp_add_cmd =
-    "claude mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp";
+  let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
   let macos_quarantine_cmd = "xattr -dr com.apple.quarantine /Applications/DataOmni.app";
   let linux_install_cmd = format!("sudo apt install ./DataOmni_{version}_amd64.deb");
 
-  let mut html = String::with_capacity(56_320);
+  let mut html = String::with_capacity(64_512);
 
   writeln!(html, "<!DOCTYPE html>")?;
   writeln!(html, "<html lang=\"{}\">", copy.locale.html_lang())?;
@@ -246,9 +334,17 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "          </div>")?;
 
   writeln!(html, "          <dl class=\"trust-grid\">")?;
-  for fact in copy.trust_facts {
-    writeln!(html, "            <div class=\"trust-item\">")?;
-    writeln!(html, "              <dt>{}</dt>", escape_html(fact.label))?;
+  for (index, fact) in copy.trust_facts.iter().enumerate() {
+    let delay_ms = (index as i32) * -2100;
+    writeln!(html, "            <div class=\"trust-item\" style=\"--beam-delay: {delay_ms}ms\">")?;
+    writeln!(html, "              <div class=\"trust-head\">")?;
+    writeln!(
+      html,
+      "                <span class=\"trust-icon\" aria-hidden=\"true\">{}</span>",
+      trust_icon_svg(fact.icon)
+    )?;
+    writeln!(html, "                <dt>{}</dt>", escape_html(fact.label))?;
+    writeln!(html, "              </div>")?;
     writeln!(html, "              <dd>{}</dd>", escape_html(fact.detail))?;
     writeln!(html, "            </div>")?;
   }
@@ -258,6 +354,10 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   // Interactive Workbench Stage directly in Hero
   writeln!(html, "        <div class=\"workbench-frame\">")?;
   writeln!(html, "          <div class=\"workbench-bar\">")?;
+  writeln!(
+    html,
+    "            <span class=\"win-dots workbench-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span>"
+  )?;
   writeln!(
     html,
     "            <div class=\"workbench-tabs\" role=\"tablist\" aria-label=\"{}\">",
@@ -379,13 +479,22 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "            <div class=\"workflow-proof\">")?;
   writeln!(html, "              <div class=\"spec-panel\">")?;
   writeln!(html, "                <div class=\"spec-panel-bar\">")?;
-  writeln!(html, "                  <span>{}</span>", escape_html(copy.wf_native_panel_bar))?;
+  writeln!(
+    html,
+    "                  <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+    escape_html(copy.wf_native_panel_bar)
+  )?;
   writeln!(html, "                  <span class=\"env-pill-ok\">TAURI 2 + RUST</span>")?;
   writeln!(html, "                </div>")?;
   writeln!(html, "                <dl class=\"spec-sheet\">")?;
   for item in copy.wf_native_specs {
     writeln!(html, "                  <div class=\"spec-row\">")?;
-    writeln!(html, "                    <dt>{}</dt>", escape_html(item.term))?;
+    writeln!(
+      html,
+      "                    <dt><span class=\"spec-term\">{}</span><span class=\"spec-tag\">{}</span></dt>",
+      escape_html(item.term),
+      escape_html(item.tag)
+    )?;
     writeln!(html, "                    <dd>{}</dd>", escape_html(item.detail))?;
     writeln!(html, "                  </div>")?;
   }
@@ -403,13 +512,14 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "            <div class=\"workflow-proof\">")?;
   writeln!(html, "              <div class=\"code-panel\">")?;
   writeln!(html, "                <div class=\"code-panel-bar\">")?;
-  writeln!(html, "                  <span>{}</span>", escape_html(copy.sql_preview_bar))?;
-  writeln!(html, "                  <span class=\"env-pill-ok\">1 TRANSACTION</span>")?;
-  writeln!(html, "                </div>")?;
   writeln!(
     html,
-    "                <pre><code><span class=\"code-comment\">-- Previewed before execution; bound via driver parameters</span>\nBEGIN;\n\nUPDATE \"public\".\"products\"\n   SET \"price\" = $1          <span class=\"code-comment\">-- 489</span>\n WHERE \"id\" = $2             <span class=\"code-comment\">-- 1 (primary key)</span>\n   AND \"price\" = $3;         <span class=\"code-comment\">-- 429 (optimistic check)</span>\n\n<span class=\"code-comment\">-- Verify affected_rows == 1, then:</span>\nCOMMIT;</code></pre>"
+    "                  <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+    escape_html(copy.sql_preview_bar)
   )?;
+  writeln!(html, "                  <span class=\"env-pill-ok\">1 TRANSACTION</span>")?;
+  writeln!(html, "                </div>")?;
+  writeln!(html, "                <pre><code>{}</code></pre>", render_guardrails_sql())?;
   writeln!(
     html,
     "                <div class=\"code-note\">{}</div>",
@@ -425,13 +535,14 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "            <div class=\"workflow-proof\">")?;
   writeln!(html, "              <div class=\"code-panel\">")?;
   writeln!(html, "                <div class=\"code-panel-bar\">")?;
-  writeln!(html, "                  <span>{}</span>", escape_html(copy.schema_panel_bar))?;
-  writeln!(html, "                  <span class=\"env-pill-ok\">DETERMINISTIC</span>")?;
-  writeln!(html, "                </div>")?;
   writeln!(
     html,
-    "                <pre><code><span class=\"code-comment\">-- 1. Schema diff sync script (staging -&gt; dev)</span>\nALTER TABLE \"public\".\"orders\"\n  ADD COLUMN \"currency\" varchar(3) NOT NULL DEFAULT &#39;USD&#39;;\nCREATE INDEX \"idx_orders_customer_created\"\n  ON \"public\".\"orders\" (\"customer_id\", \"created_at\");\n\n<span class=\"code-comment\">// 2. Deterministic ER -&gt; sqlx / Prisma / SeaORM / TypeORM</span>\n#[derive(Debug, Clone, sqlx::FromRow)]\npub struct Order {{\n  pub id: i64,\n  pub customer_id: i64,\n  pub currency: String,\n  pub total_cents: i64,\n}}</code></pre>"
+    "                  <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+    escape_html(copy.schema_panel_bar)
   )?;
+  writeln!(html, "                  <span class=\"env-pill-ok\">DETERMINISTIC</span>")?;
+  writeln!(html, "                </div>")?;
+  writeln!(html, "                <pre><code>{}</code></pre>", render_schema_codegen())?;
   writeln!(
     html,
     "                <div class=\"code-note\">{}</div>",
@@ -447,28 +558,58 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "            <div class=\"workflow-proof\">")?;
   writeln!(html, "              <div class=\"code-panel\">")?;
   writeln!(html, "                <div class=\"code-panel-bar\">")?;
-  writeln!(html, "                  <span>{}</span>", escape_html(copy.agents_terminal_bar))?;
+  writeln!(
+    html,
+    "                  <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+    escape_html(copy.agents_terminal_bar)
+  )?;
   writeln!(html, "                  <span class=\"env-pill-prod\">PROD HIDDEN</span>")?;
   writeln!(html, "                </div>")?;
   writeln!(
     html,
-    "                <pre><code><span class=\"code-comment\">$ dataomni cli connections</span>\n[{{\"name\":\"shop_dev\",\"db_type\":\"postgres\",\"access\":\"read_only\"}}]\n\n<span class=\"code-comment\">$ dataomni cli query shop_dev \"SELECT id, total FROM orders LIMIT 2\"</span>\n{{\"columns\":[\"id\",\"total\"],\"rows\":[[1,1467],[2,1032.5]],\"truncated\":false}}\n\n<span class=\"code-comment\">$ dataomni cli query shop_dev \"DELETE FROM orders\"</span>\nrefused: statement is not read-only (exit code 3)\n\n<span class=\"code-comment\">$ dataomni cli guide &gt; ~/.claude/skills/dataomni/SKILL.md</span></code></pre>"
+    "                <pre><code>{}</code></pre>",
+    render_agents_cli(copy.agents_cli_comment)
   )?;
+  writeln!(html, "                <div class=\"mcp-switcher\">")?;
+  writeln!(html, "                  <div class=\"mcp-switcher-head\">")?;
   writeln!(
     html,
-    "                <div class=\"code-note\">{}</div>",
+    "                    <span class=\"mcp-switcher-note\">{}</span>",
     escape_html(copy.agents_mcp_cmd_note)
   )?;
-  writeln!(html, "                <div class=\"copy-cmd-row\">")?;
-  writeln!(html, "                  <code>{}</code>", escape_html(mcp_add_cmd))?;
   writeln!(
     html,
-    "                  <button class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
-    escape_html(mcp_add_cmd),
+    "                    <div class=\"mcp-client-tabs\" role=\"group\" aria-label=\"{}\">",
+    escape_html(copy.agents_mcp_aria_label)
+  )?;
+  for (index, preset) in copy.mcp_presets.iter().enumerate() {
+    let pressed = if index == 0 { "true" } else { "false" };
+    writeln!(
+      html,
+      "                      <button class=\"mcp-client-tab\" type=\"button\" aria-pressed=\"{pressed}\" data-mcp-preset=\"{id}\" data-mcp-cmd=\"{cmd}\">{label}</button>",
+      pressed = pressed,
+      id = escape_html(preset.id),
+      cmd = escape_html(preset.command),
+      label = escape_html(preset.label),
+    )?;
+  }
+  writeln!(html, "                    </div>")?;
+  writeln!(html, "                  </div>")?;
+  writeln!(html, "                  <div class=\"copy-cmd-row\">")?;
+  writeln!(
+    html,
+    "                    <code id=\"mcp-cmd-display\">{}</code>",
+    escape_html(default_mcp_cmd)
+  )?;
+  writeln!(
+    html,
+    "                    <button id=\"mcp-copy-btn\" class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
+    escape_html(default_mcp_cmd),
     escape_html(copy.copy_label),
     escape_html(copy.copied_label),
     escape_html(copy.copy_label)
   )?;
+  writeln!(html, "                  </div>")?;
   writeln!(html, "                </div>")?;
   writeln!(html, "              </div>")?;
   writeln!(html, "            </div>")?;
@@ -487,7 +628,11 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "        </div>")?;
   writeln!(html, "        <div class=\"ecosystem-grid\">")?;
   for card in copy.ecosystem_cards {
-    writeln!(html, "          <div class=\"ecosystem-card\">")?;
+    let card_kind_class = match card.kind {
+      ServerKind::Relational => "ecosystem-card ecosystem-card-sql",
+      ServerKind::Workspace => "ecosystem-card ecosystem-card-workspace",
+    };
+    writeln!(html, "          <div class=\"{card_kind_class}\">")?;
     writeln!(html, "            <div class=\"ecosystem-card-head\">")?;
     writeln!(html, "              <h3>{}</h3>", escape_html(card.title))?;
     writeln!(
@@ -497,7 +642,11 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
     )?;
     writeln!(html, "            </div>")?;
     writeln!(html, "            <p class=\"ecosystem-summary\">{}</p>", escape_html(card.summary))?;
-    writeln!(html, "            <p class=\"ecosystem-engines\">{}</p>", escape_html(card.engines))?;
+    writeln!(html, "            <ul class=\"eco-engine-chips\">")?;
+    for engine in card.engines {
+      writeln!(html, "              <li class=\"eco-engine-chip\">{}</li>", escape_html(engine))?;
+    }
+    writeln!(html, "            </ul>")?;
     writeln!(html, "            <ul class=\"ecosystem-bullets\">")?;
     for cap in card.capabilities {
       writeln!(html, "              <li>{}</li>", escape_html(cap))?;
@@ -572,17 +721,19 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
       "                    <td class=\"ledger-mono\">{}</td>",
       escape_html(row.tested_version)
     )?;
-    writeln!(html, "                    <td>{}</td>", escape_html(row.connection_type))?;
+    writeln!(
+      html,
+      "                    <td><span class=\"driver-chip\">{}</span></td>",
+      escape_html(row.connection_type)
+    )?;
     writeln!(
       html,
       "                    <td><span class=\"{status_class}\">{}</span></td>",
       escape_html(status_label)
     )?;
-    writeln!(
-      html,
-      "                    <td class=\"ledger-mono\">{}</td>",
-      escape_html(row.smoke_counts)
-    )?;
+    write!(html, "                    <td class=\"ledger-mono\">")?;
+    render_smoke_counts(&mut html, row.smoke_counts)?;
+    writeln!(html, "</td>")?;
     writeln!(
       html,
       "                    <td class=\"ledger-note\">{}</td>",
@@ -616,7 +767,7 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   )?;
   writeln!(
     html,
-    "                <th scope=\"col\" class=\"compare-featured-head\">{}</th>",
+    "                <th scope=\"col\" class=\"compare-featured-head\"><span class=\"compare-head-badge\"><span class=\"compare-head-dot\" aria-hidden=\"true\"></span>{}</span></th>",
     escape_html(copy.compare_col_dataomni)
   )?;
   writeln!(html, "                <th scope=\"col\">{}</th>", escape_html(copy.compare_col_jvm))?;
@@ -637,7 +788,7 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
     )?;
     writeln!(
       html,
-      "                <td class=\"compare-featured-cell\">{}</td>",
+      "                <td class=\"compare-featured-cell\"><div class=\"compare-cell-inner\"><span class=\"compare-check\" aria-hidden=\"true\">✓</span><span>{}</span></div></td>",
       escape_html(row.dataomni)
     )?;
     writeln!(html, "                <td>{}</td>", escape_html(row.jvm_clients))?;

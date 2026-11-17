@@ -113,6 +113,27 @@
     });
   });
 
+  // Multi-client MCP preset switcher inside #agents
+  const mcpBtns = Array.from(document.querySelectorAll('[data-mcp-preset][data-mcp-cmd]'));
+  const mcpDisplay = document.getElementById('mcp-cmd-display');
+  const mcpCopyBtn = document.getElementById('mcp-copy-btn');
+  mcpBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const cmd = btn.getAttribute('data-mcp-cmd') || '';
+      mcpBtns.forEach((other) => {
+        other.setAttribute('aria-pressed', String(other === btn));
+      });
+      if (mcpDisplay) {
+        mcpDisplay.textContent = cmd;
+      }
+      if (mcpCopyBtn) {
+        mcpCopyBtn.setAttribute('data-copy-text', cmd);
+        const defaultLabel = mcpCopyBtn.getAttribute('data-default-label');
+        if (defaultLabel) mcpCopyBtn.textContent = defaultLabel;
+      }
+    });
+  });
+
   // Highlight visitor's platform download without hiding other platforms
   const ua = (navigator.userAgent || '').toLowerCase();
   const detectedOs = ua.includes('mac')
@@ -136,7 +157,7 @@
     }
   }
 
-  // Copy buttons for CLI / first-launch commands
+  // Copy buttons for CLI / MCP / first-launch commands
   document.querySelectorAll('[data-copy-text]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const text = btn.getAttribute('data-copy-text') || '';
