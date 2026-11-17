@@ -38,15 +38,15 @@
 
 - [x] S0 `TODOs.md` 第三次归档（2026-11-17；归档前 112 KB → 归档后 17.6 KB）
   - 已把验收完成的 `v1.0`、`1.x`（已结项条目）、`QS/QT/QR`、`PA1–PA8`、`G1–G13` 与 `A8a` 全文原样归档至 `docs/archive/TODOs-2026-11-17.md`，同步更新 `AGENTS.md` 权威来源表；根目录 `TODOs.md` 只保留本路线任务、在途外部项与未触发的可执行重估条件。
-- [x] S1 移除后端残留的 `tauri-plugin-sql`（收口 `2.4` 与 `QS5`）（`b3ca533`，2026-11-17）
-  - 已做：在 `services/sqlx_pool.rs` 定义本地 `DbPool`（`Sqlite` / `MySql` / `Postgres`）并复用同步 `PoolRegistry` 作为 `SqlxRegistry`（`std::sync::Mutex` 从编译期阻止跨 `.await` 持锁，彻底杜绝 F24）；`PoolRegistry` 补 `take` 供 `close` 摘池后异步关闭；从 `src-tauri/Cargo.toml` 与 `src-tauri/src/lib.rs` 移除 `tauri-plugin-sql`，删除 `database_smoke.rs` 对 `Cargo.lock` 插件版本号的字符串锁测试；`databaseHandle.test.ts` 新增门禁断言 `Cargo.toml` 与 `lib.rs` 不再出现该插件。
-  - 验证：实现前 `databaseHandle.test.ts` 反向变红；实现后 `bun run lint`、`bun run typecheck`、前端 186 个文件 2305 条单测、后端 451 条单测与冒烟测试、双模式 `clippy` 及 `cargo audit` 全绿。
-- [ ] S2 解耦官网公开版本号与开发期 `src-tauri/tauri.conf.json`，消除发版窗口期 404 隐患
-  - 现状：`site/src/main.rs` 直接读 `tauri.conf.json` 的 `version` 拼 GitHub Releases 下载地址，且 `.github/workflows/site.yml` 监听该文件推送自动上线；下次升开发版本号而草稿 Release 尚未点 Publish 时，官网下载按钮会提前指向未公开 tag 返回 404。
-  - 做法：为 `site/` 引入独立的已公开发布版本配置源，从 `site.yml` 的 push 监听路径摘除 `src-tauri/tauri.conf.json`，支持在 Release `published` 后更新部署，并补单测钉住版本校验。
-- [ ] S3 补齐包元数据与应用内「官网 / 问题反馈」直达入口
-  - `src-tauri/Cargo.toml` 补齐 `license = "MIT"`、`homepage = "https://dataomni.dev"`、`repository = "https://github.com/dataomni-rs/DataOmni"`（`tauri.conf.json` 的 `bundle.publisher` 在 `microsoft/winget-pkgs#481999` 合入前保持不动，留待下次发版连同 `scripts/winget-manifest.sh` 对齐）。
-  - 设置「关于与诊断」（`src/components/AboutSection.tsx`）与 macOS `Help` 菜单（`src-tauri/src/app_menu.rs`）补充「官方网站（`dataomni.dev`）」与「问题反馈（GitHub Issues）」入口，走后端受控 `open_url`，前端权限条数保持 5 条不变，渲染核对中英界面。
+- [x] S1 移除后端残留的 `tauri-plugin-sql`（收口 `2.4` 与 `QS5`）（`b3ca533`、`da26bf9`，2026-11-17）
+  - 已做：在 `services/sqlx_pool.rs` 定义本地 `DbPool`（`Sqlite` / `MySql` / `Postgres`）并复用同步 `PoolRegistry` 作为 `SqlxRegistry`（`std::sync::Mutex` 从编译期阻止跨 `.await` 持锁，彻底杜绝 F24）；`PoolRegistry` 补 `take` 供 `close` 摘池后异步关闭；从 `src-tauri/Cargo.toml` 与 `src-tauri/src/lib.rs` 移除 `tauri-plugin-sql`，删除 `database_smoke.rs` 对 `Cargo.lock` 插件版本号的字符串锁测试；`databaseHandle.test.ts` 新增门禁断言 `Cargo.toml` 与 `lib.rs` 不再出现该插件；同步在 `.cargo/audit.toml` 记录当日新增的 `chrono` / `chrono-tz` `unmaintained` 提示（`RUSTSEC-2026-0543/0555/0559`，无漏洞）。
+  - 验证：实现前 `databaseHandle.test.ts` 反向变红；实现后 `bun run lint`、`bun run typecheck`、前端 186 个文件 2305 条单测、后端 451 条单测与冒烟测试、双模式 `clippy` 及 `cargo audit`（1527 条规则）全绿。
+- [-] S2 解耦官网公开版本号与开发期 `src-tauri/tauri.conf.json`，消除发版窗口期 404 隐患（官网独立 PR `#36` `1e5d264`）
+  - 已做：新增 `site/release.json` 作为官网下载链接的唯一已发布版本源（`is_stable_semver` 显式拒绝 `-rc` 等预发布串）；从 `.github/workflows/site.yml` 与 `.github/workflows/ci.yml` 的官网监听路径摘除 `src-tauri/tauri.conf.json`；`site.yml` 新增 `release: types: [published]`（过滤 `prerelease == false`）经 `DATAOMNI_SITE_RELEASE_VERSION` 在正式发版时自动部署官网。
+  - 验证：`site_release_version_stays_decoupled_from_unreleased_tauri_conf_bumps` 将 `tauri.conf.json` 设为 `9.9.9` 时官网仍保持 `1.1.0`，传入 `v1.2.0-rc.1` 被拒；待本应用 PR 合入更新 `audit.toml` 后合入 `#36`。
+- [x] S3 补齐包元数据与应用内「官网 / 问题反馈」直达入口（`4bdc0db`，2026-11-17）
+  - 已做：`src-tauri/Cargo.toml` 补齐 `license = "MIT"`、`homepage = "https://dataomni.dev"`、`repository = "https://github.com/dataomni-rs/DataOmni"`（`tauri.conf.json` 的 `bundle.publisher` 在 `microsoft/winget-pkgs#481999` 合入前保持不动）；新增受控枚举命令 `open_project_link`（仅允许 `website` / `websiteZh` / `issues` 三个固定 HTTPS 目标，不开放任意 URL）与 `DATAOMNI_EXTERNAL_LINK_OPEN_FAILED` 翻译映射；在 `AboutSection.tsx`（按界面语言直达 `/` 或 `/zh/`）与 macOS `Help` 菜单（`app_menu.rs`）补齐官网与反馈入口。
+  - 验证：`AboutSection.test.tsx` 先写先红后绿；`catalog.test.ts`、`backendError.test.ts`、`shortcuts.test.ts`、`databaseHandle.test.ts`（前端仍保持 5 条权限）及 `app_commands` 单测全绿；无头 Chrome 实际渲染核对中英双语设置面板按钮单行排布正常。
 - [ ] S4 外部渠道落地后的仓内同步（事件触发即收口）
   - WinGet：`microsoft/winget-pkgs#481999` 合入后，在 `site/` Windows 卡片、`README.md` 与 `README.en.md` 补上 `winget install DataOmni.DataOmni`，勾选 `U2`。
   - macOS 签名公证与 Homebrew：视 Apple Developer ID 进展接入 `release.yml` 签名公证与 `Homebrew/homebrew-cask`（或启用 `dataomni-rs/homebrew-tap` 兜底），同步更新官网 macOS 安装提示。
@@ -58,14 +58,14 @@
     1. SQLite 经后端连接池打开、对象树与结构页读取、编辑提交、多句柄独立关闭、缺失路径不误建空文件；
     2. 开启严格 CSP 后，编辑器、ER 图 PNG 导出、四大 NoSQL 工作区及更新检查正常，`dataomni.log` 零 CSP 报错；
     3. 打包二进制执行 `dataomni mcp` 经 stdio 跑通只读查询、写语句 `refused` 与生产库 `not_found`。
-- [ ] V2 DuckDB 与 Oracle 23ai 真库补验绑定参数及结构比对（补齐 `D2`、`D3` 留待项）
-  - DuckDB：接入 `scripts/schema-diff-verify.sh`（或独立真库往返测试），验证两个 DuckDB 库比对与同步脚本执行后再比为空，含 `--skip-kind` 反向验证。
-  - Oracle 23ai Free：容器真库验证 `D2` `:name` 绑定参数（含 `q'[...]'` 字面量排除、NULL/数字绑定、报错参数名还原）及 `D3` `is_constraint` 目录查询与结构比对往返，纳入 `oracle_smoke.rs`。
+- [-] V2 DuckDB 与 Oracle 23ai 真库补验绑定参数及结构比对（`57f70c5`，2026-11-17）
+  - [x] DuckDB：已通过 `catalog_queries_dump` 直接调应用自己的 `duckdb::open` / `DuckDbPool::select` / `SessionConnection` 接入 `scripts/schema-diff-verify.sh`，实测 8 项差异生成 10 条语句执行后再比为空；`--skip-kind=column-changed` 反向验证精确留下 `users.score (type, nullable, default)` 并以退出码 1 报错。
+  - [-] Oracle 23ai Free：已在 `oracle_smoke.rs` 新增 `oracle_binds_editor_parameters`（`D2` 文本 / 数字 / NULL / `q'[...]'` 字面量排除）与 `oracle_index_catalog_distinguishes_constraints_from_plain_indexes`（`D3` `is_constraint` 与删约束 / 删索引语句），并顺手修复 `.github/workflows/nightly-databases.yml` 里 `DATAOMNI_ORACLE_CLIENT_DIR` 错写为 `resources/oracle-client`（实为 `vendor/instantclient`）及 Ubuntu 24.04 缺 `libaio.so.1` 软链两处缺陷；待合入后触发 GitHub Actions `oracle-smoke` 跑通真库结果。
 - [ ] V3 持续真库回归（Nightly Smoke）稳定性收口（跟进 `QT3`）
   - 跟踪 `.github/workflows/nightly-databases.yml` 连续四周定时运行记录；按服务端真实能力裁剪兼容库上的不支持类型夹具（如 CockroachDB / openGauss 的 `INT[][]`、`XML`），确保「红 = 真实退化」。
-- [ ] V4 日常高频交互稳态巡检
-  - 实机复核 `PA2` 工作区快照防抖：连续打字、切标签、直接退出重开后草稿零丢失。
-  - 复核网络闪断 / SSH 跳板机重启后，在表数据页提交修改或导出失败时的错误提示与重连引导（对应 `R6` 观察项；提示不足以引导重连时补明确重连入口）。
+- [x] V4 日常高频交互稳态巡检（`2d901ed`，2026-11-17）
+  - 草稿防抖冲刷（`PA2`）：排查发现 macOS `⌘Q`（原生菜单 `PredefinedMenuItem::quit`）或窗口切入后台时不总是触发 `pagehide` / `onCloseRequested`；已在 `App.tsx` 补齐 `beforeunload` 与 `visibilitychange`（`hidden`）立即 `flush` 钩子，`App.test.tsx` 先写先红后绿。
+  - 表格与导入导出断线引导（`R6` 观察项闭环）：排查发现表数据页（`runReadQuery` / `TableDataViewer`）、结果集就地改（`commitRowChanges`）与后台导入导出（`taskStore`）遇到 `CONNECTION_LOST` 或 `DATAOMNI_SSH_TUNNEL_NOT_ESTABLISHED` 时此前只弹报错、不置 `queryStore.connectionLost = true`，导致侧边栏仍显「已连接」、无「重新连接」按钮且再点同一连接被 `alreadyConnectedTo` 跳过；新增 `isConnectionLostError` 与 `reportConnectionLostIfActive`（仅对当前活动连接置位，避免旧连接后台任务误伤新连接），三组单测均先红后绿。
 
 ### 第三阶段（W）：官网实用文档体系（`dataomni.dev` 易用性承接）
 
