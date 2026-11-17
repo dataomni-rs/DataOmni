@@ -277,6 +277,8 @@ jobs:
         image: gvenzl/oracle-free:23-slim
         env:
           ORACLE_PASSWORD: oraclepassword
+          APP_USER: dataomni
+          APP_USER_PASSWORD: oraclepassword
         ports:
           - 1521:1521
         options: >-
@@ -286,7 +288,7 @@ jobs:
           --health-retries 30
     env:
       DATAOMNI_REQUIRE_NETWORK_DATABASE_TESTS: "1"
-      DATAOMNI_ORACLE_TEST_URL: "oracle://system:oraclepassword@127.0.0.1:1521/FREEPDB1"
+      DATAOMNI_ORACLE_TEST_URL: "oracle://dataomni:oraclepassword@127.0.0.1:1521/FREEPDB1"
       DATAOMNI_ORACLE_SID_TEST_URL: "oracle://system:oraclepassword@127.0.0.1:1521/FREE"
     steps:
       - uses: actions/checkout@v4
@@ -308,6 +310,21 @@ jobs:
           workspaces: src-tauri
       - name: Clean cached DuckDB unpacked sources
         run: rm -rf src-tauri/target/duckdb-sources
+      - name: Provision dataomni user in FREEPDB1
+        run: |
+          docker exec -i "${{ job.services.oracle.id }}" sqlplus -s sys/oraclepassword@//localhost:1521/FREEPDB1 as sysdba <<'SQL'
+          WHENEVER SQLERROR EXIT FAILURE
+          BEGIN
+            EXECUTE IMMEDIATE 'CREATE USER dataomni IDENTIFIED BY oraclepassword DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS';
+          EXCEPTION
+            WHEN OTHERS THEN
+              IF SQLCODE != -1920 THEN RAISE; END IF;
+          END;
+          /
+          ALTER USER dataomni IDENTIFIED BY oraclepassword DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
+          GRANT DBA TO dataomni;
+          EXIT;
+          SQL
       - name: Run Oracle smoke tests
         shell: bash
         run: |
