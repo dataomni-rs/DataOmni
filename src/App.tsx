@@ -78,7 +78,10 @@ import { type WorkspaceSnapshotWatcher, watchWorkspaceSnapshot } from './utils/w
 import { useResizablePanel } from './hooks/useResizablePanel';
 import { PanelResizeHandle } from './components/PanelResizeHandle';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
+import { ConnectionImportDialog } from './components/ConnectionImportDialog';
 import { QueryHistoryDialog } from './components/QueryHistoryDialog';
+import { commitConnectionImport, pickConnectionImportFile } from './utils/connectionTransfer';
+import type { ParsedConnectionImport } from './utils/externalConnections';
 import {
   SQL_FILE_FILTER,
   readSqlFileText,
@@ -168,6 +171,7 @@ function App() {
     } | null
   >(null);
   const connections = useConnectionStore((state) => state.connections);
+  const loadConnections = useConnectionStore((state) => state.loadConnections);
   const databaseMetadata = useAppStore((state) => state.databaseMetadata);
   const t = useLanguageStore((state) => state.t);
   const setLanguagePreference = useLanguageStore((state) => state.setPreference);
@@ -175,6 +179,7 @@ function App() {
   const { connect, openDatabaseFile, error: connectError, clearError: clearConnectError } = useProfileConnector();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [pendingImport, setPendingImport] = useState<ParsedConnectionImport | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
   // 选出 id 列表而不是整份草稿：打字只在「未保存」状态翻转时才让这里重渲染
@@ -770,6 +775,19 @@ function App() {
         run: () => openConnectionForm()
       },
       {
+        id: 'action:import-connections',
+        title: t('palette.action.importConnections'),
+        group: t('palette.group.action'),
+        run: () => {
+          setFileError(null);
+          pickConnectionImportFile()
+            .then((parsed) => {
+              if (parsed) setPendingImport(parsed);
+            })
+            .catch((cause) => setFileError(describeError(cause)));
+        }
+      },
+      {
         id: 'action:open-sqlite',
         title: t('palette.action.openDatabaseFile'),
         group: t('palette.group.action'),
@@ -1157,6 +1175,23 @@ function App() {
               : activeConnection.config.db_type === DatabaseType.Neo4j ? 'cypher'
                 : activeConnection.config.db_type === DatabaseType.Elasticsearch ? 'elasticsearch'
                   : activeConnection.config.db_type === DatabaseType.MongoDB ? 'mongodb' : null}
+        />
+      )}
+
+      {pendingImport && (
+        <ConnectionImportDialog
+          parsed={pendingImport}
+          existingConnections={connections}
+          onClose={() => setPendingImport(null)}
+          onConfirm={async (selected) => {
+            try {
+              await commitConnectionImport(selected);
+              await loadConnections();
+              setPendingImport(null);
+            } catch (cause) {
+              setFileError(describeError(cause));
+            }
+          }}
         />
       )}
 

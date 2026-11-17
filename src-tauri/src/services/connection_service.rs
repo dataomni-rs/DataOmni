@@ -616,7 +616,17 @@ impl ConnectionService {
       .map(serde_json::from_value::<ConnectionProfile>)
       .collect::<Result<Vec<_>, _>>()
       .map_err(|error| format!("{IMPORT_NOT_CONNECTIONS_FILE}: {error}"))?;
+    self.import_profiles(incoming)
+  }
 
+  /// 将前端解析并经用户勾选确认的连接配置写入本机列表（与 `import_document` 共用清洗与去重逻辑）。
+  ///
+  /// 外部文件（Navicat `.ncx`、DBeaver `data-sources.json` 等）传来的连接一律剥离口令、
+  /// 钥匙串引用与 Agent 开放权限，按六元组去重后原子落盘。
+  pub fn import_profiles(
+    &mut self,
+    incoming: Vec<ConnectionProfile>,
+  ) -> Result<ConnectionImport, String> {
     let same = |left: &ConnectionProfile, right: &ConnectionProfile| {
       left.name == right.name
         && left.db_type == right.db_type
@@ -2010,6 +2020,23 @@ mod tests {
       }
     }
     assert!(service.get_connections().is_empty());
+  }
+
+  #[test]
+  fn import_profiles_strips_secrets_and_agent_access_while_deduplicating() {
+    let mut service = service_at(&temporary_config_path());
+    let mut incoming = profile("ext-1", "leaked-password");
+    incoming.credential_ref = Some("foreign-keychain-ref".to_string());
+    incoming.agent_access = crate::models::AgentAccess::Read;
+
+    let report = service.import_profiles(vec![incoming.clone(), incoming]).unwrap();
+    assert_eq!((report.imported, report.skipped), (1, 1));
+    let saved = service.get_connections();
+    assert_eq!(saved.len(), 1);
+    assert_ne!(saved[0].id, "ext-1");
+    assert!(saved[0].password.is_empty());
+    assert!(saved[0].credential_ref.is_none());
+    assert_eq!(saved[0].agent_access, crate::models::AgentAccess::Off);
   }
 
   /// 0.5 写出的 `connections.json`。1.0 之后它必须一直读得出来：这条红了，就是改了落盘格式而没写迁移
