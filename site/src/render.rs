@@ -1,4 +1,6 @@
-use crate::content::{Locale, PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory};
+use crate::content::{
+  PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory, EN_COPY, ZH_COPY,
+};
 use std::fmt::Write;
 
 pub const SITE_ORIGIN: &str = "https://dataomni.dev";
@@ -162,18 +164,87 @@ fn render_smoke_counts(html: &mut String, counts: &str) -> Result<(), std::fmt::
   }
 }
 
+fn render_structured_data(
+  copy: &PageCopy,
+  version: &str,
+  canonical_url: &str,
+  og_image_url: &str,
+  release_tag_url: &str,
+) -> Result<String, std::fmt::Error> {
+  let mut json = String::with_capacity(4096);
+  write!(json, "{{\"@context\":\"https://schema.org\",\"@graph\":[")?;
+
+  // 1. WebSite entity (Google SERP Site Name signal)
+  write!(
+    json,
+    "{{\"@type\":\"WebSite\",\"@id\":\"{SITE_ORIGIN}/#website\",\"name\":\"DataOmni\",\"alternateName\":\"DataOmni Database Client\",\"url\":\"{SITE_ORIGIN}/\",\"inLanguage\":[\"en\",\"zh-CN\"]}},"
+  )?;
+
+  // 2. SoftwareApplication entity with screenshots, repository, and free MIT offer
+  write!(
+    json,
+    "{{\"@type\":\"SoftwareApplication\",\"@id\":\"{SITE_ORIGIN}/#software\",\"name\":\"DataOmni\",\"softwareVersion\":\"{}\",\"applicationCategory\":\"DeveloperApplication\",\"applicationSubCategory\":\"Database Management\",\"operatingSystem\":\"macOS 12+, Windows 10/11, Linux (x86_64)\",\"license\":\"https://opensource.org/licenses/MIT\",\"isAccessibleForFree\":true,\"inLanguage\":\"{}\",\"url\":\"{}\",\"downloadUrl\":\"{}\",\"releaseNotes\":\"{}\",\"sameAs\":[\"{REPO_URL}\"],\"image\":\"{}\",\"screenshot\":[",
+    escape_json_str(version),
+    escape_json_str(copy.locale.html_lang()),
+    escape_json_str(canonical_url),
+    escape_json_str(release_tag_url),
+    escape_json_str(release_tag_url),
+    escape_json_str(og_image_url),
+  )?;
+  for (index, tab) in copy.tabs.iter().enumerate() {
+    if index > 0 {
+      json.push(',');
+    }
+    let shot_url = format!("{SITE_ORIGIN}{}", tab.webp_path);
+    write!(
+      json,
+      "{{\"@type\":\"ImageObject\",\"url\":\"{}\",\"caption\":\"{}\",\"width\":{},\"height\":{}}}",
+      escape_json_str(&shot_url),
+      escape_json_str(tab.alt),
+      tab.width,
+      tab.height,
+    )?;
+  }
+  write!(
+    json,
+    "],\"description\":\"{}\",\"author\":{{\"@type\":\"Organization\",\"name\":\"DataOmni\",\"url\":\"{REPO_URL}\"}},\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}}}},",
+    escape_json_str(copy.meta_description),
+  )?;
+
+  // 3. FAQPage entity for AI Overviews & Generative Engine citation
+  write!(
+    json,
+    "{{\"@type\":\"FAQPage\",\"@id\":\"{}#faq-schema\",\"inLanguage\":\"{}\",\"mainEntity\":[",
+    escape_json_str(canonical_url),
+    escape_json_str(copy.locale.html_lang()),
+  )?;
+  for (index, item) in copy.faq_items.iter().enumerate() {
+    if index > 0 {
+      json.push(',');
+    }
+    write!(
+      json,
+      "{{\"@type\":\"Question\",\"name\":\"{}\",\"acceptedAnswer\":{{\"@type\":\"Answer\",\"text\":\"{}\"}}}}",
+      escape_json_str(item.question),
+      escape_json_str(item.answer),
+    )?;
+  }
+  write!(json, "]}}]}}")?;
+
+  Ok(json)
+}
+
 pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::Error> {
   let assets = ReleaseAssets::for_version(version);
   let canonical_url = format!("{SITE_ORIGIN}{}", copy.locale.canonical_path());
-  let og_image_url = match copy.locale {
-    Locale::En => format!("{SITE_ORIGIN}/images/en/overview.png"),
-    Locale::Zh => format!("{SITE_ORIGIN}/images/zh/overview.png"),
-  };
+  let og_image_url = format!("{SITE_ORIGIN}{}", copy.locale.og_image_path());
+  let structured_data =
+    render_structured_data(copy, version, &canonical_url, &og_image_url, &assets.release_tag_url)?;
   let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
   let macos_quarantine_cmd = "xattr -dr com.apple.quarantine /Applications/DataOmni.app";
   let linux_install_cmd = format!("sudo apt install ./DataOmni_{version}_amd64.deb");
 
-  let mut html = String::with_capacity(64_512);
+  let mut html = String::with_capacity(68_608);
 
   writeln!(html, "<!DOCTYPE html>")?;
   writeln!(html, "<html lang=\"{}\">", copy.locale.html_lang())?;
@@ -192,6 +263,12 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "  <link rel=\"alternate\" hreflang=\"x-default\" href=\"{SITE_ORIGIN}/\">")?;
   writeln!(html, "  <meta property=\"og:type\" content=\"website\">")?;
   writeln!(html, "  <meta property=\"og:site_name\" content=\"DataOmni\">")?;
+  writeln!(html, "  <meta property=\"og:locale\" content=\"{}\">", copy.locale.og_locale())?;
+  writeln!(
+    html,
+    "  <meta property=\"og:locale:alternate\" content=\"{}\">",
+    copy.locale.og_alternate_locale()
+  )?;
   writeln!(html, "  <meta property=\"og:title\" content=\"{}\">", escape_html(copy.meta_title))?;
   writeln!(
     html,
@@ -200,19 +277,41 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   )?;
   writeln!(html, "  <meta property=\"og:url\" content=\"{}\">", escape_html(&canonical_url))?;
   writeln!(html, "  <meta property=\"og:image\" content=\"{}\">", escape_html(&og_image_url))?;
+  writeln!(html, "  <meta property=\"og:image:type\" content=\"image/png\">")?;
+  writeln!(html, "  <meta property=\"og:image:width\" content=\"1200\">")?;
+  writeln!(html, "  <meta property=\"og:image:height\" content=\"630\">")?;
+  writeln!(
+    html,
+    "  <meta property=\"og:image:alt\" content=\"{}\">",
+    escape_html(copy.og_image_alt)
+  )?;
   writeln!(html, "  <meta name=\"twitter:card\" content=\"summary_large_image\">")?;
+  writeln!(html, "  <meta name=\"twitter:title\" content=\"{}\">", escape_html(copy.meta_title))?;
+  writeln!(
+    html,
+    "  <meta name=\"twitter:description\" content=\"{}\">",
+    escape_html(copy.meta_description)
+  )?;
+  writeln!(html, "  <meta name=\"twitter:image\" content=\"{}\">", escape_html(&og_image_url))?;
+  writeln!(
+    html,
+    "  <meta name=\"twitter:image:alt\" content=\"{}\">",
+    escape_html(copy.og_image_alt)
+  )?;
+  writeln!(html, "  <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\">")?;
+  writeln!(
+    html,
+    "  <link rel=\"icon\" type=\"image/png\" sizes=\"96x96\" href=\"/assets/favicon-96.png\">"
+  )?;
   writeln!(
     html,
     "  <link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/assets/favicon-32.png\">"
   )?;
-  writeln!(html, "  <link rel=\"apple-touch-icon\" href=\"/assets/icon-256.png\">")?;
   writeln!(
     html,
-    "  <script type=\"application/ld+json\">{{\"@context\":\"https://schema.org\",\"@type\":\"SoftwareApplication\",\"name\":\"DataOmni\",\"softwareVersion\":\"{}\",\"applicationCategory\":\"DeveloperApplication\",\"operatingSystem\":\"macOS, Windows, Linux\",\"license\":\"https://opensource.org/licenses/MIT\",\"url\":\"{}\",\"description\":\"{}\",\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}}}}</script>",
-    escape_json_str(version),
-    escape_json_str(&canonical_url),
-    escape_json_str(copy.meta_description),
+    "  <link rel=\"apple-touch-icon\" sizes=\"256x256\" href=\"/assets/icon-256.png\">"
   )?;
+  writeln!(html, "  <script type=\"application/ld+json\">{structured_data}</script>")?;
   writeln!(html, "  <script>")?;
   writeln!(
     html,
@@ -415,13 +514,21 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
       )?;
       writeln!(
         html,
-        "                <img class=\"workbench-shot\" src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" data-deferred-src=\"{src}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" decoding=\"async\">",
+        "                <img class=\"workbench-shot\" src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" data-deferred-src=\"{src}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" fetchpriority=\"low\" decoding=\"async\">",
         src = escape_html(tab.image_path),
         alt = escape_html(tab.alt),
         w = tab.width,
         h = tab.height,
       )?;
       writeln!(html, "              </picture>")?;
+      writeln!(
+        html,
+        "              <noscript><img class=\"workbench-shot\" src=\"{webp}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" loading=\"lazy\"></noscript>",
+        webp = escape_html(tab.webp_path),
+        alt = escape_html(tab.alt),
+        w = tab.width,
+        h = tab.height,
+      )?;
     }
     writeln!(html, "            </div>")?;
   }
@@ -986,7 +1093,10 @@ pub fn render_not_found() -> &'static str {
 <head>\n\
   <meta charset=\"utf-8\">\n\
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+  <meta name=\"robots\" content=\"noindex\">\n\
   <title>404 — DataOmni</title>\n\
+  <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\">\n\
+  <link rel=\"icon\" type=\"image/png\" sizes=\"96x96\" href=\"/assets/favicon-96.png\">\n\
   <link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/assets/favicon-32.png\">\n\
   <link rel=\"stylesheet\" href=\"/assets/style.css\">\n\
 </head>\n\
@@ -1005,11 +1115,36 @@ pub fn render_robots_txt() -> String {
 }
 
 pub fn render_sitemap_xml() -> String {
-  format!(
-    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n\
-  <url><loc>{SITE_ORIGIN}/</loc></url>\n\
-  <url><loc>{SITE_ORIGIN}/zh/</loc></url>\n\
-</urlset>\n"
-  )
+  let mut xml = String::with_capacity(2048);
+  let _ = writeln!(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+  let _ = writeln!(
+    xml,
+    "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\" xmlns:xhtml=\"http://www.w3.org/1999/xhtml\" xmlns:image=\"http://www.google.com/schemas/sitemap-image/1.1\">"
+  );
+  for copy in [&EN_COPY, &ZH_COPY] {
+    let loc = format!("{SITE_ORIGIN}{}", copy.locale.canonical_path());
+    let _ = writeln!(xml, "  <url>");
+    let _ = writeln!(xml, "    <loc>{}</loc>", escape_html(&loc));
+    let _ = writeln!(xml, "    <lastmod>2026-11-17</lastmod>");
+    let _ =
+      writeln!(xml, "    <xhtml:link rel=\"alternate\" hreflang=\"en\" href=\"{SITE_ORIGIN}/\"/>");
+    let _ = writeln!(
+      xml,
+      "    <xhtml:link rel=\"alternate\" hreflang=\"zh-CN\" href=\"{SITE_ORIGIN}/zh/\"/>"
+    );
+    let _ = writeln!(
+      xml,
+      "    <xhtml:link rel=\"alternate\" hreflang=\"x-default\" href=\"{SITE_ORIGIN}/\"/>"
+    );
+    for tab in copy.tabs {
+      let _ = writeln!(
+        xml,
+        "    <image:image><image:loc>{SITE_ORIGIN}{}</image:loc></image:image>",
+        escape_html(tab.webp_path)
+      );
+    }
+    let _ = writeln!(xml, "  </url>");
+  }
+  let _ = writeln!(xml, "</urlset>");
+  xml
 }

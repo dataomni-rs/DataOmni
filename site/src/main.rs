@@ -124,11 +124,43 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     anchor_scan = &after[end + 1..];
   }
 
+  if page_name != "404.html" {
+    let Some(title_start) = html.find("<title>") else {
+      return Err(format!("{page_name}: missing <title>"));
+    };
+    let after_title = &html[title_start + "<title>".len()..];
+    let Some(title_end) = after_title.find("</title>") else {
+      return Err(format!("{page_name}: unclosed <title>"));
+    };
+    let title_chars = after_title[..title_end].chars().count();
+    if !(20..=65).contains(&title_chars) {
+      return Err(format!(
+        "{page_name}: <title> length {title_chars} outside SERP-safe 20..=65 chars"
+      ));
+    }
+
+    let desc_prefix = "<meta name=\"description\" content=\"";
+    let Some(desc_start) = html.find(desc_prefix) else {
+      return Err(format!("{page_name}: missing meta description"));
+    };
+    let after_desc = &html[desc_start + desc_prefix.len()..];
+    let Some(desc_end) = after_desc.find("\">") else {
+      return Err(format!("{page_name}: unclosed meta description"));
+    };
+    let desc_chars = after_desc[..desc_end].chars().count();
+    if !(70..=165).contains(&desc_chars) {
+      return Err(format!(
+        "{page_name}: meta description length {desc_chars} outside SERP-safe 70..=165 chars"
+      ));
+    }
+  }
+
   for attr in [
     "src=\"/",
     "srcset=\"/",
     "data-deferred-src=\"/",
     "data-deferred-srcset=\"/",
+    "href=\"/favicon.ico",
     "href=\"/assets/",
     "href=\"/images/",
   ] {
@@ -152,6 +184,26 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     }
   }
 
+  let og_prefix = "content=\"https://dataomni.dev/";
+  let mut og_scan = html;
+  while let Some(pos) = og_scan.find(og_prefix) {
+    let after = &og_scan[pos + og_prefix.len()..];
+    let Some(end) = after.find('"') else {
+      return Err(format!("{page_name}: unclosed https://dataomni.dev/ meta content"));
+    };
+    let rel = &after[..end];
+    if !rel.is_empty() && !rel.ends_with('/') {
+      let target = out_dir.join(rel);
+      if !target.is_file() {
+        return Err(format!(
+          "{page_name}: meta URL https://dataomni.dev/{rel} does not exist at {}",
+          target.display()
+        ));
+      }
+    }
+    og_scan = &after[end + 1..];
+  }
+
   Ok(())
 }
 
@@ -168,10 +220,14 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
   fs::create_dir_all(out_dir)
     .map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
 
-  // Static styles, progressive-enhancement script, and app icons
+  // Static styles, progressive-enhancement script, OpenGraph cards, and Google-compliant favicons
   let site_dir = repo_root.join("site");
   copy_checked(&site_dir.join("assets/style.css"), &out_dir.join("assets/style.css"))?;
   copy_checked(&site_dir.join("assets/site.js"), &out_dir.join("assets/site.js"))?;
+  copy_checked(&site_dir.join("assets/favicon-96.png"), &out_dir.join("assets/favicon-96.png"))?;
+  copy_checked(&site_dir.join("assets/og-en.png"), &out_dir.join("assets/og-en.png"))?;
+  copy_checked(&site_dir.join("assets/og-zh.png"), &out_dir.join("assets/og-zh.png"))?;
+  copy_checked(&repo_root.join("src-tauri/icons/icon.ico"), &out_dir.join("favicon.ico"))?;
   copy_checked(
     &repo_root.join("src-tauri/icons/128x128@2x.png"),
     &out_dir.join("assets/icon-256.png"),
@@ -272,17 +328,44 @@ mod tests {
     assert!(temp_dir.join(".nojekyll").is_file());
     assert!(temp_dir.join("robots.txt").is_file());
     assert!(temp_dir.join("sitemap.xml").is_file());
+    assert!(temp_dir.join("favicon.ico").is_file());
+    assert!(temp_dir.join("assets/favicon-96.png").is_file());
+    assert!(temp_dir.join("assets/og-en.png").is_file());
+    assert!(temp_dir.join("assets/og-zh.png").is_file());
 
     let en = fs::read_to_string(temp_dir.join("index.html")).unwrap();
     let zh = fs::read_to_string(temp_dir.join("zh/index.html")).unwrap();
+    let not_found = fs::read_to_string(temp_dir.join("404.html")).unwrap();
+    let sitemap = fs::read_to_string(temp_dir.join("sitemap.xml")).unwrap();
+
+    assert!(not_found.contains("<meta name=\"robots\" content=\"noindex\">"));
+    assert!(sitemap.contains("xmlns:xhtml=\"http://www.w3.org/1999/xhtml\""));
+    assert!(sitemap.contains("xmlns:image=\"http://www.google.com/schemas/sitemap-image/1.1\""));
+    assert!(
+      sitemap.contains("<image:loc>https://dataomni.dev/assets/shots/en/mongodb.webp</image:loc>")
+    );
+    assert!(
+      sitemap.contains("<image:loc>https://dataomni.dev/assets/shots/zh/redis.webp</image:loc>")
+    );
+
     assert!(en.contains(&format!("DataOmni_{version}_aarch64.dmg")));
     assert!(en.contains(&format!("DataOmni-{version}-1.x86_64.rpm")));
     assert!(en.contains("https://github.com/dataomni-rs/DataOmni"));
+    assert!(en.contains("https://dataomni.dev/assets/og-en.png"));
+    assert!(zh.contains("https://dataomni.dev/assets/og-zh.png"));
     assert!(!en.contains("yuxuetr"));
     assert!(!zh.contains("yuxuetr"));
 
-    // Multi-tool MCP presets, static syntax tokens, and upgraded cards/tables
+    // Multi-tool MCP presets, static syntax tokens, structured data, and upgraded cards/tables
     for html in [&en, &zh] {
+      assert!(html.contains("sizes=\"96x96\" href=\"/assets/favicon-96.png\""));
+      assert!(html.contains("\"@type\":\"WebSite\""));
+      assert!(html.contains("\"@type\":\"SoftwareApplication\""));
+      assert!(html.contains("\"@type\":\"FAQPage\""));
+      assert!(html.contains("\"@type\":\"ImageObject\""));
+      assert!(html.contains("og:image:width\" content=\"1200\""));
+      assert!(html.contains("og:image:height\" content=\"630\""));
+      assert!(html.contains("<noscript><img class=\"workbench-shot\""));
       assert!(html.contains("class=\"trust-icon\""));
       assert!(html.contains("class=\"tok-kw\""));
       assert!(html.contains("class=\"tok-err\""));
@@ -292,11 +375,25 @@ mod tests {
       assert!(html.contains("mcpServers"));
     }
 
-    // Reverse check: referencing a missing image or WebP source must fail verify_html_invariants
+    // Reverse check: referencing a missing image, WebP source, or OG card must fail verify_html_invariants
     let broken = en.replace("/images/en/overview.png", "/images/en/missing.png");
     assert!(verify_html_invariants("index.html", &broken, &temp_dir).is_err());
     let broken_webp = en.replace("/assets/shots/en/overview.webp", "/assets/shots/en/missing.webp");
     assert!(verify_html_invariants("index.html", &broken_webp, &temp_dir).is_err());
+    let broken_og = en.replace("/assets/og-en.png", "/assets/og-missing.png");
+    assert!(verify_html_invariants("index.html", &broken_og, &temp_dir).is_err());
+
+    // Reverse check: SERP-truncated <title> (> 65 chars) or meta description (> 165 chars) must fail
+    let bloated_title = en.replace(
+      "<title>",
+      "<title>Bloated Title Padding Exceeding Sixty Five Characters In Google Search Results ",
+    );
+    assert!(verify_html_invariants("index.html", &bloated_title, &temp_dir).is_err());
+    let bloated_desc = en.replace(
+      "<meta name=\"description\" content=\"",
+      "<meta name=\"description\" content=\"Bloated description padding that deliberately pushes total character count well past the one hundred and sixty five character SERP snippet budget ",
+    );
+    assert!(verify_html_invariants("index.html", &bloated_desc, &temp_dir).is_err());
 
     // Reverse check: combining fetchpriority="high" with loading="lazy" must fail
     let lazy_lcp = en.replace("fetchpriority=\"high\"", "fetchpriority=\"high\" loading=\"lazy\"");
