@@ -48,8 +48,15 @@ ignore = [
   # webkit2gtk 2.0 绑定固定在 gtk-rs 0.18 世代。
   "RUSTSEC-2024-0429",
 
-  # libsqlite3-sys 0.30.1（经 sqlx-sqlite 0.8.6 与 tauri-plugin-sql 2.4.1，上游尚无升至 >=0.39.0 的版本）：
+  # libsqlite3-sys 0.30.1（经 sqlx-sqlite 0.8.6，上游尚无升至 >=0.39.0 的版本）：
   # CVE-2026-119375 要求本地打开被篡改且页大小与主库不一致的伴生 -wal 文件，使查询读出本进程未初始化的页缓存字节。
   # DataOmni 为本地单用户桌面客户端，查询结果仅展示给打开该文件的本机用户，不存在跨租户内存泄露通道；等 sqlx 升级后移除。
   "RUSTSEC-2026-0459",
+
+  # chrono 0.4.45 / chrono-tz 0.9.0 / chrono-tz-build 0.3.0（经 duckdb -> arrow 60.1、neo4j 0.2.0、sqlx 0.8.6 及应用自身时间格式化）：
+  # RustSec 仅标记 unmaintained（patched = []，无已知安全漏洞，chronotope/chrono#1768）。
+  # arrow、neo4j 与 sqlx 上游均尚未发布去除 chrono 的版本；应用自身待后续随上游迁移至 time / jiff 后一并移除。
+  "RUSTSEC-2026-0543",
+  "RUSTSEC-2026-0555",
+  "RUSTSEC-2026-0559",
 ]
