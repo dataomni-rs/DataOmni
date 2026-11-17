@@ -344,6 +344,7 @@
   - 没验到：`winget validate` / `winget install --manifest` 要在 Windows 上跑；winget-pkgs 的自动校验要提了 PR 才跑。
   - 发现的问题（已解决）：仓库里从来没有 `LICENSE` 文件，README 两份写着 MIT 并链到它（链接是坏的），GitHub 也认不出许可证。
     用户 2026-11-06 定补 MIT：加了 `LICENSE`，脚本与 1.0.0 清单加上 `LicenseUrl`，重新对着 1.10.0 Schema 校验通过（`df9a149`）。
+  - 2026-11-17 更新：仓库迁移至 `dataomni-rs/DataOmni` 且官网 `https://dataomni.dev` 上线后，核实 `microsoft/winget-pkgs` 尚未收录旧名，将脚本与目录切换为 `DataOmni.DataOmni`（`manifests/d/DataOmni/DataOmni/1.1.0/`）并生成 `1.1.0` 正式版三份清单。
 - 到社区发帖由用户自己做。
 - 路线第 2 条里的「已有库的 ER 图」早已实现（`9b63f19`），路线文档那条是旧的。
 

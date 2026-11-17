@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 为一个已发布的版本生成 winget 清单（TODOs「1.x」U2）。
 #
-#   scripts/winget-manifest.sh 1.0.0
+#   scripts/winget-manifest.sh 1.1.0
 #
-# 写到 packaging/winget/manifests/y/yuxuetr/DataOmni/<版本>/，目录结构与 microsoft/winget-pkgs 相同，
+# 写到 packaging/winget/manifests/d/DataOmni/DataOmni/<版本>/，目录结构与 microsoft/winget-pkgs 相同，
 # 整个目录拷进那个仓库的同一路径就能提 PR。提 PR 是对外操作，由用户自己做（用户 2026-11-06 定）。
 #
 # 安装包的 SHA-256 取 GitHub 发布页给的 digest（服务端算的），不重新下载。两种安装包都列上：
@@ -12,16 +12,16 @@ set -euo pipefail
 
 version="${1:-}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: $0 <version>   (a published release such as 1.0.0; prereleases do not go to winget)" >&2
+  echo "usage: $0 <version>   (a published release such as 1.1.0; prereleases do not go to winget)" >&2
   exit 2
 fi
 
-repo="yuxuetr/DataOmni"
+repo="dataomni-rs/DataOmni"
 tag="v$version"
-id="yuxuetr.DataOmni"
+id="DataOmni.DataOmni"
 manifest_version="1.10.0"
 root="$(cd "$(dirname "$0")/.." && pwd)"
-out="$root/packaging/winget/manifests/y/yuxuetr/DataOmni/$version"
+out="$root/packaging/winget/manifests/d/DataOmni/DataOmni/$version"
 
 exe="DataOmni_${version}_x64-setup.exe"
 msi="DataOmni_${version}_x64_en-US.msi"
@@ -92,18 +92,19 @@ $header
 PackageIdentifier: $id
 PackageVersion: $version
 PackageLocale: en-US
-Publisher: yuxuetr
-PublisherUrl: https://github.com/yuxuetr
+Publisher: DataOmni
+PublisherUrl: https://dataomni.dev
 PublisherSupportUrl: https://github.com/$repo/issues
 PackageName: DataOmni
-PackageUrl: https://github.com/$repo
+PackageUrl: https://dataomni.dev
 License: MIT
 LicenseUrl: https://github.com/$repo/blob/main/LICENSE
-ShortDescription: Desktop client for relational databases, MongoDB, Redis, Neo4j and Elasticsearch
+ShortDescription: Native desktop client for SQL, MongoDB, Redis, Neo4j and Elasticsearch
 Description: |-
-  Browse schemas, edit table data, run queries and export results for MySQL, PostgreSQL, SQLite,
-  SQL Server, Oracle, DuckDB and ClickHouse, with dedicated workspaces for MongoDB, Redis, Neo4j and
-  Elasticsearch. Passwords are kept in the system keychain, never in plain text on disk.
+  Browse schemas, edit table data with previewed SQL guardrails, run queries, diff schemas, generate ORM
+  models, and export results for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, DuckDB and ClickHouse,
+  with dedicated workspaces for MongoDB, Redis, Neo4j and Elasticsearch plus a read-only CLI and MCP server.
+  Passwords are kept in the system keychain, never in plain text on disk.
 Moniker: dataomni
 Tags:
 - clickhouse
@@ -111,6 +112,7 @@ Tags:
 - database-client
 - duckdb
 - elasticsearch
+- mcp
 - mongodb
 - mysql
 - neo4j
