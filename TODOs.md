@@ -41,9 +41,9 @@
 - [x] S1 移除后端残留的 `tauri-plugin-sql`（收口 `2.4` 与 `QS5`）（`b3ca533`、`da26bf9`，2026-11-17）
   - 已做：在 `services/sqlx_pool.rs` 定义本地 `DbPool`（`Sqlite` / `MySql` / `Postgres`）并复用同步 `PoolRegistry` 作为 `SqlxRegistry`（`std::sync::Mutex` 从编译期阻止跨 `.await` 持锁，彻底杜绝 F24）；`PoolRegistry` 补 `take` 供 `close` 摘池后异步关闭；从 `src-tauri/Cargo.toml` 与 `src-tauri/src/lib.rs` 移除 `tauri-plugin-sql`，删除 `database_smoke.rs` 对 `Cargo.lock` 插件版本号的字符串锁测试；`databaseHandle.test.ts` 新增门禁断言 `Cargo.toml` 与 `lib.rs` 不再出现该插件；同步在 `.cargo/audit.toml` 记录当日新增的 `chrono` / `chrono-tz` `unmaintained` 提示（`RUSTSEC-2026-0543/0555/0559`，无漏洞）。
   - 验证：实现前 `databaseHandle.test.ts` 反向变红；实现后 `bun run lint`、`bun run typecheck`、前端 186 个文件 2305 条单测、后端 451 条单测与冒烟测试、双模式 `clippy` 及 `cargo audit`（1527 条规则）全绿。
-- [-] S2 解耦官网公开版本号与开发期 `src-tauri/tauri.conf.json`，消除发版窗口期 404 隐患（官网独立 PR `#36` `1e5d264`）
+- [x] S2 解耦官网公开版本号与开发期 `src-tauri/tauri.conf.json`，消除发版窗口期 404 隐患（`#36`，2026-11-17）
   - 已做：新增 `site/release.json` 作为官网下载链接的唯一已发布版本源（`is_stable_semver` 显式拒绝 `-rc` 等预发布串）；从 `.github/workflows/site.yml` 与 `.github/workflows/ci.yml` 的官网监听路径摘除 `src-tauri/tauri.conf.json`；`site.yml` 新增 `release: types: [published]`（过滤 `prerelease == false`）经 `DATAOMNI_SITE_RELEASE_VERSION` 在正式发版时自动部署官网。
-  - 验证：`site_release_version_stays_decoupled_from_unreleased_tauri_conf_bumps` 将 `tauri.conf.json` 设为 `9.9.9` 时官网仍保持 `1.1.0`，传入 `v1.2.0-rc.1` 被拒；待本应用 PR 合入更新 `audit.toml` 后合入 `#36`。
+  - 验证：`site_release_version_stays_decoupled_from_unreleased_tauri_conf_bumps` 将 `tauri.conf.json` 设为 `9.9.9` 时官网仍保持 `1.1.0`，传入 `v1.2.0-rc.1` 被拒；官网独立 PR `#36` 已合入 `main`。
 - [x] S3 补齐包元数据与应用内「官网 / 问题反馈」直达入口（`4bdc0db`，2026-11-17）
   - 已做：`src-tauri/Cargo.toml` 补齐 `license = "MIT"`、`homepage = "https://dataomni.dev"`、`repository = "https://github.com/dataomni-rs/DataOmni"`（`tauri.conf.json` 的 `bundle.publisher` 在 `microsoft/winget-pkgs#481999` 合入前保持不动）；新增受控枚举命令 `open_project_link`（仅允许 `website` / `websiteZh` / `issues` 三个固定 HTTPS 目标，不开放任意 URL）与 `DATAOMNI_EXTERNAL_LINK_OPEN_FAILED` 翻译映射；在 `AboutSection.tsx`（按界面语言直达 `/` 或 `/zh/`）与 macOS `Help` 菜单（`app_menu.rs`）补齐官网与反馈入口。
   - 验证：`AboutSection.test.tsx` 先写先红后绿；`catalog.test.ts`、`backendError.test.ts`、`shortcuts.test.ts`、`databaseHandle.test.ts`（前端仍保持 5 条权限）及 `app_commands` 单测全绿；无头 Chrome 实际渲染核对中英双语设置面板按钮单行排布正常。
@@ -69,17 +69,15 @@
 
 ### 第三阶段（W）：官网实用文档体系（`dataomni.dev` 易用性承接）
 
-- [ ] W1 `site/` 纯 Rust 静态生成器扩展多页文档布局（不引入第三方前端框架）
-  - 新增文档共用布局（顶栏、侧边目录、标题锚点、代码块语法高亮与一键复制、中英对应页互跳），自动纳入 `sitemap.xml`、`BreadcrumbList` / `TechArticle` JSON-LD 与 `verify_html_invariants` 死链/长度门禁，双主题桌面与移动端渲染核对。
-- [ ] W2 上线首批 4 篇核心双语实用文档页（内容与当前代码逐字对齐）
-  - `/docs/quickstart/`（及 `/zh/docs/quickstart/`）：三平台安装、系统钥匙串授权、SSH 跳板机与 TLS 四档含义、生产环境护栏与单事务提交流程；
-  - `/docs/mcp/`（及 `/zh/docs/mcp/`）：只读 Agent 访问开启、生产库物理隔离机制、7 种主流 AI 编程工具配置与排错；
-  - `/docs/cli/`（及 `/zh/docs/cli/`）：`dataomni` 命令行配置、SQL 与四大 NoSQL 只读命令、JSON 输出与退出码（`0`–`4`）速查；
-  - `/docs/databases/`（及 `/zh/docs/databases/`）：17 种数据库连接指南（Oracle 内置驱动免配、openGauss sha256 转发、DuckDB 直查 Parquet/JSON、MySQL 5.7 TLS）与完整真库兼容性矩阵。
-- [ ] W3 上线 `/changelog/`（及 `/zh/changelog/`）双语版本更新记录页
-  - 呈现 `v1.0.0`、`v1.1.0` 及后续版本的实用改进与兼容性说明，打通官网导航与应用更新提示。
-- [ ] W4 外部技术生态目录标准材料就绪
-  - 备齐提交 MCP 目录（`modelcontextprotocol/servers`、Smithery、Glama）与 `awesome-tauri` / `awesome-rust` 所需的英文简介、安全边界说明与标准配置示例。
+- [x] W1 `site/` 纯 Rust 静态生成器扩展多页文档布局（`97b3ac9`，2026-11-17）
+  - 已做：零第三方依赖新增 `site/src/docs.rs` 与 `render_doc_page`，支持顶栏激活态、侧边页面切换（移动端自适应无滚动条药丸横栏）、`scroll-target-group` + `IntersectionObserver` 目录高亮、暗色语法代码块一键复制、同路径中英互跳、多页 `hreflang` `sitemap.xml` 及 `BreadcrumbList` + `TechArticle` 结构化数据；`verify_html_invariants` 新增跨页路由与锚点死链门禁（先写单测先红后绿）。
+  - 验证：`bun run site:check`（5/5 单测含跨页死链反向校验）、`bunx eslint site/assets` 全绿；无头 Chrome 实际渲染核对桌面（1440×960 深/浅色）与移动端（375×812，全部路由 `scrollWidth <= 375` 零横向溢出）。
+- [x] W2 上线首批 4 篇核心双语实用文档页（`97b3ac9`，2026-11-17）
+  - 已上线 `/docs/quickstart/`、`/docs/mcp/`（复用 7 种 AI 工具预设交互组件）、`/docs/cli/` 与 `/docs/databases/`（复用 18 项真库冒烟兼容台账单一事实源）及对应 `/zh/docs/*` 中文页，所有命令、路径与安全边界与代码逐字对齐。
+- [x] W3 上线 `/changelog/`（及 `/zh/changelog/`）双语版本更新记录页（`97b3ac9`，2026-11-17）
+  - 已整理上线 `v1.1.0`、`v1.0.0` 发布纪要与 `connections.json` 前后向无损兼容承诺，并在顶栏与全站页脚打通入口。
+- [x] W4 外部技术生态目录标准材料就绪（`193247a`，2026-11-17）
+  - 已在 `packaging/directories/README.md` 备齐 `modelcontextprotocol/servers`、Smithery、Glama、`awesome-tauri` 与 `awesome-rust` 的英文简介、四层安全边界说明及三平台标准 `mcpServers` 配置片段。
 
 ### 第四阶段（E）：审慎扩展高价值实用能力（`v1.2.0` 候选池，前置 S + V 清零后开启）
 
