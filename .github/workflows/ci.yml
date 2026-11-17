@@ -56,7 +56,7 @@ jobs:
             esac
 
             case "$file" in
-              site/*|images/*|src-tauri/tauri.conf.json|src-tauri/icons/*|package.json|bun.lock|eslint.config.js|rust-toolchain.toml|.github/workflows/ci.yml|.github/workflows/site.yml)
+              site/*|images/*|src-tauri/icons/*|package.json|bun.lock|eslint.config.js|rust-toolchain.toml|.github/workflows/ci.yml|.github/workflows/site.yml)
                 site_changed=true
                 ;;
             esac

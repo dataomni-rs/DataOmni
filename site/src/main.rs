@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const CUSTOM_DOMAIN: &str = "dataomni.dev\n";
+const RELEASE_VERSION_ENV: &str = "DATAOMNI_SITE_RELEASE_VERSION";
 
-fn extract_tauri_version(config_text: &str) -> Result<String, String> {
+fn extract_release_version(config_text: &str) -> Result<String, String> {
   for line in config_text.lines() {
     let trimmed = line.trim();
     let Some(rest) = trimmed.strip_prefix("\"version\"") else {
@@ -22,27 +23,39 @@ fn extract_tauri_version(config_text: &str) -> Result<String, String> {
     let Some(unquoted) = candidate.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
       continue;
     };
-    if is_semver_like(unquoted) {
-      return Ok(unquoted.to_string());
-    }
-    return Err(format!("invalid version string in tauri.conf.json: {unquoted}"));
+    return parse_stable_version(unquoted);
   }
-  Err("missing \"version\" field in src-tauri/tauri.conf.json".to_string())
+  Err("missing \"version\" field in site/release.json".to_string())
 }
 
-fn is_semver_like(version: &str) -> bool {
-  let base = version.split_once('-').map_or(version, |(head, _)| head);
-  let mut parts = base.split('.');
+fn parse_stable_version(raw: &str) -> Result<String, String> {
+  let version = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
+  if is_stable_semver(version) {
+    Ok(version.to_string())
+  } else {
+    Err(format!("invalid stable release version (prereleases not allowed on site): {raw}"))
+  }
+}
+
+fn is_stable_semver(version: &str) -> bool {
+  let mut parts = version.split('.');
   let (Some(major), Some(minor), Some(patch), None) =
     (parts.next(), parts.next(), parts.next(), parts.next())
   else {
     return false;
   };
   let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
-  digits(major)
-    && digits(minor)
-    && digits(patch)
-    && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+  digits(major) && digits(minor) && digits(patch)
+}
+
+fn resolve_release_version(repo_root: &Path, env_override: Option<&str>) -> Result<String, String> {
+  if let Some(raw) = env_override.map(str::trim).filter(|value| !value.is_empty()) {
+    return parse_stable_version(raw);
+  }
+  let release_path = repo_root.join("site/release.json");
+  let release_json = fs::read_to_string(&release_path)
+    .map_err(|err| format!("failed to read {}: {err}", release_path.display()))?;
+  extract_release_version(&release_json)
 }
 
 fn copy_checked(src: &Path, dst: &Path) -> Result<(), String> {
@@ -208,10 +221,8 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
 }
 
 pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
-  let tauri_conf_path = repo_root.join("src-tauri/tauri.conf.json");
-  let tauri_conf = fs::read_to_string(&tauri_conf_path)
-    .map_err(|err| format!("failed to read {}: {err}", tauri_conf_path.display()))?;
-  let version = extract_tauri_version(&tauri_conf)?;
+  let env_override = std::env::var(RELEASE_VERSION_ENV).ok();
+  let version = resolve_release_version(repo_root, env_override.as_deref())?;
 
   if out_dir.exists() {
     fs::remove_dir_all(out_dir)
@@ -299,15 +310,34 @@ mod tests {
   use crate::render::escape_html;
 
   #[test]
-  fn parses_tauri_version_and_rejects_malformed_values() {
-    let valid = "{\n  \"productName\": \"DataOmni\",\n  \"version\": \"1.1.0\",\n}\n";
-    assert_eq!(extract_tauri_version(valid).unwrap(), "1.1.0");
+  fn parses_stable_release_version_and_rejects_prereleases_or_malformed_values() {
+    let valid = "{\n  \"version\": \"1.1.0\"\n}\n";
+    assert_eq!(extract_release_version(valid).unwrap(), "1.1.0");
+    assert_eq!(parse_stable_version("v1.2.0").unwrap(), "1.2.0");
 
     let rc = "{\n  \"version\": \"1.2.0-rc.1\"\n}\n";
-    assert_eq!(extract_tauri_version(rc).unwrap(), "1.2.0-rc.1");
+    assert!(extract_release_version(rc).is_err());
+    assert!(parse_stable_version("v1.2.0-rc.1").is_err());
 
     let invalid = "{\n  \"version\": \"1.1; rm -rf /\"\n}\n";
-    assert!(extract_tauri_version(invalid).is_err());
+    assert!(extract_release_version(invalid).is_err());
+  }
+
+  #[test]
+  fn site_release_version_stays_decoupled_from_unreleased_tauri_conf_bumps() {
+    let temp_root =
+      std::env::temp_dir().join(format!("dataomni-site-version-{}", std::process::id()));
+    write_checked(&temp_root.join("site/release.json"), "{\n  \"version\": \"1.1.0\"\n}\n")
+      .unwrap();
+    write_checked(&temp_root.join("src-tauri/tauri.conf.json"), "{\n  \"version\": \"9.9.9\"\n}\n")
+      .unwrap();
+
+    assert_eq!(resolve_release_version(&temp_root, None).unwrap(), "1.1.0");
+    assert_eq!(resolve_release_version(&temp_root, Some("")).unwrap(), "1.1.0");
+    assert_eq!(resolve_release_version(&temp_root, Some("v1.2.0")).unwrap(), "1.2.0");
+    assert!(resolve_release_version(&temp_root, Some("v1.2.0-rc.1")).is_err());
+
+    let _ = fs::remove_dir_all(&temp_root);
   }
 
   #[test]
