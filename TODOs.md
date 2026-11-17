@@ -58,9 +58,9 @@
     1. SQLite 经后端连接池打开、对象树与结构页读取、编辑提交、多句柄独立关闭、缺失路径不误建空文件；
     2. 开启严格 CSP 后，编辑器、ER 图 PNG 导出、四大 NoSQL 工作区及更新检查正常，`dataomni.log` 零 CSP 报错；
     3. 打包二进制执行 `dataomni mcp` 经 stdio 跑通只读查询、写语句 `refused` 与生产库 `not_found`。
-- [-] V2 DuckDB 与 Oracle 23ai 真库补验绑定参数及结构比对（`57f70c5`，2026-11-17）
+- [x] V2 DuckDB 与 Oracle 23ai 真库补验绑定参数及结构比对（`57f70c5`、`53c9c5f`，2026-11-17）
   - [x] DuckDB：已通过 `catalog_queries_dump` 直接调应用自己的 `duckdb::open` / `DuckDbPool::select` / `SessionConnection` 接入 `scripts/schema-diff-verify.sh`，实测 8 项差异生成 10 条语句执行后再比为空；`--skip-kind=column-changed` 反向验证精确留下 `users.score (type, nullable, default)` 并以退出码 1 报错。
-  - [-] Oracle 23ai Free：已在 `oracle_smoke.rs` 新增 `oracle_binds_editor_parameters`（`D2` 文本 / 数字 / NULL / `q'[...]'` 字面量排除）与 `oracle_index_catalog_distinguishes_constraints_from_plain_indexes`（`D3` `is_constraint` 与删约束 / 删索引语句），并顺手修复 `.github/workflows/nightly-databases.yml` 里 `DATAOMNI_ORACLE_CLIENT_DIR` 错写为 `resources/oracle-client`（实为 `vendor/instantclient`）及 Ubuntu 24.04 缺 `libaio.so.1` 软链两处缺陷；待合入后触发 GitHub Actions `oracle-smoke` 跑通真库结果。
+  - [x] Oracle 23ai Free：已在 `oracle_smoke.rs` 新增 `oracle_binds_editor_parameters`（`D2` 文本 / 数字 / NULL / `q'[...]'` 字面量排除）与 `oracle_index_catalog_distinguishes_constraints_from_plain_indexes`（`D3` `is_constraint` 与删约束 / 删索引语句），补齐 `.github/workflows/nightly-databases.yml` 的 `vendor/instantclient` `LD_LIBRARY_PATH`、`libaio.so.1` 软链及 `FREEPDB1` `dataomni` 测试账号（`USERS` ASSM 表空间），GitHub Actions Run `44104019254` 七套真库（含 Oracle 23ai Free 31/31 用例）全绿通过。
 - [ ] V3 持续真库回归（Nightly Smoke）稳定性收口（跟进 `QT3`）
   - 跟踪 `.github/workflows/nightly-databases.yml` 连续四周定时运行记录；按服务端真实能力裁剪兼容库上的不支持类型夹具（如 CockroachDB / openGauss 的 `INT[][]`、`XML`），确保「红 = 真实退化」。
 - [x] V4 日常高频交互稳态巡检（`2d901ed`，2026-11-17）
@@ -84,8 +84,9 @@
 - [x] E1 从主流客户端导入连接配置（Navicat `.ncx` / DBeaver `data-sources.json`）（`f15a136`，2026-11-17）
   - 已写最小设计说明 `rfcs/external-connection-import.md`：纯函数 `src/utils/externalConnections.ts` 解析 Navicat `.ncx`（XML，含 `InitialDatabase` / `Database`、Oracle SID、MariaDB 预设、TLS CA、SSH 隧道）、DBeaver `data-sources.json`（含 JDBC URL 兜底、SSH handler、`prod` 环境标记）及 DataOmni JSON，不支持的驱动列于预览底部；前后端双重剥离所有第三方加密口令与私钥密码并强制重置 `agent_access: 'off'`，首次连接时引导输入口令存入系统钥匙串。
   - 验证：`externalConnections.test.ts`、`ConnectionImportDialog.test.tsx`、`i18n/catalog.test.ts` 与 Rust `import_profiles` 单测均先红后绿，无头 Chrome 实际渲染核对中英双语深浅色导入预览弹窗。
-- [ ] E2 本地参数化查询模板 / 常用 SQL 片段（承接 `4.4`，复用 `D2` `:name` 绑定参数）
-  - 先写最小设计说明：本地落盘（纳入 `R1` 兼容样本门），支持在编辑器与命令面板（`⌘K`）检索插入并直接触发 `:name` 参数填值执行；不做云同步与复杂模板脚本语法。
+- [x] E2 本地参数化查询模板 / 常用 SQL 片段（`63aabab`，2026-11-17）
+  - 已写最小设计说明 `rfcs/query-templates.md` 与 `R1` 样本 `fixtures/on-disk-0.5/query-templates.json`：`src/utils/queryTemplates.ts` 直接复用 `D2` `:name` 绑定参数词法（零模板宏语法），内置高版本拒写保护（`newerTemplatesOnDisk`）、未知方言降级保留及 200 条 / 512 KB 配额上限。
+  - 验证：`queryTemplates.test.ts`、`QueryTemplatesDialog.test.tsx`、`shortcuts.test.ts` 与 `i18n/catalog.test.ts` 均先红后绿；`SqlEditor` 工具栏与 `⌘K` 命令面板双入口联调，无头 Chrome 实际渲染核对中英双语深浅色弹窗与命令面板。
 - [ ] E3 签名公证就绪后的应用内平滑更新（承接 `roadmap-1.0` `R3`，按签名落地条件触发）
 - [ ] E4 国产与更多数据库按证据扩展（承接 `P7`：拿到安装包后接 KingbaseES `B1b`；出现达梦需求时先做 `B4` 驱动按 feature 拆分）
 
@@ -138,7 +139,7 @@
 
 ### 4.4 可选外围能力
 
-- [ ] 连接和查询模板（已纳入 `v1.2` 路线 **`E1`** 连接迁移导入与 **`E2`** 本地参数化查询模板）
+- [x] 连接和查询模板（已由 `v1.2` 路线 **`E1`** 连接迁移导入 `f15a136` 与 **`E2`** 本地参数化查询模板 `63aabab` 完成）
 - [ ] ~~插件或扩展机制~~ **评估完成：不做**（同类诉求到第三个再谈机制）
 - [ ] ~~团队配置同步~~ **当前版本不做**（需服务端；已有本地连接导入导出 `cd1c442`）
 

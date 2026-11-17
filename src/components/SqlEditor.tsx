@@ -15,6 +15,7 @@ import {
   Square,
   AlignLeft,
   Save,
+  BookMarked,
   PanelTopClose,
   PanelTopOpen,
   ChevronDown,
@@ -38,6 +39,8 @@ import { SHORTCUTS, formatShortcut, matchesShortcut } from '../utils/shortcuts';
 import { DestructiveStatementPrompt } from './DestructiveStatementPrompt';
 import { QueryPlanDialog } from './QueryPlanDialog';
 import { QueryParametersDialog } from './QueryParametersDialog';
+import { QueryTemplatesDialog } from './QueryTemplatesDialog';
+import type { QueryTemplate } from '../utils/queryTemplates';
 import { dialectSupportsParameters, parameterNames } from '../utils/queryParameters';
 import { highestRiskNeedingConfirmation, type StatementRisk } from '../utils/statementRisk';
 import { statementReversibility } from '../utils/statementReversibility';
@@ -206,6 +209,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
   const [hasSelection, setHasSelection] = useState(false);
   // 正在看执行计划的那条语句
   const [explaining, setExplaining] = useState<string | null>(null);
+  const [showTemplates, setShowTemplates] = useState(false);
   const [formatError, setFormatError] = useState<string | null>(null);
   const formatterLanguage = sqlFormatterLanguage(connection.db_type);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -457,6 +461,59 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
     view.dispatch(formatTransaction(plan));
   };
 
+  /** 插入模板：走 CodeMirror transaction 以保留 ⌘Z 撤销栈 */
+  const insertTemplateSql = (templateSql: string) => {
+    const view = editorViewRef.current;
+    if (view) {
+      const currentText = view.state.doc.toString();
+      if (currentText.trim() === '') {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: templateSql },
+          selection: { anchor: templateSql.length },
+          scrollIntoView: true,
+        });
+      } else {
+        const { from, to } = view.state.selection.main;
+        const needsNewline =
+          from === to && from > 0 && view.state.doc.sliceString(from - 1, from) !== '\n';
+        const inserted = needsNewline ? `\n${templateSql}` : templateSql;
+        view.dispatch({
+          changes: { from, to, insert: inserted },
+          selection: { anchor: from + inserted.length },
+          scrollIntoView: true,
+        });
+      }
+      view.focus();
+      return;
+    }
+    setSqlInput(sqlInput.trim() === '' ? templateSql : `${sqlInput}\n${templateSql}`);
+  };
+
+  const insertAndRunTemplate = (template: QueryTemplate) => {
+    insertTemplateSql(template.sql);
+    const candidates = splitSqlStatements(template.sql, statementDialect);
+    const statementsToRun = candidates.length > 0 ? candidates : [template.sql];
+    runGuarded(statementsToRun, () => {
+      void (async () => {
+        for (const statement of statementsToRun) {
+          const succeeded = await executeSql(statement);
+          if (!succeeded) {
+            break;
+          }
+        }
+      })();
+    });
+  };
+
+  const templateCandidateSql = (() => {
+    const view = editorViewRef.current;
+    const selection = view?.state.selection.main;
+    if (view && selection && !selection.empty) {
+      return view.state.doc.sliceString(selection.from, selection.to);
+    }
+    return sqlInput;
+  })();
+
   /** 把光标移到出错处并滚过去。选中一个字符，让它在编辑器里看得见 */
   const jumpToOffset = (offset: number) => {
     const view = editorViewRef.current;
@@ -537,6 +594,16 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
           dbType={connection.db_type}
           databaseLabel={serverLabel(connection)}
           onClose={() => setExplaining(null)}
+        />
+      )}
+
+      {showTemplates && (
+        <QueryTemplatesDialog
+          currentDbType={connection.db_type}
+          currentSql={templateCandidateSql}
+          onInsert={(template) => insertTemplateSql(template.sql)}
+          onInsertAndRun={insertAndRunTemplate}
+          onClose={() => setShowTemplates(false)}
         />
       )}
       {/* SQL编辑器头部 */}
@@ -629,6 +696,17 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
               <span>{t('editor.parse')}</span>
             </button>
           )}
+
+          {/* SQL 查询模板（复用 D2 :name 绑定参数） */}
+          <button
+            type="button"
+            onClick={() => setShowTemplates(true)}
+            aria-label={t('templates.open')}
+            title={t('templates.open')}
+            className="flex items-center rounded-control border border-line-strong p-1.5 text-fg-muted transition-colors hover:bg-surface-hover"
+          >
+            <BookMarked size={14} />
+          </button>
 
           {/* 另存为 .sql。和格式化一样只给图标——头部已经很挤 */}
           <button

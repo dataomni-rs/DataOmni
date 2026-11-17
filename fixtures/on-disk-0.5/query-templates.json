@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": "tpl-orders-by-customer",
+      "title": "按客户查近期订单",
+      "sql": "SELECT id, status, total_cents, created_at\nFROM orders\nWHERE customer_id = :customer_id\n  AND created_at >= :since\nORDER BY created_at DESC\nLIMIT 50;",
+      "dbType": "postgresql",
+      "updatedAt": "2026-11-17T10:00:00.000Z"
+    },
+    {
+      "id": "tpl-table-row-sample",
+      "title": "按状态统计行数",
+      "sql": "SELECT status, COUNT(*) AS total\nFROM events\nWHERE tenant_id = :tenant_id\nGROUP BY status;",
+      "updatedAt": "2026-11-16T08:30:00.000Z"
+    }
+  ]
+}

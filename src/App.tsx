@@ -80,6 +80,9 @@ import { PanelResizeHandle } from './components/PanelResizeHandle';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { ConnectionImportDialog } from './components/ConnectionImportDialog';
 import { QueryHistoryDialog } from './components/QueryHistoryDialog';
+import { QueryTemplatesDialog } from './components/QueryTemplatesDialog';
+import { useTemplateStore } from './stores/templateStore';
+import { filterQueryTemplates, templateParameterNames } from './utils/queryTemplates';
 import { commitConnectionImport, pickConnectionImportFile } from './utils/connectionTransfer';
 import type { ParsedConnectionImport } from './utils/externalConnections';
 import {
@@ -179,6 +182,8 @@ function App() {
   const { connect, openDatabaseFile, error: connectError, clearError: clearConnectError } = useProfileConnector();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const queryTemplates = useTemplateStore((state) => state.templates);
   const [pendingImport, setPendingImport] = useState<ParsedConnectionImport | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
@@ -749,12 +754,41 @@ function App() {
       });
     }
 
+    // 当前连接支持 SQL 时，把兼容的查询模板直接列进命令面板，回车即开新查询标签
+    if (activeConnection && activeSpeaksSql) {
+      const compatibleTemplates = filterQueryTemplates(queryTemplates, {
+        query: '',
+        currentDbType: activeConnection.config.db_type,
+        scope: 'compatible'
+      });
+      for (const template of compatibleTemplates) {
+        const params = templateParameterNames(
+          template.sql,
+          template.dbType ?? activeConnection.config.db_type
+        );
+        items.push({
+          id: `template:${template.id}`,
+          title: template.title,
+          keywords: `${template.sql} ${params.join(' ')}`,
+          group: t('palette.group.template'),
+          detail: params.map((param) => `:${param}`).join(' '),
+          run: () => openSqlTab(template.sql, template.title)
+        });
+      }
+    }
+
     items.push(
       {
         id: 'action:new-sql',
         title: t('palette.action.newSql'),
         group: t('palette.group.action'),
         run: () => openSqlTab()
+      },
+      {
+        id: 'action:query-templates',
+        title: t('palette.action.queryTemplates'),
+        group: t('palette.group.action'),
+        run: () => setShowTemplates(true)
       },
       {
         id: 'action:open-sql-file',
@@ -1175,6 +1209,16 @@ function App() {
               : activeConnection.config.db_type === DatabaseType.Neo4j ? 'cypher'
                 : activeConnection.config.db_type === DatabaseType.Elasticsearch ? 'elasticsearch'
                   : activeConnection.config.db_type === DatabaseType.MongoDB ? 'mongodb' : null}
+        />
+      )}
+
+      {showTemplates && (
+        <QueryTemplatesDialog
+          currentDbType={activeSpeaksSql ? activeConnection?.config.db_type : undefined}
+          onOpenInTab={activeSpeaksSql
+            ? (template) => openSqlTab(template.sql, template.title)
+            : undefined}
+          onClose={() => setShowTemplates(false)}
         />
       )}
 
