@@ -28,6 +28,9 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 
 const { default: App } = await import('./App');
 const { useQueryStore } = await import('./stores/queryStore');
+const { useWorkspaceStore } = await import('./stores/workspaceStore');
+const { createSqlWorkspaceTab } = await import('./contracts/workspace');
+const { loadWorkspaceSnapshot } = await import('./utils/workspacePersistence');
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,6 +79,37 @@ describe('App', () => {
     }
     expect(commits).toEqual([]);
 
+    await act(async () => root.unmount());
+  });
+
+  it('尚未满 500ms 防抖时若触发 beforeunload 或切入后台隐藏，立刻把最新草稿冲刷落盘', async () => {
+    localStorage.clear();
+    useWorkspaceStore.getState().restoreTabs([createSqlWorkspaceTab('p1', { id: 'sql-flush' })], 'sql-flush');
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+
+    await act(async () => {
+      useQueryStore.getState().restoreDocuments({ 'sql-flush': 'SELECT 42;' });
+    });
+    // 还没满 500ms 防抖，localStorage 里尚未写入最新草稿
+    expect(loadWorkspaceSnapshot()?.drafts['sql-flush']).toBeUndefined();
+
+    window.dispatchEvent(new Event('beforeunload'));
+    expect(loadWorkspaceSnapshot()?.drafts['sql-flush']).toBe('SELECT 42;');
+
+    await act(async () => {
+      useQueryStore.getState().restoreDocuments({ 'sql-flush': 'SELECT 99;' });
+    });
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(loadWorkspaceSnapshot()?.drafts['sql-flush']).toBe('SELECT 99;');
+
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
     await act(async () => root.unmount());
   });
 });

@@ -226,14 +226,23 @@ function App() {
     : null;
   const menuTab = tabMenu ? tabs.find((tab) => tab.id === tabMenu.tabId) ?? null : null;
 
-  // 标签与草稿的变化防抖后写回快照；页面卸载时把没写出去的补上
+  // 标签与草稿的变化防抖后写回快照；卸载、刷新或窗口切入后台（如 ⌘Q 前失焦 / ⌘H 隐藏）时立刻补写
   const snapshotWatcher = useRef<WorkspaceSnapshotWatcher | null>(null);
   useEffect(() => {
     const watcher = watchWorkspaceSnapshot();
     snapshotWatcher.current = watcher;
+    const flushOnHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        watcher.flush();
+      }
+    };
     window.addEventListener('pagehide', watcher.flush);
+    window.addEventListener('beforeunload', watcher.flush);
+    document.addEventListener('visibilitychange', flushOnHidden);
     return () => {
       window.removeEventListener('pagehide', watcher.flush);
+      window.removeEventListener('beforeunload', watcher.flush);
+      document.removeEventListener('visibilitychange', flushOnHidden);
       watcher.stop();
       snapshotWatcher.current = null;
     };

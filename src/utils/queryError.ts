@@ -38,6 +38,25 @@ export function reportedByDatabase(error: QueryExecutionError): boolean {
 }
 
 /**
+ * 这一跳失败是不是因为连接（或 SSH 隧道）已经断了。
+ *
+ * 表数据浏览、表格批量写入与后台导入导出不走编辑器的 `executeStatement`：不认出它去调
+ * `reportConnectionLost()`，侧边栏就会一直挂着「已连接」、不出「重新连接」按钮，甚至在侧边栏
+ * 再点一次同一条连接也会被 `alreadyConnectedTo` 当作健康连接跳过。
+ */
+export function isConnectionLostError(error: unknown): boolean {
+  if (toQueryExecutionError(error).code === CONNECTION_LOST_CODE) {
+    return true;
+  }
+  const raw = typeof error === 'string'
+    ? error
+    : typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string'
+      ? (error as { message: string }).message
+      : '';
+  return raw.startsWith('DATAOMNI_CONNECTION_LOST') || raw.startsWith('DATAOMNI_SSH_TUNNEL_NOT_ESTABLISHED');
+}
+
+/**
  * 把 `invoke` reject 出来的东西变成结构化错误。
  *
  * 后端的 `execute_query` 现在 reject 一个对象；其余命令仍然 reject 一个字符串，

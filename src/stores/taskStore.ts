@@ -15,6 +15,7 @@ import { translateBackendMessage } from '../utils/backendError';
 import { describeError } from '../utils/describeError';
 import { formatBytes } from '../utils/formatBytes';
 import { translateNow } from './languageStore';
+import { reportConnectionLostIfActive } from './queryStore';
 
 export interface CsvImportTaskPayload {
   connectionId: string;
@@ -230,6 +231,10 @@ export const useTaskStore = create<TaskState>((set, get) => {
         summary.rowsInserted > 0
       );
     } catch (error) {
+      reportConnectionLostIfActive(
+        'mongo' in payload ? payload.mongo.connectionString : payload.connectionId,
+        error
+      );
       const reason = describeError(error, translateNow('import.failed'));
       log(id, [entry('error', reason)]);
       // 单事务下报错意味着那个事务从没提交过，库里什么都没留下；分批提交
@@ -286,6 +291,10 @@ export const useTaskStore = create<TaskState>((set, get) => {
         finish(id, 'cancelled', null, false);
         return;
       }
+      reportConnectionLostIfActive(
+        'mongo' in payload ? payload.mongo.connectionString : payload.connectionId,
+        error
+      );
       const reason = describeError(error, translateNow('export.failed'));
       log(id, [entry('error', reason)]);
       finish(id, 'failed', reason, false);

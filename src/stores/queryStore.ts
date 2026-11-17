@@ -22,6 +22,7 @@ import {
 import { describeError } from '../utils/describeError';
 import {
   CONNECTION_LOST_CODE,
+  isConnectionLostError,
   QUERY_CANCELLED_CODE,
   QUERY_TIMEOUT_CODE,
   reportedByDatabase,
@@ -333,22 +334,28 @@ export async function runReadQuery(
     }
   });
 
-  const driverResult = await invoke<DriverQueryResult>('execute_query', {
-    onBatch,
-    request: {
-      connectionId,
-      sessionId: session.id,
-      executionId: crypto.randomUUID(),
-      sql,
-      timeoutMs: queryTimeoutMs,
-      rowLimit: READ_QUERY_ROW_LIMIT,
-      byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
-      // 目录与表数据的读取一律自动提交：关掉自动提交管的是**用户在编辑器里
-      // 跑的语句**，浏览一张表不该让状态栏凭空亮起「事务中」。
-      // 事务已经开着时它照样落在同一个事务里——同一条连接，避不开，也正确
-      autocommit: true
-    }
-  });
+  let driverResult: DriverQueryResult;
+  try {
+    driverResult = await invoke<DriverQueryResult>('execute_query', {
+      onBatch,
+      request: {
+        connectionId,
+        sessionId: session.id,
+        executionId: crypto.randomUUID(),
+        sql,
+        timeoutMs: queryTimeoutMs,
+        rowLimit: READ_QUERY_ROW_LIMIT,
+        byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
+        // 目录与表数据的读取一律自动提交：关掉自动提交管的是**用户在编辑器里
+        // 跑的语句**，浏览一张表不该让状态栏凭空亮起「事务中」。
+        // 事务已经开着时它照样落在同一个事务里——同一条连接，避不开，也正确
+        autocommit: true
+      }
+    });
+  } catch (error) {
+    reportConnectionLostIfActive(connectionId, error);
+    throw error;
+  }
 
   if (driverResult.kind !== 'rows') {
     return [];
@@ -367,6 +374,23 @@ export async function runReadQuery(
   }
 
   return rows;
+}
+
+/**
+ * 只有断线发生在**当前活动连接**上时才把工作区标为已断开：后台任务如果在用户切走之后才失败，
+ * 不得把新切过去的健康连接误标成已断开。
+ */
+export function reportConnectionLostIfActive(
+  target: string | null | undefined,
+  error: unknown
+): void {
+  if (!target || !isConnectionLostError(error)) {
+    return;
+  }
+  const state = useQueryStore.getState();
+  if (state.connectionId === target || state.connectionString === target) {
+    state.reportConnectionLost();
+  }
 }
 
 export const selectSqlDocumentHasUnsavedContent = (
@@ -1128,7 +1152,12 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
     if (!connectionId) {
       throw new Error(translateNow('error.notConnected'));
     }
-    await invoke<number[]>('execute_write_batch', { connectionId, statements });
+    try {
+      await invoke<number[]>('execute_write_batch', { connectionId, statements });
+    } catch (error) {
+      reportConnectionLostIfActive(connectionId, error);
+      throw error;
+    }
     await get().executeStatement(statementId);
   },
 })); 

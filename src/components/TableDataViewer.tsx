@@ -3,7 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { invoke } from '@tauri-apps/api/core';
 import { supportsFeature } from '../contracts/databaseSupport';
 import { useLanguageStore } from '../stores/languageStore';
-import { runReadQuery, useQueryStore } from '../stores/queryStore';
+import { reportConnectionLostIfActive, runReadQuery, useQueryStore } from '../stores/queryStore';
 import { editStartValue, isTaggedResultValue, unwrapResultValue } from '../utils/resultValues';
 import { describeError } from '../utils/describeError';
 import type { SerializedResultValue } from '../contracts/resultSet';
@@ -455,6 +455,7 @@ export default function TableDataViewer({
       return loadedSchema;
     } catch (err) {
       console.error('加载表结构失败:', err);
+      reportConnectionLostIfActive(connection.id, err);
       setError(describeReadError(err));
       return null;
     }
@@ -551,6 +552,7 @@ export default function TableDataViewer({
       }
     } catch (err) {
       console.error('加载表数据失败:', err);
+      reportConnectionLostIfActive(connection.id, err);
       // 原始错误必须可见，否则无从判断是类型解码、权限还是语法问题
       setError(describeReadError(err));
       // 上一次的行不留：列可能已经按新结构重读过（改了列名之后刷新），旧行里没有新列名，
@@ -964,6 +966,7 @@ export default function TableDataViewer({
       await loadTableData(currentPage);
       setCommitNotice(t('changes.committed', { count: committed }));
     } catch (error) {
+      reportConnectionLostIfActive(connection.id, error);
       const failure = toQueryExecutionError(error);
       const statementIndex = typeof (error as { statement_index?: unknown })?.statement_index === 'number'
         ? (error as { statement_index: number }).statement_index
