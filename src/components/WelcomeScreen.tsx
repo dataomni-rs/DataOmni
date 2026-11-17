@@ -7,8 +7,14 @@ import { orderProfilesByRecency } from '../utils/connectionRecency';
 import { serverLabel } from '../utils/serverPresets';
 import { connectionTarget } from '../utils/mongoConnection';
 import { EnvironmentBadgeTag } from './EnvironmentBadge';
+import { ConnectionImportDialog } from './ConnectionImportDialog';
 import { useLanguageStore } from '../stores/languageStore';
-import { exportConnections, importConnections } from '../utils/connectionTransfer';
+import {
+  commitConnectionImport,
+  exportConnections,
+  pickConnectionImportFile,
+} from '../utils/connectionTransfer';
+import type { ParsedConnectionImport } from '../utils/externalConnections';
 import { describeError } from '../utils/describeError';
 import type { ConnectionProfile } from '../contracts';
 
@@ -32,6 +38,7 @@ export function WelcomeScreen({ onConnect, onEdit }: WelcomeScreenProps) {
   const { connect, openDatabaseFile, connectingProfileId, error, clearError } = useProfileConnector();
   // 导入 / 导出的结果就写在这一页上：插件的 message 框在 macOS 打包版里不弹（见 dialogUsage.test.ts）
   const [transfer, setTransfer] = useState<{ failed: boolean; text: string } | null>(null);
+  const [pendingImport, setPendingImport] = useState<ParsedConnectionImport | null>(null);
 
   const runTransfer = async (action: () => Promise<string | null>) => {
     try {
@@ -185,13 +192,15 @@ export function WelcomeScreen({ onConnect, onEdit }: WelcomeScreenProps) {
         <div className="mt-2 flex shrink-0 gap-3 text-xs">
           <button
             type="button"
-            onClick={() => void runTransfer(async () => {
-              const text = await importConnections();
-              if (text) {
-                await loadConnections();
-              }
-              return text;
-            })}
+            onClick={() =>
+              void runTransfer(async () => {
+                const parsed = await pickConnectionImportFile();
+                if (parsed) {
+                  setPendingImport(parsed);
+                }
+                return null;
+              })
+            }
             className="flex items-center gap-1 text-fg-subtle hover:text-fg"
           >
             <ArrowDownToLine size={12} />
@@ -209,6 +218,22 @@ export function WelcomeScreen({ onConnect, onEdit }: WelcomeScreenProps) {
           )}
         </div>
       </div>
+
+      {pendingImport && (
+        <ConnectionImportDialog
+          parsed={pendingImport}
+          existingConnections={connections}
+          onClose={() => setPendingImport(null)}
+          onConfirm={async (selected) => {
+            await runTransfer(async () => {
+              const text = await commitConnectionImport(selected);
+              await loadConnections();
+              setPendingImport(null);
+              return text;
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

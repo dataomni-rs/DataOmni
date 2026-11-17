@@ -85,6 +85,7 @@ pub fn run() {
       open_project_link,
       export_connections,
       import_connections,
+      import_connection_profiles,
       test_connection,
       open_database_pool,
       sqlx_select,

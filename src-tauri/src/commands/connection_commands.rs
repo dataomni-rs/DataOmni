@@ -115,6 +115,15 @@ pub async fn import_connections(
   with_service(&service_state, &app_handle, |service| service.import_document(&content))
 }
 
+#[tauri::command]
+pub async fn import_connection_profiles(
+  profiles: Vec<ConnectionProfile>,
+  app_handle: AppHandle,
+  service_state: State<'_, ConnectionServiceState>,
+) -> Result<crate::services::connection_service::ConnectionImport, String> {
+  with_service(&service_state, &app_handle, |service| service.import_profiles(profiles))
+}
+
 /// 连接失败之后查一遍断在哪一段。
 ///
 /// 不经过 `ConnectionService`：这里只看主机、端口和文件路径，用不到凭据，

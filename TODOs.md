@@ -81,8 +81,9 @@
 
 ### 第四阶段（E）：审慎扩展高价值实用能力（`v1.2.0` 候选池，前置 S + V 清零后开启）
 
-- [ ] E1 从主流客户端导入连接配置（Navicat `.ncx` / DBeaver `data-sources.json`）
-  - 先写最小设计说明：只解析连接名、库类型、主机、端口、库名、用户名、SSH 隧道信息等非机密字段，默认关闭 Agent 访问；绝不破解第三方加密口令，首次连接时引导输入口令存入系统钥匙串。纯函数解析过正反单测后接入导入预览对话框。
+- [x] E1 从主流客户端导入连接配置（Navicat `.ncx` / DBeaver `data-sources.json`）（`f15a136`，2026-11-17）
+  - 已写最小设计说明 `rfcs/external-connection-import.md`：纯函数 `src/utils/externalConnections.ts` 解析 Navicat `.ncx`（XML，含 `InitialDatabase` / `Database`、Oracle SID、MariaDB 预设、TLS CA、SSH 隧道）、DBeaver `data-sources.json`（含 JDBC URL 兜底、SSH handler、`prod` 环境标记）及 DataOmni JSON，不支持的驱动列于预览底部；前后端双重剥离所有第三方加密口令与私钥密码并强制重置 `agent_access: 'off'`，首次连接时引导输入口令存入系统钥匙串。
+  - 验证：`externalConnections.test.ts`、`ConnectionImportDialog.test.tsx`、`i18n/catalog.test.ts` 与 Rust `import_profiles` 单测均先红后绿，无头 Chrome 实际渲染核对中英双语深浅色导入预览弹窗。
 - [ ] E2 本地参数化查询模板 / 常用 SQL 片段（承接 `4.4`，复用 `D2` `:name` 绑定参数）
   - 先写最小设计说明：本地落盘（纳入 `R1` 兼容样本门），支持在编辑器与命令面板（`⌘K`）检索插入并直接触发 `:name` 参数填值执行；不做云同步与复杂模板脚本语法。
 - [ ] E3 签名公证就绪后的应用内平滑更新（承接 `roadmap-1.0` `R3`，按签名落地条件触发）
