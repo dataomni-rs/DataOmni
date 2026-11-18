@@ -99,8 +99,7 @@ cask "dataomni" do
   version "$version"
   sha256 "$expected_sha"
 
-  url "https://github.com/dataomni-rs/DataOmni/releases/download/v#{version}/DataOmni_#{version}_aarch64.dmg",
-      verified: "github.com/dataomni-rs/DataOmni/"
+  url "https://github.com/dataomni-rs/DataOmni/releases/download/v#{version}/DataOmni_#{version}_aarch64.dmg"
   name "DataOmni"
   desc "Desktop client for SQL databases, MongoDB, Redis, Neo4j, and Elasticsearch"
   homepage "https://dataomni.dev/"
