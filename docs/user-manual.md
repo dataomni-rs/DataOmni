@@ -1,6 +1,6 @@
 # DataOmni 用户手册
 
-适用于 DataOmni 1.1.0。这份手册讲「怎么用」；「支持哪些
+适用于 DataOmni 1.2.0。这份手册讲「怎么用」；「支持哪些
 数据库、在哪些平台验过」以 [README](../README.md) 为准，这里不重复。
 
 界面上的名字按中文界面写。英文界面的对应项在同一个位置，意思相同。
@@ -320,6 +320,7 @@ SQLite 文件头（多半选错了文件）。
 ### 管理连接
 
 - **编辑 / 删除**：展开左上角的连接选择器，每个连接右边有编辑和删除按钮。
+- **导出 / 导入连接**：首页或命令面板（⌘K）支持导出 DataOmni JSON，以及预览导入 DataOmni JSON、Navicat `.ncx` 与 DBeaver `data-sources.json`。导入时所有加密口令与私钥密码均被剥离、命令行与 Agent 访问重置为「关闭」，首次连接时再输入口令存入系统钥匙串。
 - **连接信息**：工作台头部的「信息」，列出地址、库、用户、TLS、环境等。
 - **断开连接**：工作台头部的「断开连接」。有没提交的事务时会先问你提交还是回滚。
 - 连接断了（网络断开、服务端重启），头部会显示「连接已断开」，点「重新连接」。
@@ -658,6 +659,7 @@ Elasticsearch 连接用的是控制台：写法和 Kibana 的 Dev Tools 一样�
 
 - 补全按当前连接的真实结构给出表、视图和它们的列（带类型）。写了
   `FROM orders o` 之后，`o.` 会补出 orders 的列。关键字按方言过滤。
+- **查询模板**：编辑器工具栏的书签按钮或命令面板（⌘K）可以把常用 SQL（可直接带 `:name` 绑定参数，可选限定方言）存成模板，支持「插入」或「插入并执行」。
 - **⇧⌘F** 格式化 SQL：有选区只排选区。解析不了的 SQL 只报错，正文不动。
 - **⌘F** 查找（可替换），**⌘G** / **⇧⌘G** 下一个 / 上一个，**⌥⌘G** 跳转到行，
   **⌘/** 行注释，**⇧⌥A** 块注释。
@@ -1115,7 +1117,7 @@ Agent 本来就经管道调用，不受影响。
 | --- | --- |
 | 连接配置（不含密码） | 应用配置目录下的 `connections.json`：macOS 是 `~/Library/Application Support/com.dataomni.app/`，Linux 是 `~/.config/com.dataomni.app/`，Windows 是 `%APPDATA%\com.dataomni.app\`。卸载时不删 |
 | 数据库密码、SSH 口令 | 系统钥匙串 |
-| 标签、SQL 草稿、查询历史、设置 | 应用自己的本地存储，只在这台机器上 |
+| 标签、SQL 草稿、查询模板、查询历史、设置 | 应用自己的本地存储，只在这台机器上 |
 | 查询结果 | 不保存 |
 | 日志 | `dataomni.log`（命令行的留痕另记在同目录的 `dataomni-cli.log`），满 2 MB 换一份，留最近两份：macOS 在 `~/Library/Logs/com.dataomni.app/`，Linux 在 `~/.local/share/com.dataomni.app/logs/`，Windows 在 `%LOCALAPPDATA%\com.dataomni.app\logs\` |
 

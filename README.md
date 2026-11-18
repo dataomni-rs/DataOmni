@@ -63,7 +63,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 | CockroachDB | 25.2 | PostgreSQL | ⚠️ 可用，有缺口 | 39 / 0 / 0（缺口由用例钉住） |
 | openGauss | 5.0.3（lite，PG 兼容库） | PostgreSQL | ⚠️ 可用，有缺口 | 39 / 0 / 0 ＋ sha256 专用 1 / 0 / 0（缺口由用例钉住） |
 | SQL Server | 2022 | SQL Server | ✅ 支持 | 33 / 0 / 0（独立用例，`sql_server_smoke.rs`，含改结构语料与绑定参数；几条共用测试表，要 `--test-threads=1`） |
-| Oracle | 23ai Free（23.26） | Oracle（ODPI-C + 随包的 Instant Client） | ✅ 支持 | 29 / 1 / 0（独立用例，`oracle_smoke.rs`，含改结构语料；1 条 ignored 只计时、不做断言） |
+| Oracle | 23ai Free（23.26） | Oracle（ODPI-C + 随包的 Instant Client） | ✅ 支持 | 31 / 1 / 0（独立用例，`oracle_smoke.rs`，含改结构语料、绑定参数与约束索引区分；1 条 ignored 只计时、不做断言） |
 | DuckDB | 2.0.0（编进应用） | DuckDB（libduckdb） | ✅ 支持 | 19 / 0 / 0（独立用例，`duckdb_smoke.rs`，每次都跑，含改结构语料） |
 | ClickHouse | 25.8 | ClickHouse（HTTP 接口，reqwest） | ⚠️ 表格一次改一行，没有事务 | 16 / 0 / 0 ＋ 1 / 0 / 0（独立用例，`clickhouse_smoke.rs` 与最重的一条 `clickhouse_mutation_smoke.rs`；经 SSH 隧道那一条未设隧道变量时记为跳过） |
 | MongoDB | 8.0 | MongoDB（官方 Rust 驱动） | ⚠️ 文档级，有缺口 | 34 / 0 / 0（独立用例，`mongodb_smoke.rs`；未设 SRV / 客户端证书变量时对应 7 条记为跳过） |
@@ -292,6 +292,8 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   逐项勾选后生成同步脚本；脚本放进编辑器由你执行，照常按连接环境确认。同种数据库之间才出脚本，见 `rfcs/schema-diff.md`
 - 绑定参数：编辑器里写 `:name`，运行前弹框填值，由驱动绑定、不拼进 SQL；值按标签记住，关掉应用就没了。
   ClickHouse 与执行计划暂不支持，见 `rfcs/bind-parameters.md`
+- 查询模板：编辑器工具栏或命令面板（⌘K）里保存常用 SQL 片段，直接复用 `:name` 绑定参数，可选限定方言；
+  支持插入当前光标（保留撤销栈）或一键「插入并执行」，见 `rfcs/query-templates.md`
 - ER 关系图：整库的表都画出来（含没有外键的），每张列出全部字段与类型，
   有外键的表之间按具体字段连线；可搜索表名与列名、缩放平移、自由拖动卡片、
   导出为 SVG / PNG / PDF，或导出成数据字典（Markdown）与 Agent Skill（`SKILL.md`）；执行 DDL 后自动刷新
@@ -354,8 +356,10 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 - 密码存入系统钥匙串（macOS Keychain / Windows Credential Manager / Linux Secret Service），
   配置文件只保存凭据引用，不落明文
 - 支持「不保存密码」，每次连接时输入
-- 连接可以导出成一个 JSON 文件、在另一台机器上导入（首页的「导出连接… / 导入连接…」）。
-  文件里**没有口令和 SSH 密钥**：存过口令的连接导入后第一次连接时会问，SSH 的口令要在编辑连接里重新填。
+- 连接可以导出成一个 JSON 文件，也可以从 DataOmni JSON、Navicat `.ncx` 或 DBeaver `data-sources.json`
+  预览勾选导入（首页的「导出连接… / 导入连接…」或命令面板，见 `rfcs/external-connection-import.md`）。
+  导出文件里**没有口令和 SSH 密钥**，从第三方客户端导入时也会剥离加密口令并把命令行访问重置为关；
+  存过口令的连接导入后第一次连接时会问，SSH 的口令要在编辑连接里重新填。
   导入时本机已有的同一个连接（名字、类型、地址、库、用户都一样）跳过，同一个文件导两次不会多出一份
 - 明确的 TLS 模式（禁用 / 优先 / 要求 / 校验证书 / 校验主机名），支持 CA 与客户端证书
 - SSH 隧道：数据库只在内网监听时，填跳板机的地址与用户名，应用自己开一个
@@ -590,6 +594,14 @@ bun install
 ### 未发布
 
 （暂无）
+
+### v1.2.0（2026-11-18）
+
+- 外部连接导入：首页「导入连接…」与命令面板新增对 Navicat `.ncx`（含 `InitialDatabase`、Oracle 服务名 / SID、MariaDB 预设、TLS CA、SSH 隧道）与 DBeaver `data-sources.json`（含 JDBC URL 解析、SSH 通道、`prod` 环境映射）的离线预览导入；前后端双重剥离加密口令与私钥密码，并将命令行与 Agent 访问重置为关闭，见 `rfcs/external-connection-import.md`。
+- 本地参数化查询模板：编辑器工具栏与命令面板（⌘K）新增查询模板管理，直接复用 `:name` 绑定参数词法（不引入模板宏语法），支持按方言筛选、保留撤销栈插入以及「插入并执行」直接弹出参数框，见 `rfcs/query-templates.md`。
+- 关于与帮助入口：设置「关于与诊断」与 macOS `Help` 菜单新增直达官网文档（按当前界面语言打开 `/` 或 `/zh/`）与问题反馈入口。
+- 稳态与连接池加固：后端彻底移除残留的 `tauri-plugin-sql` 依赖，目录连接池统一收归同步 `SqlxRegistry`；补齐窗口隐藏与退出时的查询草稿立即落盘钩子；表数据浏览、就地提交与后台导入导出遇到连接断开或 SSH 隧道中断时统一激活顶部断线重连引导。
+- 真库回归补齐：DuckDB 接入 `scripts/schema-diff-verify.sh` 结构比对往返脚本验收；Oracle 23ai Free 补齐 `:name` 绑定参数与约束索引区分真库冒烟用例，云端七套真库定时回归全绿。
 
 ### v1.1.0（2026-11-16）
 
