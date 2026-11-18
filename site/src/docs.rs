@@ -193,7 +193,7 @@ const EN_QUICKSTART_SECTIONS: &[DocSection] = &[
     heading: "Where credentials and local data live",
     blocks: &[
       DocBlock::Paragraph(
-        "DataOmni never writes database passwords, SSH passphrases, or AI API keys to disk in plaintext. Connection profiles store only non-secret metadata (host, port, database name, TLS mode, environment) plus an opaque reference to your operating system credential store.",
+        "DataOmni never writes database passwords, SSH passphrases, or AI API keys to disk in plaintext. Connection profiles store only non-secret metadata (host, port, database name, TLS mode, environment) plus an opaque reference to your operating system credential store. Moving from another desktop client? Use \"Import connections...\" on the Welcome screen or Command Palette (Cmd+K / Ctrl+K) to preview-import Navicat .ncx, DBeaver data-sources.json, or DataOmni JSON files — all third-party encrypted secrets are stripped and Agent access defaults to off.",
       ),
       DocBlock::Table {
         caption: "On-disk configuration and log directories",
@@ -369,7 +369,7 @@ const ZH_QUICKSTART_SECTIONS: &[DocSection] = &[
     heading: "密码存在哪里，本地文件放在哪里",
     blocks: &[
       DocBlock::Paragraph(
-        "数据库密码、SSH 私钥口令与 AI API Key 一律写入操作系统钥匙串，绝不以明文或私有可逆编码写进本地配置文件。磁盘上的 connections.json 只保留主机、端口、库名、TLS 档位与环境标记，可放心做常规备份。",
+        "数据库密码、SSH 私钥口令与 AI API Key 一律写入操作系统钥匙串，绝不以明文或私有可逆编码写进本地配置文件。磁盘上的 connections.json 只保留主机、端口、库名、TLS 档位与环境标记，可放心做常规备份。从其他工具迁移时，点击欢迎页或命令面板（Cmd+K / Ctrl+K）里的「导入连接…」，即可离线预览并勾选导入 Navicat .ncx、DBeaver data-sources.json 或 DataOmni JSON，第三方加密口令会被自动剥离且命令行访问重置为关闭。",
       ),
       DocBlock::Table {
         caption: "配置文件、凭据与日志存储位置",
@@ -1146,6 +1146,23 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-2-0",
+    toc_label: "v1.2.0 (2026-11-18)",
+    heading: "v1.2.0 — 2026-11-18",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Focuses on frictionless migration, daily SQL ergonomics, backend pool consolidation, and full multi-engine smoke verification.",
+      ),
+      DocBlock::Bullets(&[
+        "External connection import: preview and selectively import connection profiles from Navicat (.ncx XML, including InitialDatabase, Oracle Service Name / SID, MariaDB presets, TLS CA, and SSH tunnels) and DBeaver (data-sources.json, including JDBC URL fallback, SSH handlers, and Production environment mapping); all third-party encrypted passwords are stripped and Agent access resets to off.",
+        "Local parameterized query templates: save and search reusable SQL snippets from the editor toolbar or Command Palette (Cmd+K / Ctrl+K), reusing native :name bind parameters without custom template macros, with optional dialect filtering, Undo-preserving insertion, and one-click Insert & run.",
+        "Website docs & Help links: multi-page bilingual documentation on dataomni.dev plus direct Website / Docs and Report Issue links in Settings -> About and the macOS Help menu.",
+        "Runtime & pool hardening: removed the legacy tauri-plugin-sql dependency in favor of synchronous SqlxRegistry pooling, added immediate draft flush hooks on window hide/unload, and unified connection-lost reconnection banners across table browsing, inline commits, and background import/export tasks.",
+        "Expanded real-database verification: wired DuckDB into round-trip schema diff sync verification (scripts/schema-diff-verify.sh) and verified :name bind parameters plus constraint-vs-index catalog metadata on Oracle 23ai Free (31/31 smoke tests green).",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-1-0",
     toc_label: "v1.1.0 (2026-11-16)",
     heading: "v1.1.0 — 2026-11-16",
@@ -1196,7 +1213,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade compatibility notes for DataOmni v1.1.0 and v1.0.0 on macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade compatibility notes for DataOmni v1.2.0, v1.1.0, and v1.0.0 on macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1205,6 +1222,23 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-2-0",
+    toc_label: "v1.2.0（2026-11-18）",
+    heading: "v1.2.0 — 2026-11-18",
+    blocks: &[
+      DocBlock::Paragraph(
+        "聚焦平滑迁移、日常高频查询体验、后端连接池收口与多引擎真库回归巩固。",
+      ),
+      DocBlock::Bullets(&[
+        "主流客户端连接导入：欢迎页与命令面板新增对 Navicat（.ncx XML，支持 InitialDatabase、Oracle 服务名 / SID、MariaDB 预设、TLS CA、SSH 隧道）与 DBeaver（data-sources.json，支持 JDBC URL 兜底、SSH 通道与生产环境映射）的离线预览导入；前后端双重剥离加密口令与私钥密码，并将命令行与 Agent 访问重置为关闭。",
+        "本地参数化查询模板：编辑器工具栏与命令面板（Cmd+K / Ctrl+K）新增常用 SQL 模板管理，直接复用 :name 绑定参数词法（零自定义宏语法），支持按方言筛选、保留撤销栈插入以及一键「插入并执行」。",
+        "官网实用文档与直达入口：上线 dataomni.dev 多页双语文档体系，并在设置「关于与诊断」及 macOS Help 菜单补齐官网文档与问题反馈直达入口。",
+        "连接池与交互稳态加固：后端彻底移除残留的 tauri-plugin-sql 依赖并收归同步 SqlxRegistry；补齐窗口隐藏与退出时的查询草稿立即落盘钩子；表数据浏览、就地提交与后台导入导出遇到连接断开或 SSH 隧道中断时统一激活断线重连横幅。",
+        "真库回归补齐：DuckDB 接入 scripts/schema-diff-verify.sh 结构比对往返脚本验收；Oracle 23ai Free 补齐 :name 绑定参数与约束索引区分真库冒烟用例（31/31 全绿）。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-1-0",
     toc_label: "v1.1.0（2026-11-16）",
@@ -1256,7 +1290,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖 macOS、Windows 与 Linux 三平台。",
+  meta_description: "DataOmni v1.2.0、v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖三平台。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",

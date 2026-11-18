@@ -810,7 +810,7 @@ const EN_SERVERS: &[ServerRow] = &[
     connection_type: "Oracle (bundled OCI)",
     kind: ServerKind::Relational,
     level: SupportLevel::Supported,
-    smoke_counts: "29 / 1 / 0",
+    smoke_counts: "31 / 1 / 0",
     notes: "Instant Client bundled; connect by Service Name or SID; server-side cancel; use SSH tunnel when encryption is needed.",
   },
   ServerRow {
@@ -975,7 +975,7 @@ const ZH_SERVERS: &[ServerRow] = &[
     connection_type: "Oracle（内置 OCI）",
     kind: ServerKind::Relational,
     level: SupportLevel::Supported,
-    smoke_counts: "29 / 1 / 0",
+    smoke_counts: "31 / 1 / 0",
     notes: "内置 Instant Client 免安装；支持按服务名或 SID 连接、服务端取消语句；需加密时走 SSH 隧道。",
   },
   ServerRow {
