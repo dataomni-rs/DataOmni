@@ -105,6 +105,7 @@
 
 ### 已归档阶段留下的重估门（无需翻归档即可速查）
 
+- **QS2 / QS3 开发期 glob 依赖审计豁免（`GHSA-g3hv-75wg-m249`、`GHSA-fc5q-39xc-vjpf`）**：`minimatch` 10.2.6 与 `picomatch` 4.0.7（2026-11-17 披露 ReDoS，`first_patched_version: null` 尚无上游修复版）仅在 `vite` / `vitest` / `typescript-eslint` 构建与静态检查期匹配仓内受控路径，不进打包产物；重估条件：上游发布修复版且 `bun update minimatch picomatch` 升级后摘除 `package.json` 对应 `--ignore`。
 - **R1 落盘兼容补充**：给设置或 `ssh_tunnel` 新增嵌套字段时，先在 `fixtures/on-disk-0.5/` 补样本再改。
 - **R7 无表别名时的裸列补全**：有人报「不写 `o.` 补不出列」时，按光标所在语句的 `FROM` 推 `defaultTable`。
 - **v0.3 Windows ARM64 原生包**：当前靠系统转译跑 x64 包（且 Oracle 无 Windows ARM64 Instant Client）；重估条件：有 ARM Windows 用户反馈转译慢或装不上。

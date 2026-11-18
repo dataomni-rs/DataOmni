@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "audit:frontend": "bun audit --ignore=GHSA-g3hv-75wg-m249",
+    "audit:frontend": "bun audit --ignore=GHSA-g3hv-75wg-m249 --ignore=GHSA-fc5q-39xc-vjpf",
     "rust:audit": "cargo audit -f src-tauri/Cargo.lock -D warnings",
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets",
