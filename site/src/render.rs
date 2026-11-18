@@ -1167,7 +1167,7 @@ fn render_doc_structured_data(
     escape_json_str(home_name),
     escape_json_str(&home_url)
   )?;
-  if page.slug.is_changelog() {
+  if page.slug.is_root_route() {
     write!(
       json,
       "{{\"@type\":\"ListItem\",\"position\":2,\"name\":\"{}\",\"item\":\"{}\"}}",
@@ -1399,7 +1399,7 @@ pub fn render_doc_page(page: &DocPage, version: &str) -> Result<String, std::fmt
     page.locale.canonical_path(),
     escape_html(home_crumb)
   )?;
-  if !page.slug.is_changelog() {
+  if !page.slug.is_root_route() {
     writeln!(
       html,
       "          <a href=\"{}\">{}</a><span aria-hidden=\"true\">/</span>",

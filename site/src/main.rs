@@ -525,6 +525,8 @@ mod tests {
       ("zh/docs/databases/index.html", "/docs/databases/"),
       ("changelog/index.html", "/zh/changelog/"),
       ("zh/changelog/index.html", "/changelog/"),
+      ("privacy/index.html", "/zh/privacy/"),
+      ("zh/privacy/index.html", "/privacy/"),
     ];
 
     let sitemap = fs::read_to_string(temp_dir.join("sitemap.xml")).unwrap();
@@ -553,9 +555,21 @@ mod tests {
       "https://dataomni.dev/zh/docs/databases/",
       "https://dataomni.dev/changelog/",
       "https://dataomni.dev/zh/changelog/",
+      "https://dataomni.dev/privacy/",
+      "https://dataomni.dev/zh/privacy/",
     ] {
       assert!(sitemap.contains(&format!("<loc>{url}</loc>")), "sitemap missing {url}");
     }
+
+    let en_home = fs::read_to_string(temp_dir.join("index.html")).unwrap();
+    let zh_home = fs::read_to_string(temp_dir.join("zh/index.html")).unwrap();
+    assert!(en_home.contains("href=\"/privacy/\""), "EN footer missing /privacy/");
+    assert!(zh_home.contains("href=\"/zh/privacy/\""), "ZH footer missing /zh/privacy/");
+
+    let privacy_en = fs::read_to_string(temp_dir.join("privacy/index.html")).unwrap();
+    let privacy_zh = fs::read_to_string(temp_dir.join("zh/privacy/index.html")).unwrap();
+    assert!(privacy_en.contains("--no-default-features"));
+    assert!(privacy_zh.contains("--no-default-features"));
 
     // Reverse check: broken internal route link or cross-page anchor must fail verify_html_invariants
     let mcp_en = fs::read_to_string(temp_dir.join("docs/mcp/index.html")).unwrap();
