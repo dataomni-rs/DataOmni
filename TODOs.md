@@ -26,7 +26,7 @@
 | 加固 | 依赖与前端安全边界、持续真库回归、发布与文档一致性（2026-11-08 / 11-09 两轮评估） | [x] QS1–QS6、QT1–QT5、QR1–QR2、PA1–PA8 全部完成 |
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [-] U1、C1、D3、D2、C2、G1–G13 完成，`v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev`（`10d0872`）2026-11-17 上线；U2 winget（`#481999`）与搜索引擎收录外部推进中 |
-| v1.2 路线 | 扫清遗留、巩固稳定、官网文档与实用扩展（`rfcs/roadmap-1.2.md`） | [-] 2026-11-17 定稿并启动：严格按 S（扫清遗留）→ V（巩固验证）→ W（官网文档）→ E（实用扩展）顺序推进 |
+| v1.2 路线 | 扫清遗留、巩固稳定、官网文档与实用扩展（`rfcs/roadmap-1.2.md`） | [-] S0–S3、V2、V4、W1–W4、E1、E2 已完成并发布 `v1.2.0`（2026-11-18，macOS 打包版已验 Hardened Runtime、Instant Client、CLI 与桌面启动）；S4、V1、V3、E3、E4 按外部与实机条件持续跟进 |
 
 ---
 
@@ -105,6 +105,7 @@
 
 ### 已归档阶段留下的重估门（无需翻归档即可速查）
 
+- **QS2 / QS3 开发期 glob 依赖审计豁免（`GHSA-g3hv-75wg-m249`、`GHSA-fc5q-39xc-vjpf`）**：`minimatch` 10.2.6 与 `picomatch` 4.0.7（2026-11-17 披露 ReDoS，`first_patched_version: null` 尚无上游修复版）仅在 `vite` / `vitest` / `typescript-eslint` 构建与静态检查期匹配仓内受控路径，不进打包产物；重估条件：上游发布修复版且 `bun update minimatch picomatch` 升级后摘除 `package.json` 对应 `--ignore`。
 - **R1 落盘兼容补充**：给设置或 `ssh_tunnel` 新增嵌套字段时，先在 `fixtures/on-disk-0.5/` 补样本再改。
 - **R7 无表别名时的裸列补全**：有人报「不写 `o.` 补不出列」时，按光标所在语句的 `FROM` 推 `defaultTable`。
 - **v0.3 Windows ARM64 原生包**：当前靠系统转译跑 x64 包（且 Oracle 无 Windows ARM64 Instant Client）；重估条件：有 ARM Windows 用户反馈转译慢或装不上。

@@ -101,6 +101,9 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 - Bind parameters: write `:name` in the editor and fill in the values before the statement runs. The
   driver binds them, so nothing is pasted into the SQL and text needs no quotes. Not yet for ClickHouse
   or the execution plan.
+- Query templates: save reusable SQL snippets (reusing `:name` bind parameters and an optional dialect
+  filter) from the editor toolbar or command palette (`⌘K`), then insert them with Undo history preserved
+  or insert and run immediately.
 - Quick bar and line charts of the current result.
 
 ![Queued edits previewed as SQL](images/en/table-edit.png)
@@ -133,7 +136,9 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
   `~/.ssh/known_hosts`; there is no "skip verification" switch.
 - Each connection is marked as development, testing, staging or production and shows a text badge
   (DEV, TEST, STAGING, PROD), not only a color.
-- Export connections to a JSON file (without passwords or SSH keys) and import them elsewhere.
+- Export connections to a JSON file (without passwords or SSH keys), and preview-import connections
+  from DataOmni JSON, Navicat `.ncx` or DBeaver `data-sources.json` (with encrypted secrets stripped
+  and command-line / agent access reset to off).
 
 ### AI (optional, off by default)
 
