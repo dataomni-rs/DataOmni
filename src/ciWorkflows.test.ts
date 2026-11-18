@@ -142,4 +142,16 @@ describe.skipIf(process.platform === 'win32')('CI 变更范围过滤与工作流
 
     expect(findings).toEqual([]);
   });
+
+  it('Homebrew Tap 自动同步工作流具备公证校验运行环境与预发布拦截护栏', () => {
+    const tapWorkflow = readFileSync('.github/workflows/homebrew-tap.yml', 'utf8');
+    // 必须在 macOS Runner 执行，否则 scripts/homebrew-cask.sh 里的 stapler/spctl 公证门禁不会生效
+    expect(tapWorkflow).toContain('runs-on: macos-latest');
+    expect(tapWorkflow).toContain('github.event.release.draft == false');
+    expect(tapWorkflow).toContain('github.event.release.prerelease == false');
+    expect(tapWorkflow).toContain('scripts/homebrew-cask.sh');
+    expect(tapWorkflow).toContain('brew style packaging/homebrew/Casks/dataomni.rb');
+    // Release published 事件的 GITHUB_REF 是 refs/tags/v*，绑定受保护 environment 会被分支白名单拒绝（见 11cb62e）
+    expect(tapWorkflow).not.toMatch(/^\s*environment:/m);
+  });
 });

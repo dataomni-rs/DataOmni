@@ -1,0 +1,97 @@
+name: Sync Homebrew Tap
+
+# 正式版 Release 公开后自动拉取已发布的 macOS .dmg，在 macOS Runner 上复核 GitHub 服务端 SHA-256、
+# Apple 公证票据（stapler + spctl）与 brew style，并将 Casks/dataomni.rb 推送到 dataomni-rs/homebrew-tap。
+# 若仓库尚未配置跨仓细粒度令牌 HOMEBREW_TAP_TOKEN，前序校验照常运行，最后一步输出 notice 并正常结束。
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "已发布的正式版本号（如 1.2.1）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "homebrew-tap-sync"
+  cancel-in-progress: false
+
+jobs:
+  sync-cask:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.release.draft == false && github.event.release.prerelease == false)
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout main packaging scripts
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Generate and verify notarized Homebrew Cask
+        id: generate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            raw_version="$INPUT_VERSION"
+          else
+            raw_version="$RELEASE_TAG"
+          fi
+          version="${raw_version#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "仅支持正式语义化版本号（如 1.2.1），收到：$raw_version" >&2
+            exit 1
+          fi
+
+          bash scripts/homebrew-cask.sh "$version"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew style packaging/homebrew/Casks/dataomni.rb
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Push updated cask to dataomni-rs/homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.generate.outputs.version }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "::notice::未配置 HOMEBREW_TAP_TOKEN Secret：已完成 v${VERSION} 的 SHA-256、Apple 公证票据与 brew style 复核，跳过自动推送 dataomni-rs/homebrew-tap。"
+            exit 0
+          fi
+
+          auth_header="$(python3 -c 'import base64, os; token = os.environ["HOMEBREW_TAP_TOKEN"]; print("AUTHORIZATION: basic " + base64.b64encode(("x-access-token:" + token).encode("utf-8")).decode("ascii"))')"
+          echo "::add-mask::${auth_header#AUTHORIZATION: basic }"
+
+          tap_dir="$(mktemp -d)"
+          trap 'rm -rf "$tap_dir"' EXIT
+
+          git -c "http.https://github.com/.extraheader=$auth_header" \
+            clone --depth 1 --branch main https://github.com/dataomni-rs/homebrew-tap.git "$tap_dir"
+
+          mkdir -p "$tap_dir/Casks"
+          cp packaging/homebrew/Casks/dataomni.rb "$tap_dir/Casks/dataomni.rb"
+
+          if git -C "$tap_dir" diff --quiet -- Casks/dataomni.rb && [[ -z "$(git -C "$tap_dir" status --porcelain -- Casks/dataomni.rb)" ]]; then
+            echo "dataomni-rs/homebrew-tap 已处于 v${VERSION} 最新状态，无需重复提交"
+            exit 0
+          fi
+
+          git -C "$tap_dir" config user.name "github-actions[bot]"
+          git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$tap_dir" add Casks/dataomni.rb
+          git -C "$tap_dir" commit \
+            -m "chore(cask): update dataomni to ${VERSION}" \
+            -m "- 同步 DataOmni v${VERSION} 公证安装包 SHA-256 摘要与版本号"
+          git -C "$tap_dir" -c "http.https://github.com/.extraheader=$auth_header" \
+            push origin main

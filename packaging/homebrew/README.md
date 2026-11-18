@@ -14,6 +14,14 @@ brew install --cask dataomni-rs/tap/dataomni
 
 ## 发一个新版本后更新 Tap
 
+### 自动同步（推荐）
+
+`.github/workflows/homebrew-tap.yml` 监听正式版 GitHub Release 的 `published` 事件（自动排除草稿与预发布）：
+1. 在 `macos-latest` Runner 上下载当次发布的 `DataOmni_<版本>_aarch64.dmg`，运行 `scripts/homebrew-cask.sh <版本>` 复核服务端 SHA-256 摘要、`xcrun stapler validate`、`spctl` 公证票据与 `brew style`；
+2. 若本仓库已配置仅授权 `dataomni-rs/homebrew-tap`（`Contents: Read and write`）的 Fine-grained PAT Secret `HOMEBREW_TAP_TOKEN`，工作流会自动将更新后的 `Casks/dataomni.rb` 推送至 `dataomni-rs/homebrew-tap` 的 `main` 分支（幂等比对，已是同版本则自动跳过）；未配置该 Secret 时仅执行第 1 步校验并打印提示，不阻塞发版。
+
+### 本地手动同步
+
 1. 新版本在 GitHub Releases 正式公开（非草稿、非预发布，且 macOS `.dmg` 已由 `release.yml` 完成签名、公证与 `stapler` 票据钉合）。
 2. 在本仓库运行：
    ```bash
