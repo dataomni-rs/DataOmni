@@ -1807,6 +1807,7 @@ details:not([open])::details-content {
 }
 
 .docs-sidebar {
+  min-width: 0;
   position: sticky;
   top: 4.65rem;
   display: flex;
@@ -1986,6 +1987,7 @@ details:not([open])::details-content {
   color: var(--dm-fg);
   font-size: 0.95rem;
   line-height: 1.68;
+  overflow-wrap: anywhere;
 }
 
 .docs-list {
@@ -1998,6 +2000,7 @@ details:not([open])::details-content {
   color: var(--dm-fg);
   font-size: 0.94rem;
   line-height: 1.62;
+  overflow-wrap: anywhere;
 }
 
 .docs-steps {
@@ -2117,6 +2120,7 @@ details:not([open])::details-content {
   text-align: left;
   vertical-align: top;
   border-bottom: 1px solid var(--dm-line);
+  overflow-wrap: anywhere;
 }
 
 .docs-table thead th {

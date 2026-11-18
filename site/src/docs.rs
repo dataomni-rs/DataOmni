@@ -7,10 +7,17 @@ pub enum DocSlug {
   Cli,
   Databases,
   Changelog,
+  Privacy,
 }
 
-pub const ALL_DOC_SLUGS: &[DocSlug] =
-  &[DocSlug::Quickstart, DocSlug::Mcp, DocSlug::Cli, DocSlug::Databases, DocSlug::Changelog];
+pub const ALL_DOC_SLUGS: &[DocSlug] = &[
+  DocSlug::Quickstart,
+  DocSlug::Mcp,
+  DocSlug::Cli,
+  DocSlug::Databases,
+  DocSlug::Changelog,
+  DocSlug::Privacy,
+];
 
 impl DocSlug {
   pub const fn path(self, locale: Locale) -> &'static str {
@@ -25,6 +32,8 @@ impl DocSlug {
       (Locale::Zh, Self::Databases) => "/zh/docs/databases/",
       (Locale::En, Self::Changelog) => "/changelog/",
       (Locale::Zh, Self::Changelog) => "/zh/changelog/",
+      (Locale::En, Self::Privacy) => "/privacy/",
+      (Locale::Zh, Self::Privacy) => "/zh/privacy/",
     }
   }
 
@@ -40,6 +49,8 @@ impl DocSlug {
       (Locale::Zh, Self::Databases) => "zh/docs/databases/index.html",
       (Locale::En, Self::Changelog) => "changelog/index.html",
       (Locale::Zh, Self::Changelog) => "zh/changelog/index.html",
+      (Locale::En, Self::Privacy) => "privacy/index.html",
+      (Locale::Zh, Self::Privacy) => "zh/privacy/index.html",
     }
   }
 
@@ -55,11 +66,13 @@ impl DocSlug {
       (Locale::Zh, Self::Databases) => "数据库指南",
       (Locale::En, Self::Changelog) => "Changelog",
       (Locale::Zh, Self::Changelog) => "更新记录",
+      (Locale::En, Self::Privacy) => "Privacy",
+      (Locale::Zh, Self::Privacy) => "隐私安全",
     }
   }
 
-  pub const fn is_changelog(self) -> bool {
-    matches!(self, Self::Changelog)
+  pub const fn is_root_route(self) -> bool {
+    matches!(self, Self::Changelog | Self::Privacy)
   }
 
   pub const fn prev(self) -> Option<Self> {
@@ -69,6 +82,7 @@ impl DocSlug {
       Self::Cli => Some(Self::Mcp),
       Self::Databases => Some(Self::Cli),
       Self::Changelog => Some(Self::Databases),
+      Self::Privacy => Some(Self::Changelog),
     }
   }
 
@@ -78,7 +92,8 @@ impl DocSlug {
       Self::Mcp => Some(Self::Cli),
       Self::Cli => Some(Self::Databases),
       Self::Databases => Some(Self::Changelog),
-      Self::Changelog => None,
+      Self::Changelog => Some(Self::Privacy),
+      Self::Privacy => None,
     }
   }
 }
@@ -143,6 +158,8 @@ pub fn doc_page(slug: DocSlug, locale: Locale) -> &'static DocPage {
     (Locale::Zh, DocSlug::Databases) => &ZH_DATABASES,
     (Locale::En, DocSlug::Changelog) => &EN_CHANGELOG,
     (Locale::Zh, DocSlug::Changelog) => &ZH_CHANGELOG,
+    (Locale::En, DocSlug::Privacy) => &EN_PRIVACY,
+    (Locale::Zh, DocSlug::Privacy) => &ZH_PRIVACY,
   }
 }
 
@@ -1326,4 +1343,264 @@ static ZH_CHANGELOG: DocPage = DocPage {
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
   toc_heading: "版本列表",
   sections: ZH_CHANGELOG_SECTIONS,
+};
+
+// ============================================================================
+// 6. PRIVACY & SECURITY (/privacy/ & /zh/privacy/)
+// ============================================================================
+
+const EN_PRIVACY_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "zero-telemetry",
+    toc_label: "Zero telemetry & no account",
+    heading: "Zero telemetry, no cloud account, and direct connections",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni is a local-first, MIT-licensed desktop database client. Neither the desktop application nor the dataomni.dev documentation website collects analytics, usage telemetry, crash dumps, advertising identifiers, or personal profiles.",
+      ),
+      DocBlock::Bullets(&[
+        "No user registration or cloud sync: DataOmni requires no account, login, license server, or cloud workspace. All connection profiles, query tabs, and templates stay on your own machine.",
+        "Direct database connections: Every SQL, MongoDB, Redis, Neo4j, and Elasticsearch session connects directly from your workstation (or through your own SSH jump host) to your database server, bypassing system HTTP proxies so database traffic never routes through third-party relays.",
+        "Cookie-free static website: https://dataomni.dev is static HTML, CSS, and progressive-enhancement JavaScript served via GitHub Pages with zero analytics scripts, tracking pixels, or cookies (only a local dataomni-site-theme preference in browser localStorage when you toggle light or dark mode).",
+      ]),
+    ],
+  },
+  DocSection {
+    id: "credentials-and-local-data",
+    toc_label: "Keychain & on-disk data",
+    heading: "OS keychain custody and local on-disk artifacts",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Database passwords, SSH private-key passphrases, optional AI API keys (#ai), and the Agent grant signing key (#agent-grant) are stored exclusively in your operating system credential manager — macOS Keychain, Windows Credential Manager, or Linux Secret Service (gnome-keyring / KWallet). Plaintext secrets are never written to disk.",
+      ),
+      DocBlock::Table {
+        caption: "Local data stored on your workstation",
+        headers: &["Artifact", "What is stored", "Secret & privacy guarantee"],
+        rows: &[
+          &[
+            "connections.json",
+            "Connection name, host, port, database, TLS mode, environment tag, and SSH jump-host metadata.",
+            "Zero passwords or passphrases; third-party encrypted secrets in imported Navicat .ncx or DBeaver files are stripped on both frontend and backend.",
+          ],
+          &[
+            "OS Keychain entries",
+            "Database password, SSH passphrase, optional AI API key, and local HMAC-SHA256 Agent grant key.",
+            "Managed by OS access controls; macOS builds ship with Hardened Runtime + Apple Developer ID notarization so injected libraries cannot impersonate the app.",
+          ],
+          &[
+            "Workspace drafts & history",
+            "Unsaved editor tabs, local :name query templates, and recent local query execution metadata.",
+            "Stored only in your local app config/storage directory; never uploaded or synchronized externally.",
+          ],
+          &[
+            "agent-audit.jsonl & dataomni.log",
+            "Timestamp, connection name, command kind, row count, and SHA-256 digest of Agent statements; operational diagnostics.",
+            "Audit entries record statement SHA-256 digests rather than raw SQL text or returned row values.",
+          ],
+        ],
+      },
+    ],
+  },
+  DocSection {
+    id: "network-requests",
+    toc_label: "Outbound network disclosure",
+    heading: "Complete disclosure of outbound network requests",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni initiates network connections only for the explicit functions listed below. Every non-database network feature can be turned off in settings or compiled out entirely.",
+      ),
+      DocBlock::Table {
+        caption: "All outbound network connections made by DataOmni",
+        headers: &["Feature", "Destination", "Default & how to disable"],
+        rows: &[
+          &[
+            "Database & SSH sessions",
+            "Only the host, port, and SSH jump host you configure.",
+            "Initiated strictly when you test, open, or query a connection.",
+          ],
+          &[
+            "New-version check",
+            "GET https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest (at most once per 24 hours).",
+            "Sends only standard HTTP headers and User-Agent (DataOmni/<version>), zero device IDs. Toggle off anytime in Settings -> About & Diagnostics.",
+          ],
+          &[
+            "Optional AI schema design",
+            "Direct HTTPS request from the Rust backend to the OpenAI-compatible or Anthropic endpoint you configure.",
+            "Disabled until you configure an API key and click generate; sends only your prompt and current DDL/schema draft (never table rows). Strip physically at build time with cargo build --no-default-features.",
+          ],
+        ],
+      },
+      DocBlock::Code {
+        label: "Build an air-gapped binary with zero AI network code",
+        copy_text: Some("cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features"),
+        raw_code: "$ cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features",
+      },
+    ],
+  },
+  DocSection {
+    id: "agent-and-webview-boundaries",
+    toc_label: "Agent & WebView isolation",
+    heading: "Read-only Agent isolation and WebView security boundaries",
+    blocks: &[
+      DocBlock::Callout {
+        tone: CalloutTone::Guardrail,
+        title: "Production connections are physically invisible to AI Agents",
+        body: "Every connection defaults to Agent access OFF. Enabling CLI or MCP access signs an HMAC-SHA256 grant with a key stored in your OS keychain — editing connections.json on disk cannot forge access. Connections marked PROD return not_found to both dataomni cli and dataomni mcp, and permitted non-PROD sessions enforce read-only transactions plus statement risk gates.",
+      },
+      DocBlock::Bullets(&[
+        "Strict WebView Content Security Policy: Bundled with default-src 'self' and script-src 'self'; the frontend WebView makes zero external fetch/WebSocket calls, holds zero sql:* plugin permissions, and is blocked from reading or writing the application config directory.",
+        "Controlled external links: Opening documentation or GitHub release pages uses fixed backend-validated HTTPS targets rather than exposing arbitrary URL execution to the WebView.",
+      ]),
+    ],
+  },
+  DocSection {
+    id: "audit-and-contact",
+    toc_label: "Open-source audit & contact",
+    heading: "Verifiable open-source builds and privacy contact",
+    blocks: &[
+      DocBlock::Paragraph(
+        "All application code, SQL/NoSQL drivers, static website generator code, and GitHub Actions release/notarization workflows are open source under the MIT License at https://github.com/dataomni-rs/DataOmni. Updates to this policy are tracked in version control alongside each release. For privacy, compliance, or security questions, open an issue or security advisory on the official GitHub repository.",
+      ),
+    ],
+  },
+];
+
+static EN_PRIVACY: DocPage = DocPage {
+  slug: DocSlug::Privacy,
+  locale: Locale::En,
+  meta_title: "Privacy Policy & Security Architecture — DataOmni",
+  meta_description: "DataOmni collects zero telemetry, requires no account, stores passwords only in your OS keychain, isolates PROD from AI agents, and connects directly to databases.",
+  breadcrumb_group: "Privacy & Security",
+  title: "Privacy Policy & Security Architecture",
+  lead: "Last updated: November 18, 2026. DataOmni is built so your credentials, queries, and query results stay strictly between your workstation and your databases.",
+  toc_heading: "On this page",
+  sections: EN_PRIVACY_SECTIONS,
+};
+
+const ZH_PRIVACY_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "zero-telemetry",
+    toc_label: "零遥测与无账号",
+    heading: "零遥测采集、无云端账号与数据库直连",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni 是基于 MIT 许可证开源的纯本地桌面数据库客户端。无论桌面端应用还是官网 dataomni.dev，均不采集任何行为统计、遥测埋点、崩溃上传、广告标识符或个人画像数据。",
+      ),
+      DocBlock::Bullets(&[
+        "无需注册登录与云同步：应用不设账号体系、授权服务器或云端配置同步，所有连接配置、未保存草稿与查询模板均只保存在本机。",
+        "数据库全链路直连：所有关系型数据库与 MongoDB、Redis、Neo4j、Elasticsearch 会话均由本机（或您自行配置的 SSH 跳板机）直接连接目标库，显式绕过系统 HTTP 代理，查询流量绝不经过任何第三方中转服务。",
+        "官网零追踪脚本与零 Cookie：https://dataomni.dev 为托管于 GitHub Pages 的纯静态页面，不加载任何第三方统计脚本、追踪像素或 Cookie（仅在您手动切换深浅色外观时于浏览器 localStorage 记录主题偏好）。",
+      ]),
+    ],
+  },
+  DocSection {
+    id: "credentials-and-local-data",
+    toc_label: "系统钥匙串与本地文件",
+    heading: "操作系统钥匙串托管与本地落盘边界",
+    blocks: &[
+      DocBlock::Paragraph(
+        "数据库密码、SSH 私钥口令、可选 AI 接口密钥（#ai）以及 Agent 开放凭证签名密钥（#agent-grant）一律仅存入操作系统凭据管理器（macOS 钥匙串、Windows 凭据管理器、Linux Secret Service），磁盘配置文件不留任何明文口令。",
+      ),
+      DocBlock::Table {
+        caption: "本机存储内容与安全承诺一览",
+        headers: &["本地数据项", "记录内容", "安全与隐私保障"],
+        rows: &[
+          &[
+            "connections.json",
+            "连接名称、主机、端口、库名、TLS 档位、环境标识与 SSH 跳板机非敏感元数据。",
+            "零明文或密文口令；从 Navicat .ncx 或 DBeaver 导入连接时，前后端双重剥离原客户端加密口令。",
+          ],
+          &[
+            "系统钥匙串条目",
+            "数据库登录密码、SSH 私钥口令、可选 AI Key 与本地 HMAC-SHA256 授权密钥。",
+            "受操作系统级访问控制保护；macOS 版开启 Hardened Runtime 并经 Apple Developer ID 公证，阻断动态库注入冒领凭据。",
+          ],
+          &[
+            "工作区草稿与查询模板",
+            "未保存的查询标签草稿、本地 :name 参数化 SQL 模板与本机历史执行摘要。",
+            "仅保存在本机应用数据目录，绝不向外部上传或同步。",
+          ],
+          &[
+            "agent-audit.jsonl 与日志",
+            "Agent 调用时间、连接名、命令类别、返回行数与语句 SHA-256 摘要；本地运行诊断日志。",
+            "审计留痕只记语句的 SHA-256 摘要，不落盘 SQL 原文与查询结果行数据。",
+          ],
+        ],
+      },
+    ],
+  },
+  DocSection {
+    id: "network-requests",
+    toc_label: "出网请求完整清单",
+    heading: "出网网络请求完整披露与关闭方式",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni 仅在以下三类明确场景发起网络请求；所有非数据库本身的联网能力均可在设置中一键关闭，或在编译期物理剔除。",
+      ),
+      DocBlock::Table {
+        caption: "DataOmni 全部出网行为清单",
+        headers: &["功能项", "通信目标", "默认行为与关闭方式"],
+        rows: &[
+          &[
+            "数据库与 SSH 隧道连接",
+            "仅连接您在配置表单中填写的目标数据库与 SSH 跳板机地址。",
+            "仅在您主动测试连接、打开工作区或执行查询时建立。",
+          ],
+          &[
+            "新版本更新检查",
+            "GET https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest（最多每 24 小时一次）。",
+            "仅发送标准请求头与版本号（DataOmni/<version>），不含任何设备标识；可在「设置 → 关于与诊断」随时关闭。",
+          ],
+          &[
+            "可选 AI 辅助建表设计",
+            "由 Rust 后端直连您自行配置的 OpenAI 兼容或 Anthropic 接口地址。",
+            "未填 Key 且未点击生成时零请求；请求仅含您的自然语言描述与当前表结构草稿，绝不上传表内业务数据。内网环境可通过 --no-default-features 编译期彻底剥离。",
+          ],
+        ],
+      },
+      DocBlock::Code {
+        label: "构建不含任何 AI 出网代码的纯净内网二进制",
+        copy_text: Some("cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features"),
+        raw_code: "$ cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features",
+      },
+    ],
+  },
+  DocSection {
+    id: "agent-and-webview-boundaries",
+    toc_label: "Agent 与前端隔离",
+    heading: "只读 Agent 物理隔离与 WebView 安全边界",
+    blocks: &[
+      DocBlock::Callout {
+        tone: CalloutTone::Guardrail,
+        title: "生产环境（PROD）对命令行与 MCP 物理不可见",
+        body: "所有连接默认关闭命令行与 MCP 访问；开启时由系统钥匙串中的密钥签发 HMAC-SHA256 凭证，直接篡改磁盘上的 connections.json 无法伪造提权。标为 PROD 的生产连接对 dataomni cli 与 dataomni mcp 一律返回 not_found，已授权的非生产连接全程叠加只读事务与语句风险门禁。",
+      },
+      DocBlock::Bullets(&[
+        "严格 WebView 内容安全策略（CSP）：启用 default-src 'self' 与 script-src 'self'，前端零外部网络调用、零 sql:* 插件权限，且后端文件读写命令显式拦截针对应用配置目录的访问。",
+        "受控外部链接跳转：设置页与帮助菜单仅允许打开后端枚举锁定的官方 HTTPS 页面，不向前端暴露任意 URL 打开接口。",
+      ]),
+    ],
+  },
+  DocSection {
+    id: "audit-and-contact",
+    toc_label: "开源审计与联络方式",
+    heading: "可验证的开源构建与安全联络方式",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni 的前后端源码、数据库驱动封装、静态官网生成器与 GitHub Actions 签名公证流水线全部在 https://github.com/dataomni-rs/DataOmni 以 MIT 许可证公开，可供企业安全团队逐行审计。本声明随代码库版本同步演进；如有隐私合规或安全问题，欢迎通过官方 GitHub Issues 或 Security Advisories 联系维护团队。",
+      ),
+    ],
+  },
+];
+
+static ZH_PRIVACY: DocPage = DocPage {
+  slug: DocSlug::Privacy,
+  locale: Locale::Zh,
+  meta_title: "隐私政策与数据安全声明 — DataOmni",
+  meta_description: "DataOmni 坚持零遥测、无云端账号与数据库直连架构：口令与密钥仅存操作系统钥匙串，生产环境对 AI Agent 物理不可见，可选版本检查与 AI 模块均可关闭或编译期物理剔除。",
+  breadcrumb_group: "隐私与安全",
+  title: "隐私政策与数据安全声明",
+  lead: "最后更新：2026 年 11 月 18 日。DataOmni 从架构层确保数据库凭据、SQL 脚本与查询结果始终只留在您的工作站与目标数据库之间。",
+  toc_heading: "本页目录",
+  sections: ZH_PRIVACY_SECTIONS,
 };
