@@ -826,6 +826,8 @@ export const zh = {
   'settings.about.checkUpdates': '启动时检查新版本',
   'settings.about.checkUpdatesNote': '每天最多一次，只访问 GitHub，不上传任何数据；只提示，不自动下载。',
   'update.available': 'DataOmni {version} 已发布。',
+  'update.copyBrewUpgrade': '复制 brew upgrade 命令',
+  'update.copiedBrewUpgrade': '已复制升级命令',
   'update.view': '查看发布说明',
   'error.backend.updateCheckFailed': '检查新版本失败：{detail}',
   'error.backend.externalLinkOpenFailed': '无法在浏览器中打开链接：{detail}',

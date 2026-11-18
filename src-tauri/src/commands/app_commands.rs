@@ -126,6 +126,40 @@ pub fn open_release_page(version: String) -> Result<(), String> {
     .map_err(|error| format!("{UPDATE_CHECK_FAILED}: {error}"))
 }
 
+/// 当前运行副本由哪种渠道安装（见 `rfcs/auto-update.md` §3）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallChannel {
+  Standalone,
+  Homebrew,
+  SystemPackage,
+}
+
+fn detect_install_channel_from(
+  os: &str,
+  exe_path: Option<&std::path::Path>,
+  homebrew_caskroom_present: bool,
+) -> InstallChannel {
+  if os == "macos"
+    && homebrew_caskroom_present
+    && exe_path.is_some_and(|path| path.ends_with("DataOmni.app/Contents/MacOS/dataomni"))
+  {
+    return InstallChannel::Homebrew;
+  }
+  if os == "linux" && exe_path.is_some_and(|path| path.starts_with("/usr/")) {
+    return InstallChannel::SystemPackage;
+  }
+  InstallChannel::Standalone
+}
+
+#[tauri::command]
+pub fn install_channel() -> InstallChannel {
+  let exe = std::env::current_exe().ok();
+  let caskroom_present = std::path::Path::new("/opt/homebrew/Caskroom/dataomni").is_dir()
+    || std::path::Path::new("/usr/local/Caskroom/dataomni").is_dir();
+  detect_install_channel_from(std::env::consts::OS, exe.as_deref(), caskroom_present)
+}
+
 /// 在浏览器里打开官网或问题反馈页。目标写成枚举，不在 IPC 层暴露任意 URL
 #[tauri::command]
 pub fn open_project_link(target: ProjectLink) -> Result<(), String> {
@@ -163,5 +197,49 @@ mod tests {
     // 拼进网址的字符只能是版本号的字符
     assert_eq!(latest_version(r#"{"tag_name":"v1.0/../../evil"}"#), None);
     assert!(open_release_page("1.0.0?x=1".to_string()).is_err());
+  }
+
+  #[test]
+  fn detects_homebrew_system_package_and_standalone_install_channels() {
+    use std::path::Path;
+
+    assert_eq!(
+      detect_install_channel_from(
+        "macos",
+        Some(Path::new("/Applications/DataOmni.app/Contents/MacOS/dataomni")),
+        true,
+      ),
+      InstallChannel::Homebrew,
+    );
+    // 源码构建即使本机装过 Homebrew 版，也不判成包管理器副本
+    assert_eq!(
+      detect_install_channel_from(
+        "macos",
+        Some(Path::new("/Users/dev/DataOmni/target/debug/dataomni")),
+        true,
+      ),
+      InstallChannel::Standalone,
+    );
+    // 直接从 .dmg 拖入 /Applications（无 Caskroom 目录）
+    assert_eq!(
+      detect_install_channel_from(
+        "macos",
+        Some(Path::new("/Applications/DataOmni.app/Contents/MacOS/dataomni")),
+        false,
+      ),
+      InstallChannel::Standalone,
+    );
+    assert_eq!(
+      detect_install_channel_from("linux", Some(Path::new("/usr/bin/dataomni")), false),
+      InstallChannel::SystemPackage,
+    );
+    assert_eq!(
+      detect_install_channel_from(
+        "windows",
+        Some(Path::new("C:\\Program Files\\DataOmni\\dataomni.exe")),
+        false,
+      ),
+      InstallChannel::Standalone,
+    );
   }
 }

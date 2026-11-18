@@ -79,6 +79,7 @@ pub fn run() {
       delete_connection,
       get_connections,
       diagnostics,
+      install_channel,
       reveal_log_file,
       latest_release,
       open_release_page,

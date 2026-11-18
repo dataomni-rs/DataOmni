@@ -805,6 +805,8 @@ export const en: Translations = {
   'settings.about.checkUpdates': 'Check for new versions at startup',
   'settings.about.checkUpdatesNote': 'At most once a day, only contacts GitHub, sends no data. It only tells you; nothing is downloaded.',
   'update.available': 'DataOmni {version} is available.',
+  'update.copyBrewUpgrade': 'Copy brew upgrade command',
+  'update.copiedBrewUpgrade': 'Upgrade command copied',
   'update.view': 'Release notes',
   'error.backend.updateCheckFailed': 'Could not check for a new version: {detail}',
   'error.backend.externalLinkOpenFailed': 'Could not open link in browser: {detail}',
