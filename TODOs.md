@@ -37,14 +37,14 @@
 
 - [x] P0 `TODOs.md` 第四次归档与 `v1.3` 路线重排（2026-11-18）
   - 已把包含 `v1.2.0`、`v1.2.1`（`S0–S4`、`V2`、`V4`、`W1–W4`、`E1`、`E2`）验收记录的原文件逐字备份至 `docs/archive/TODOs-2026-11-18.md`，新增 [`rfcs/roadmap-1.3.md`](rfcs/roadmap-1.3.md) 并同步更新 `AGENTS.md` 权威来源表。
-- [ ] P1 补齐 `.github/workflows/ci.yml` 打包脚本路径过滤白名单
-  - 将 `scripts/homebrew-cask.sh`（核对其余纯发布归档辅助路径）纳入 `Detect changed scopes` 免编译白名单，消除仅改打包脚本/清单时触发 28 分钟全量编译的无效等待；确保应用代码、构建脚本与 `README.md` 改动仍触发 `app_changed=true`。
-- [ ] P2 升级 GitHub Actions 官方步骤版本，清零 Node 20 弃用告警
-  - 统一升级 `.github/workflows/{ci,release,site,nightly-databases}.yml` 中的 `actions/checkout`、`actions/cache`、`actions/upload-artifact`、`actions/download-artifact` 至原生 Node 24 版本，并核查 `ubuntu-latest` 迁移兼容性，清空 CI / Release `ANNOTATIONS` 告警噪音。
-- [ ] P3 发版公开后自动同步 `dataomni-rs/homebrew-tap`
-  - 在 GitHub Release `published`（`prerelease == false` 且 `draft == false`）时自动调用 `scripts/homebrew-cask.sh <版本>` 复核服务端 SHA-256 与 Apple 公证票据，经细粒度密钥自动更新 `dataomni-rs/homebrew-tap` 的 `Casks/dataomni.rb`（未配跨仓密钥时静默跳过提示，不阻塞发版）。
+- [x] P1 补齐 `.github/workflows/ci.yml` 打包脚本路径过滤白名单（`31875ca`，`src/ciWorkflows.test.ts` 先红后绿）
+  - 已将 `scripts/homebrew-cask.sh`、`README.en.md`、`.github/workflows/homebrew-tap.yml` 与 `.github/workflows/windows-install.yml` 纳入 `Detect changed scopes` 免编译白名单；新增 `src/ciWorkflows.test.ts` 直接提取执行 `ci.yml` 的分支规则，反向验证打包辅助路径 `app_changed=false` 而 `README.md`、`scripts/install-macos.sh`、`src-tauri/*` 仍触发 `app_changed=true`。
+- [x] P2 升级 GitHub Actions 官方步骤版本，清零 Node 20 弃用告警（`01bcaf2`，`src/ciWorkflows.test.ts` 先红后绿）
+  - 已将全部工作流（`ci.yml`、`release.yml`、`site.yml`、`nightly-databases.yml`、`windows-install.yml`）中的 `actions/checkout` 升至 `@v7`、`actions/cache` 升至 `@v6`、`actions/upload-artifact` 升至 `@v7`、`actions/download-artifact` 升至 `@v8`、`actions/upload-pages-artifact` 与 `actions/deploy-pages` 升至 `@v5`（全部 `using: node24`），并核实 `ubuntu-latest` 已平滑运行在 Ubuntu 26.04.1 LTS（`release.yml` Linux 发版包继续钉死 `ubuntu-22.04` 保 glibc 兼容）；`src/ciWorkflows.test.ts` 增加最低主版本门禁。
+- [x] P3 发版公开后自动同步 `dataomni-rs/homebrew-tap`（`5b701e5`）
+  - 已新增 `.github/workflows/homebrew-tap.yml`（监听 `release: [published]` 排除 `draft` / `prerelease`，并支持 `workflow_dispatch` 指定版本），在 `macos-latest` 上调用 `scripts/homebrew-cask.sh` 复核服务端 SHA-256、`xcrun stapler validate`、`spctl` 公证票据与 `brew style`；配置 `HOMEBREW_TAP_TOKEN` 时幂等更新 `dataomni-rs/homebrew-tap` 的 `Casks/dataomni.rb`，未配置时输出 `::notice::` 正常结束；同步更新 `packaging/homebrew/README.md`。
 - [ ] P4 跟进构建期 glob 依赖安全补丁（收口 `QS2 / QS3`）
-  - 重估触发条件：上游发布修复 `GHSA-g3hv-75wg-m249` / `GHSA-fc5q-39xc-vjpf` 的 `minimatch` 与 `picomatch` 版本后，执行 `bun update` 并摘除 `package.json` `audit:frontend` 中的临时 `--ignore`。
+  - 重估触发条件：上游发布修复 `GHSA-g3hv-75wg-m249` / `GHSA-fc5q-39xc-vjpf` 的 `minimatch` 与 `picomatch` 版本后，执行 `bun update` 并摘除 `package.json` `audit:frontend` 中的临时 `--ignore`（2026-11-18 核查 npm：`picomatch` 最新仍为 `4.0.7`，`typescript-eslint` 依赖的 `minimatch` `10.x` 最新仍为 `10.2.6`，尚未发布补丁版）。
 
 ### 第二阶段（V）：跨平台打包版实机闭环与 Nightly 真库稳态
 
