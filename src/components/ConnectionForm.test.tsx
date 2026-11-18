@@ -155,3 +155,48 @@ describe('ConnectionForm TLS 模式', () => {
     expect(container.textContent).not.toContain(hint);
   });
 });
+
+describe('ConnectionForm 按编译期驱动列表过滤类型（M1）', () => {
+  it('未编进 oracle 驱动时新建连接隐藏 Oracle，编辑存档里的旧 Oracle 连接仍保留只读显示', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { DatabaseType, createDefaultConfig } = await import('../stores/connectionStore');
+    const { resetCompiledDriversCacheForTests, SUPPORTED_DATABASE_TYPES } = await import(
+      '../contracts/databaseSupport'
+    );
+
+    const withoutOracle = [...SUPPORTED_DATABASE_TYPES].filter((t) => t !== DatabaseType.Oracle);
+    resetCompiledDriversCacheForTests();
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === 'compiled_drivers' ? withoutOracle : null,
+    );
+
+    await act(async () => {
+      root.render(<ConnectionForm mode="create" onClose={() => {}} />);
+    });
+    expect(
+      [...container.querySelectorAll('button')].some((b) => b.textContent?.includes('Oracle')),
+    ).toBe(false);
+    expect(button('PostgreSQL')).toBeDefined();
+
+    const savedOracle = {
+      ...createDefaultConfig(DatabaseType.Oracle),
+      id: 'ora-1',
+      name: 'legacy-ora',
+      created_at: '2026-11-01T00:00:00Z',
+      updated_at: '2026-11-01T00:00:00Z',
+    };
+    await act(async () => {
+      root.render(
+        <ConnectionForm key="edit" mode="edit" connection={savedOracle} onClose={() => {}} />,
+      );
+    });
+    const oracleBtn = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Oracle'),
+    );
+    expect(oracleBtn).toBeDefined();
+    expect(oracleBtn?.disabled).toBe(true);
+
+    resetCompiledDriversCacheForTests();
+    vi.mocked(invoke).mockImplementation(async () => null);
+  });
+});

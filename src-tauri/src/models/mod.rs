@@ -141,6 +141,25 @@ pub enum DatabaseType {
 }
 
 impl DatabaseType {
+  pub const ALL: [DatabaseType; 11] = [
+    DatabaseType::SQLite,
+    DatabaseType::MySQL,
+    DatabaseType::PostgreSQL,
+    DatabaseType::SqlServer,
+    DatabaseType::Oracle,
+    DatabaseType::DuckDB,
+    DatabaseType::ClickHouse,
+    DatabaseType::MongoDB,
+    DatabaseType::Redis,
+    DatabaseType::Neo4j,
+    DatabaseType::Elasticsearch,
+  ];
+
+  /// 当前二进制实际编进了驱动、能建立连接的类型列表（供前端隐藏未编入的驱动项）
+  pub fn compiled_drivers() -> Vec<DatabaseType> {
+    Self::ALL.into_iter().filter(DatabaseType::has_driver).collect()
+  }
+
   /// 这个类型现在能不能真的连上。
   ///
   /// 唯一依据是编进去的驱动：`Cargo.toml` 里 `sqlx` 开的
@@ -152,14 +171,19 @@ impl DatabaseType {
   /// 都由测试钉在 `Cargo.toml` 的 features 上。界面那份是提前告知，这份是
   /// 最终裁决——任何绕过界面的路径（老配置、手改存档）都过不去。
   pub fn has_driver(&self) -> bool {
-    self.speaks_sql()
-      || matches!(
-        self,
-        DatabaseType::MongoDB
-          | DatabaseType::Redis
-          | DatabaseType::Neo4j
-          | DatabaseType::Elasticsearch
-      )
+    match self {
+      DatabaseType::Oracle => cfg!(feature = "oracle"),
+      _ => {
+        self.speaks_sql()
+          || matches!(
+            self,
+            DatabaseType::MongoDB
+              | DatabaseType::Redis
+              | DatabaseType::Neo4j
+              | DatabaseType::Elasticsearch
+          )
+      }
+    }
   }
 
   /// 走 SQL 的那一族：编辑器、五张目录查询表、执行计划、表格写入都是为它们写的。

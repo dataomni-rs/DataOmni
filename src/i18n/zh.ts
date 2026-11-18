@@ -1143,7 +1143,7 @@ export const zh = {
   'error.createProfileFailed': '创建连接失败',
   'error.updateProfileFailed': '更新连接失败',
   'error.deleteProfileFailed': '删除连接失败',
-  'error.backend.unsupportedDatabase': '{detail} 在当前版本还没有可用驱动，无法连接。已支持的是 MySQL、PostgreSQL 和 SQLite。',
+  'error.backend.unsupportedDatabase': '当前构建未包含 {detail} 数据库驱动，无法建立连接。',
   'error.backend.tlsClientPairRequired': 'TLS 客户端证书和客户端私钥必须同时填写，只填一个连不上。注意这两项是数据库的 TLS 证书——SSH 私钥要填在「通过 SSH 隧道连接」那一段里。',
   'error.backend.tlsCertificatesUnsupported': '当前数据库驱动不支持自定义 TLS 证书。',
   'error.backend.sqlitePathRequired': '数据库文件路径不能为空。',

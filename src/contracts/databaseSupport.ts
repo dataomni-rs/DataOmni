@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { DatabaseType } from './connection';
 
 /**
@@ -76,6 +77,48 @@ export function hasQueryEditor(type: string): boolean {
 
 export function isDatabaseTypeSupported(type: DatabaseType): boolean {
   return SUPPORTED_DATABASE_TYPES.has(type);
+}
+
+let compiledDriversValue: ReadonlySet<DatabaseType> | null = null;
+let compiledDriversPromise: Promise<ReadonlySet<DatabaseType>> | null = null;
+
+export function getCachedCompiledDrivers(): ReadonlySet<DatabaseType> | null {
+  return compiledDriversValue;
+}
+
+/**
+ * 问后端当前构建编进了哪些驱动（见 `rfcs/editions-and-branching.md` §5）。
+ * 进程内只问一次；单测或非 Tauri 环境未模拟该命令时回退至静态全集 `SUPPORTED_DATABASE_TYPES`
+ */
+export function loadCompiledDrivers(): Promise<ReadonlySet<DatabaseType>> {
+  compiledDriversPromise ??= invoke<unknown>('compiled_drivers')
+    .then((value) => {
+      if (!Array.isArray(value) || value.length === 0) {
+        compiledDriversValue = SUPPORTED_DATABASE_TYPES;
+        return SUPPORTED_DATABASE_TYPES;
+      }
+      const valid = new Set(
+        value.filter((item): item is DatabaseType =>
+          SUPPORTED_DATABASE_TYPES.has(item as DatabaseType),
+        ),
+      );
+      const resolved =
+        valid.size === 0 || valid.size === SUPPORTED_DATABASE_TYPES.size
+          ? SUPPORTED_DATABASE_TYPES
+          : valid;
+      compiledDriversValue = resolved;
+      return resolved;
+    })
+    .catch(() => {
+      compiledDriversValue = SUPPORTED_DATABASE_TYPES;
+      return SUPPORTED_DATABASE_TYPES;
+    });
+  return compiledDriversPromise;
+}
+
+export function resetCompiledDriversCacheForTests(): void {
+  compiledDriversValue = null;
+  compiledDriversPromise = null;
 }
 
 /**

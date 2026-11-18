@@ -1,7 +1,7 @@
 use crate::models::{ConnectionProfile, DatabaseType};
 use crate::services::duckdb::DuckDbRegistry;
 use crate::services::mongodb::{MongoRegistry, MongoTarget};
-use crate::services::oracle::{self, OraclePool, OracleRegistry, OracleTarget};
+use crate::services::oracle::OracleRegistry;
 use crate::services::{
   sql_server, ssh_tunnel, ConnectionService, SqlServerPool, SqlServerRegistry, SqlServerTarget,
   TunnelRegistry,
@@ -196,14 +196,28 @@ pub async fn test_connection(
     let pool = SqlServerPool::new(target, client).await.map_err(|error| error.message)?;
     sql_server_registry.insert(connection_string.clone(), pool);
   } else if resolved.db_type == DatabaseType::Oracle {
-    // Oracle 同样由后端持有
-    let reachable = match local_port {
-      Some(port) => resolved.redirected_to("127.0.0.1", port),
-      None => resolved,
-    };
-    let target = OracleTarget::from_profile(&reachable);
-    let connection = oracle::connect(&target).await.map_err(|error| error.message)?;
-    oracle_registry.insert(connection_string.clone(), OraclePool::new(target, connection));
+    #[cfg(feature = "oracle")]
+    {
+      // Oracle 同样由后端持有
+      let reachable = match local_port {
+        Some(port) => resolved.redirected_to("127.0.0.1", port),
+        None => resolved,
+      };
+      let target = crate::services::oracle::OracleTarget::from_profile(&reachable);
+      let connection =
+        crate::services::oracle::connect(&target).await.map_err(|error| error.message)?;
+      oracle_registry.insert(
+        connection_string.clone(),
+        crate::services::oracle::OraclePool::new(target, connection),
+      );
+    }
+    #[cfg(not(feature = "oracle"))]
+    {
+      let _ = &oracle_registry;
+      unreachable!(
+        "resolve_for_connection already rejected Oracle when oracle feature is disabled"
+      );
+    }
   } else if resolved.db_type == DatabaseType::MongoDB {
     let reachable = match local_port {
       Some(port) => resolved.redirected_to("127.0.0.1", port),

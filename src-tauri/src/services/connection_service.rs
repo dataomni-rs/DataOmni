@@ -1663,13 +1663,12 @@ mod tests {
   /// 暂时没有能挡的类型。以后往枚举里加一种还没接的类型时，把它加进这张单子——它会红，
   /// 那时换回「拒绝没有驱动的类型」的用例（git 里 `refuses_database_types_that_have_no_driver`）
   #[test]
-  fn every_database_type_has_a_driver_for_now() {
+  fn database_driver_gate_matches_compiled_cargo_features() {
     for db_type in [
       DatabaseType::MySQL,
       DatabaseType::PostgreSQL,
       DatabaseType::SQLite,
       DatabaseType::SqlServer,
-      DatabaseType::Oracle,
       DatabaseType::MongoDB,
       DatabaseType::Redis,
       DatabaseType::Neo4j,
@@ -1678,6 +1677,22 @@ mod tests {
       DatabaseType::Elasticsearch,
     ] {
       assert!(db_type.has_driver(), "{db_type:?}");
+    }
+    assert_eq!(DatabaseType::Oracle.has_driver(), cfg!(feature = "oracle"));
+
+    #[cfg(not(feature = "oracle"))]
+    {
+      let config_path = temporary_config_path();
+      let service =
+        ConnectionService::from_path(&config_path, Box::<MemoryCredentialStore>::default())
+          .unwrap();
+      let mut ora = profile("ora-1", "secret");
+      ora.db_type = DatabaseType::Oracle;
+      assert_eq!(
+        service.resolve_for_connection(&ora).err(),
+        Some(format!("{UNSUPPORTED_DATABASE}: Oracle")),
+      );
+      let _ = std::fs::remove_file(config_path);
     }
   }
 

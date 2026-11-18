@@ -1,7 +1,6 @@
 # 更多数据库、国内版与 AI：版本与分支怎么管
 
-> 评估日期：2026-09-27。当前状态：**§6 的 `ai` feature 已落地**（Cargo `default = ["ai"]`，CI 多跑一步
-> `--no-default-features`）；驱动按 feature 分仍只有评估。结论限定在当前版本（v0.4.0）。
+> 评估日期：2026-09-27。当前状态：**§5 的 `oracle` 驱动 feature 与 §6 的 `ai` feature 均已落地**（Cargo `default = ["ai", "oracle"]`，CI 同时校验默认全开与 `--no-default-features` 编译及单测）。
 
 ## 0. 结论
 

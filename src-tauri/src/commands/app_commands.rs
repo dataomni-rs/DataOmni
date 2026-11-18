@@ -153,6 +153,11 @@ fn detect_install_channel_from(
 }
 
 #[tauri::command]
+pub fn compiled_drivers() -> Vec<crate::models::DatabaseType> {
+  crate::models::DatabaseType::compiled_drivers()
+}
+
+#[tauri::command]
 pub fn install_channel() -> InstallChannel {
   let exe = std::env::current_exe().ok();
   let caskroom_present = std::path::Path::new("/opt/homebrew/Caskroom/dataomni").is_dir()
@@ -241,5 +246,12 @@ mod tests {
       ),
       InstallChannel::Standalone,
     );
+  }
+
+  #[test]
+  fn compiled_drivers_reflect_oracle_feature_gate() {
+    let drivers = compiled_drivers();
+    assert!(drivers.contains(&crate::models::DatabaseType::PostgreSQL));
+    assert_eq!(drivers.contains(&crate::models::DatabaseType::Oracle), cfg!(feature = "oracle"));
   }
 }
