@@ -39,9 +39,9 @@
   - 已把包含 `v1.2.0`、`v1.2.1`（`S0–S4`、`V2`、`V4`、`W1–W4`、`E1`、`E2`）验收记录的原文件逐字备份至 `docs/archive/TODOs-2026-11-18.md`，新增 [`rfcs/roadmap-1.3.md`](rfcs/roadmap-1.3.md) 并同步更新 `AGENTS.md` 权威来源表。
 - [x] P1 补齐 `.github/workflows/ci.yml` 打包脚本路径过滤白名单（`31875ca`，`src/ciWorkflows.test.ts` 先红后绿）
   - 已将 `scripts/homebrew-cask.sh`、`README.en.md`、`.github/workflows/homebrew-tap.yml` 与 `.github/workflows/windows-install.yml` 纳入 `Detect changed scopes` 免编译白名单；新增 `src/ciWorkflows.test.ts` 直接提取执行 `ci.yml` 的分支规则，反向验证打包辅助路径 `app_changed=false` 而 `README.md`、`scripts/install-macos.sh`、`src-tauri/*` 仍触发 `app_changed=true`。
-- [x] P2 升级 GitHub Actions 官方步骤版本，清零 Node 20 弃用告警（`01bcaf2`，`src/ciWorkflows.test.ts` 先红后绿）
+- [x] P2 升级 GitHub Actions 官方步骤版本，清零 Node 20 弃用告警（`01bcaf2`，PR `#50` 运行 `44334307233` 6 项任务 warning 告警数 0）
   - 已将全部工作流（`ci.yml`、`release.yml`、`site.yml`、`nightly-databases.yml`、`windows-install.yml`）中的 `actions/checkout` 升至 `@v7`、`actions/cache` 升至 `@v6`、`actions/upload-artifact` 升至 `@v7`、`actions/download-artifact` 升至 `@v8`、`actions/upload-pages-artifact` 与 `actions/deploy-pages` 升至 `@v5`（全部 `using: node24`），并核实 `ubuntu-latest` 已平滑运行在 Ubuntu 26.04.1 LTS（`release.yml` Linux 发版包继续钉死 `ubuntu-22.04` 保 glibc 兼容）；`src/ciWorkflows.test.ts` 增加最低主版本门禁。
-- [x] P3 发版公开后自动同步 `dataomni-rs/homebrew-tap`（`5b701e5`）
+- [x] P3 发版公开后自动同步 `dataomni-rs/homebrew-tap`（`5b701e5`，`macos-latest` 运行 `44336357193` 56 秒实测通过）
   - 已新增 `.github/workflows/homebrew-tap.yml`（监听 `release: [published]` 排除 `draft` / `prerelease`，并支持 `workflow_dispatch` 指定版本），在 `macos-latest` 上调用 `scripts/homebrew-cask.sh` 复核服务端 SHA-256、`xcrun stapler validate`、`spctl` 公证票据与 `brew style`；配置 `HOMEBREW_TAP_TOKEN` 时幂等更新 `dataomni-rs/homebrew-tap` 的 `Casks/dataomni.rb`，未配置时输出 `::notice::` 正常结束；同步更新 `packaging/homebrew/README.md`。
 - [ ] P4 跟进构建期 glob 依赖安全补丁（收口 `QS2 / QS3`）
   - 重估触发条件：上游发布修复 `GHSA-g3hv-75wg-m249` / `GHSA-fc5q-39xc-vjpf` 的 `minimatch` 与 `picomatch` 版本后，执行 `bun update` 并摘除 `package.json` `audit:frontend` 中的临时 `--ignore`（2026-11-18 核查 npm：`picomatch` 最新仍为 `4.0.7`，`typescript-eslint` 依赖的 `minimatch` `10.x` 最新仍为 `10.2.6`，尚未发布补丁版）。
@@ -58,13 +58,11 @@
 
 ### 第三阶段（U）：应用内签名平滑更新与全渠道分发合规
 
-- [ ] U1 应用内签名校验平滑更新（承接 `v1.2` `E3` / `roadmap-1.0` `R3`，前置签名公证已解锁）
-  - 先写最小设计说明 `rfcs/auto-update.md`：
-    1. 接入 `tauri-plugin-updater`（Ed25519 公钥写入配置、私钥存 GitHub Actions Secret，`release.yml` 生成签名更新包与 `latest.json`）；
-    2. 识别安装渠道：Homebrew Cask 或系统包管理器管理的副本引导使用包管理器升级（如 `brew upgrade --cask dataomni`），避免自更新覆盖包管理器状态；
-    3. 复用设置页「自动检查更新」开关，显式展示版本与更新说明并由用户主动点击确认升级，绝不后台静默重启破坏未提交事务。
-- [ ] U2 官网双语隐私与安全合规声明页（`/privacy/` 与 `/zh/privacy/`，**走独立官网 PR**）
-  - 在 `site/` 新增中英双语隐私与安全声明页（零遥测、凭据只进系统钥匙串、只读 Agent 物理边界、可选 AI 直连且支持 `--no-default-features` 编译剔除），补齐页脚入口并纳入 `verify_html_invariants` 门禁，兼顾企业安全采购审计与应用商店上架合规要求。
+- [-] U1 应用内签名校验平滑更新（承接 `v1.2` `E3` / `roadmap-1.0` `R3`，前置签名公证已解锁）
+  - [x] 设计说明与安装渠道识别引导（`f9678bf`）：已撰写 [`rfcs/auto-update.md`](rfcs/auto-update.md)，落地后端 `install_channel`（区分 `homebrew`、`systemPackage`、`standalone`，排除源码开发构建误判）与前端 `UpdateNotice` Homebrew Cask 一键复制 `brew upgrade --cask dataomni`，`UpdateNotice.test.tsx` 先红后绿。
+  - [ ] 独立安装包 `tauri-plugin-updater` 签名替换：待在本机 `~/.private_keys/dataomni-updater.key` 生成生产 Ed25519 密钥对并写入 `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions Secret 后，接入 `tauri.conf.json` 公钥、`release.yml` `latest.json` 生成及用户显式确认升级交互（绝不后台静默重启）。
+- [x] U2 官网双语隐私与安全合规声明页（`/privacy/` 与 `/zh/privacy/`，独立官网 PR `#51` / `1642fc0` 已上线）
+  - 已在 `site/` 新增中英双语隐私政策与数据安全声明页（零遥测、无云账号、凭据只进系统钥匙串、三类出网请求完整披露、只读 Agent `PROD` 物理不可见、`--no-default-features` 编译剔除），补齐页脚、侧边栏与 `sitemap.xml` 并修复窄屏 `.docs-sidebar` 横向溢出；`site:check`、桌面深浅色与真实 375px 视口（`scrollWidth=375`）及线上 `https://dataomni.dev/privacy/`、`https://dataomni.dev/zh/privacy/`（HTTP 200）全部核验通过。
 - [-] U3 在途外部渠道收口、Windows 签名评估与生态目录推广
   - [ ] WinGet（已提 PR：`microsoft/winget-pkgs#481999` 等待上游人工合入）：合入后运行 `scripts/winget-manifest.sh` 提交最新稳定版，分别在 `README.md` / `README.en.md` 与 `site/`（独立 PR）补上 `winget install DataOmni.DataOmni`，并在下次发版时对齐 `src-tauri/tauri.conf.json` 的 `bundle.publisher`。
   - [ ] 上游 `Homebrew/homebrew-cask`：待主仓星标（≥75 / 自提 ≥225）且 `dataomni.dev` 域名注册满 30 天后，将 `packaging/homebrew/Casks/dataomni.rb` 原样提交至官方核心库。
@@ -73,8 +71,8 @@
 
 ### 第四阶段（M）：可选驱动解耦、国产库扩展与商店沙盒变体（按条件触发）
 
-- [ ] M1 数据库驱动按 Cargo feature 解耦（承接 `B4`）
-  - 将带外部动态库或平台限制的驱动（首先以 `oracle` 为切入点）拆为默认开启的 Cargo feature（官网 DMG / Homebrew 版默认全开零影响，`--no-default-features` 或按需组合可打出不含闭源动态库的纯净包），前端按后端驱动能力列表渲染可用连接类型。
+- [x] M1 数据库驱动按 Cargo feature 解耦（承接 `B4`）（`0f64974`）
+  - 已将 `oracle`（ODPI-C 动态库驱动）拆为默认开启的 Cargo feature（`default = ["ai", "oracle"]`），关闭时不编译链接 `oracle` crate 且不注入 Linux `instantclient` `DT_RPATH`；`DatabaseType` 枚举保持完整以无损读写跨版本 `connections.json`，未编入时以零尺寸空枚举封闭池类型并在 `resolve_for_connection` 与 CLI/MCP 返回 `DATAOMNI_UNSUPPORTED_DATABASE`；新增 `compiled_drivers` 供 `ConnectionForm` 动态隐藏未编译驱动（编辑旧配置保留只读显示），CI 新增 `--no-default-features` 单测门禁（默认 455 条、无默认特性 443 条、前端 193 文件 2331 条全绿）。
 - [ ] M2 国产与更多数据库按安装包接入（承接 `E4` / `B1b`）
   - [!] KingbaseES（人大金仓）：当前阻塞于缺试用安装包/镜像；拿到镜像后补齐连接、目录元数据、分页、导入导出与真库冒烟门禁。
   - [ ] 达梦（DM8）：有明确接入诉求时基于 `M1` feature 隔离落地。
