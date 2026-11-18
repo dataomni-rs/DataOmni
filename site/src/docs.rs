@@ -165,8 +165,8 @@ const EN_QUICKSTART_SECTIONS: &[DocSection] = &[
         rows: &[
           &[
             "macOS 12+ (Apple Silicon)",
-            "DataOmni_<ver>_aarch64.dmg",
-            "Drag DataOmni.app to /Applications. Because builds currently use ad-hoc signing with Hardened Runtime, click \"Open Anyway\" once in System Settings -> Privacy & Security, or clear the quarantine attribute below.",
+            "Homebrew Cask or .dmg",
+            "Signed with an Apple Developer ID and notarized by Apple — drag DataOmni.app to /Applications, or install via Homebrew below (which also links dataomni onto PATH).",
           ],
           &[
             "Windows 10 / 11 (x64)",
@@ -181,9 +181,9 @@ const EN_QUICKSTART_SECTIONS: &[DocSection] = &[
         ],
       },
       DocBlock::Code {
-        label: "macOS Gatekeeper quarantine clear (optional)",
-        copy_text: Some("xattr -dr com.apple.quarantine /Applications/DataOmni.app"),
-        raw_code: "xattr -dr com.apple.quarantine /Applications/DataOmni.app",
+        label: "Install on macOS via Homebrew Cask",
+        copy_text: Some("brew install --cask dataomni-rs/tap/dataomni"),
+        raw_code: "brew install --cask dataomni-rs/tap/dataomni",
       },
     ],
   },
@@ -221,8 +221,8 @@ const EN_QUICKSTART_SECTIONS: &[DocSection] = &[
       },
       DocBlock::Callout {
         tone: CalloutTone::Note,
-        title: "macOS Keychain prompt after app upgrades",
-        body: "Until Apple Developer ID signing is active, macOS treats a newly upgraded build as a distinct binary identity and prompts once per saved credential. Enter your login password and click \"Always Allow\" so both the GUI and CLI/MCP share access.",
+        title: "macOS Keychain & Developer ID team signing",
+        body: "Official macOS builds (v1.2.1+) are signed with a consistent Apple Developer ID team, so routine upgrades preserve Keychain access without re-prompting. If upgrading once from an earlier ad-hoc build (<= 1.2.0), enter your login password and click \"Always Allow\" once so both the GUI and CLI/MCP share the team grant.",
       },
     ],
   },
@@ -341,8 +341,8 @@ const ZH_QUICKSTART_SECTIONS: &[DocSection] = &[
         rows: &[
           &[
             "macOS 12+（Apple Silicon）",
-            "DataOmni_<ver>_aarch64.dmg",
-            "将 DataOmni.app 拖入「应用程序」。当前构建启用 Hardened Runtime 但暂未接入付费公证，首次打开请在「系统设置 → 隐私与安全性」点一次「仍要打开」，或执行下方命令清除隔离标记。",
+            "Homebrew Cask 或 .dmg",
+            "已由 Apple Developer ID 签名并通过 Apple 公证——直接将 DataOmni.app 拖入「应用程序」，或执行下方 Homebrew 命令安装（同时自动把 dataomni 软链进 PATH）。",
           ],
           &[
             "Windows 10 / 11（x64）",
@@ -357,9 +357,9 @@ const ZH_QUICKSTART_SECTIONS: &[DocSection] = &[
         ],
       },
       DocBlock::Code {
-        label: "macOS 清除 Gatekeeper 隔离属性（可选）",
-        copy_text: Some("xattr -dr com.apple.quarantine /Applications/DataOmni.app"),
-        raw_code: "xattr -dr com.apple.quarantine /Applications/DataOmni.app",
+        label: "macOS 通过 Homebrew Cask 安装",
+        copy_text: Some("brew install --cask dataomni-rs/tap/dataomni"),
+        raw_code: "brew install --cask dataomni-rs/tap/dataomni",
       },
     ],
   },
@@ -397,8 +397,8 @@ const ZH_QUICKSTART_SECTIONS: &[DocSection] = &[
       },
       DocBlock::Callout {
         tone: CalloutTone::Note,
-        title: "macOS 升级版本后的钥匙串授权提示",
-        body: "在接入 Apple Developer ID 团队签名之前，macOS 会按二进制摘要区分新旧版本。升级后首次读取已存密码时，输入开机密码并点「始终允许」，界面端与内置 CLI / MCP 即可共享同一授权。",
+        title: "macOS 钥匙串与团队签名升级说明",
+        body: "官方 macOS 安装包（v1.2.1 起）采用固定 Apple Developer ID 团队签名，日常升级不会重弹钥匙串授权框。若从 1.2.0 及更早的未签名版本首次升上来，首次读取已存密码时输入开机密码并点「始终允许」，界面端与内置 CLI / MCP 即可共享同一团队授权。",
       },
     ],
   },
@@ -780,7 +780,7 @@ const EN_CLI_SECTIONS: &[DocSection] = &[
       DocBlock::Code {
         label: "macOS symlink & Agent Skill export",
         copy_text: Some("ln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni"),
-        raw_code: "# Link dataomni onto PATH on macOS (Linux .deb/.rpm installs /usr/bin/dataomni)\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# Print the built-in SKILL.md guide for terminal agents\ndataomni cli guide",
+        raw_code: "# Homebrew Cask already links $(brew --prefix)/bin/dataomni; for manual .dmg installs:\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# Print the built-in SKILL.md guide for terminal agents\ndataomni cli guide",
       },
       DocBlock::Callout {
         tone: CalloutTone::Note,
@@ -882,7 +882,7 @@ const ZH_CLI_SECTIONS: &[DocSection] = &[
       DocBlock::Code {
         label: "macOS 软链到 PATH 并导出 Agent 使用说明",
         copy_text: Some("ln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni"),
-        raw_code: "# macOS 建立命令行软链（Linux .deb / .rpm 安装后已在 /usr/bin/dataomni）\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# 输出完整 SKILL.md，可直接存进 Claude Code / Codex 的 skills 目录\ndataomni cli guide",
+        raw_code: "# Homebrew Cask 安装已自动软链 $(brew --prefix)/bin/dataomni；手动拖 .dmg 安装时可执行：\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# 输出完整 SKILL.md，可直接存进 Claude Code / Codex 的 skills 目录\ndataomni cli guide",
       },
       DocBlock::Callout {
         tone: CalloutTone::Note,
@@ -1146,6 +1146,21 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-2-1",
+    toc_label: "v1.2.1 (2026-11-18)",
+    heading: "v1.2.1 — 2026-11-18",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Brings official Apple Developer ID code signing, Apple notarization, and Homebrew Cask installation to macOS builds.",
+      ),
+      DocBlock::Bullets(&[
+        "macOS signing & notarization: both DataOmni.app and the outer .dmg are now signed with an Apple Developer ID, notarized via Apple notarytool, and stapled with offline tickets — drag to /Applications and launch directly without Gatekeeper quarantine workarounds, and preserve Keychain team authorization across future updates.",
+        "Official Homebrew Cask tap: install or upgrade via brew install --cask dataomni-rs/tap/dataomni, which installs DataOmni.app and automatically links the read-only dataomni CLI / MCP binary onto $(brew --prefix)/bin/dataomni.",
+        "Bundle & CI verification gates: aligned macOS LSMinimumSystemVersion to 12.0 (Monterey) and added an automated release gate asserting byte-for-byte SHA-256 preservation of bundled Oracle Instant Client libraries alongside stapler and spctl verification.",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-2-0",
     toc_label: "v1.2.0 (2026-11-18)",
     heading: "v1.2.0 — 2026-11-18",
@@ -1222,6 +1237,21 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-2-1",
+    toc_label: "v1.2.1（2026-11-18）",
+    heading: "v1.2.1 — 2026-11-18",
+    blocks: &[
+      DocBlock::Paragraph(
+        "正式补齐 macOS 安装包的 Apple Developer ID 代码签名、Apple 官方公证与 Homebrew Cask 一键安装。",
+      ),
+      DocBlock::Bullets(&[
+        "macOS 签名公证与票据钉合：DataOmni.app 与外层 .dmg 双层均完成 Apple Developer ID 签名、notarytool 公证与 stapler 离线票据钉合，下载拖入「应用程序」即可直接打开，无需再手动清理隔离属性，且后续同团队证书版本升级不再重弹系统钥匙串授权。",
+        "官方 Homebrew Tap 上线：支持执行 brew install --cask dataomni-rs/tap/dataomni 一键安装与升级，装入应用的同时自动将内置只读命令行与 MCP 服务软链至 $(brew --prefix)/bin/dataomni。",
+        "打包元数据与构建门禁：将 macOS Info.plist 的最低系统版本修正为 12.0（Monterey），并在发布流水线新增包内 Oracle Instant Client 全部库文件逐字节 SHA-256 校验与 stapler / spctl 公证自动核验。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-2-0",
     toc_label: "v1.2.0（2026-11-18）",

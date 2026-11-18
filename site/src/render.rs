@@ -242,7 +242,7 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   let structured_data =
     render_structured_data(copy, version, &canonical_url, &og_image_url, &assets.release_tag_url)?;
   let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
-  let macos_quarantine_cmd = "xattr -dr com.apple.quarantine /Applications/DataOmni.app";
+  let macos_brew_cmd = "brew install --cask dataomni-rs/tap/dataomni";
   let linux_install_cmd = format!("sudo apt install ./DataOmni_{version}_amd64.deb");
 
   let mut html = String::with_capacity(68_608);
@@ -989,11 +989,11 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
   writeln!(html, "            <div>")?;
   writeln!(html, "              <p class=\"install-note\">{}</p>", escape_html(copy.macos_note))?;
   writeln!(html, "              <div class=\"install-cmd\">")?;
-  writeln!(html, "                <code>{}</code>", escape_html(macos_quarantine_cmd))?;
+  writeln!(html, "                <code>{}</code>", escape_html(macos_brew_cmd))?;
   writeln!(
     html,
     "                <button class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
-    escape_html(macos_quarantine_cmd),
+    escape_html(macos_brew_cmd),
     escape_html(copy.copy_label),
     escape_html(copy.copied_label),
     escape_html(copy.copy_label)
