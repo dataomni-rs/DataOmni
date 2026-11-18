@@ -427,8 +427,8 @@ Tauri 本身跨平台，但**本项目只在下表记录的环境上实际验证
 | Windows (x86_64) | `DataOmni_<版本>_x64_en-US.msi`、`DataOmni_<版本>_x64-setup.exe` | ✅ 已验证（NSIS 逐项；MSI 人工装过） | 2026-10-06 起由 GitHub Actions（`release.yml`，windows-latest）打包，带 Oracle Instant Client。2026-10 在 Windows 11（非管理员）上走了 `docs/windows-checklist.md`：NSIS 安装、升级、降级、卸载、重装，凭据管理器，中文与 UNC 路径，SSH 隧道，MySQL / PostgreSQL / DuckDB / Oracle 冒烟都过；MSI 用户人工装过。之后十种库的连真库冒烟用例也在 Windows 上全跑过。打包版界面回归（R7-windows）：PostgreSQL 走满，其余各库走方言项，都过。**没测**：SmartScreen、多屏与缩放、真键盘快捷键与输入法。超长路径（>260 字符，没开系统长路径）：SQLite 已在 rc.1 之后修好；DuckDB 已在 v1.1.0 随升级 2.0 修好，CI 的 Windows 用例每次验 |
 
 安装包由 GitHub Actions 打（`.github/workflows/release.yml`）：推 `v*` tag 时 macOS（Apple Silicon）、Linux、Windows
-各打一份，放进一个草稿 Release。都**没有签名**——没有 Apple Developer ID，也没有 Windows 代码签名证书。
-Linux 包要求 glibc 2.34 以上（Ubuntu 22.04、Debian 12、Fedora 35、RHEL 9 及以后）。
+各打一份，放进一个草稿 Release。macOS 安装包（`v1.2.1` 起）已由 **Apple Developer ID 签名并通过 Apple 公证（Notarized）**；
+Windows 暂无代码签名证书。Linux 包要求 glibc 2.34 以上（Ubuntu 22.04、Debian 12、Fedora 35、RHEL 9 及以后）。
 
 ### 系统要求
 
@@ -441,13 +441,13 @@ Linux 包要求 glibc 2.34 以上（Ubuntu 22.04、Debian 12、Fedora 35、RHEL 
 
 ### 安装方式
 
-安装包在 [Releases](https://github.com/dataomni-rs/DataOmni/releases)（发布之前没有可下载的，只能从源码构建）。
-都没有签名，第一次打开要放行一次：
+安装包在 [Releases](https://github.com/dataomni-rs/DataOmni/releases)。
 
-- **macOS**：双击会被拦下。到「系统设置 → 隐私与安全性」底部点「仍要打开」；或者装好后在终端执行
-  `xattr -dr com.apple.quarantine /Applications/DataOmni.app`。macOS 15 起「右键 → 打开」不再能绕过。
-  升级之后第一次用到保存过的密码，系统会逐条问一次能否读钥匙串：输入开机登录密码、点「始终允许」
-- **Windows**：SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」
+- **macOS（Apple Silicon，macOS 12+）**：
+  - Homebrew：`brew install --cask dataomni-rs/tap/dataomni`（同时把内置命令行软链到 `$(brew --prefix)/bin/dataomni`）
+  - 手动安装：下载 `DataOmni_<版本>_aarch64.dmg` 拖入「应用程序」即可直接打开（已签名公证，无需手动清除隔离标记）。
+  - 从 `1.2.0` 及更早的未签名版本首次升上来时，由于代码身份从无签名切换为固定团队签名，第一次读取旧版存过的钥匙串密码会询问一次授权（输入开机密码点「始终允许」）；此后同团队签名的后续升级不再重复询问
+- **Windows**：暂无代码签名证书，SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」
 - **Linux**：`sudo apt install ./DataOmni_*.deb` 或 `sudo dnf install ./DataOmni-*.rpm`，依赖（含 Oracle 要的 libaio）自动带上
 
 #### 从源码构建
