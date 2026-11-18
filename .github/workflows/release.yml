@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Tauri system dependencies
         if: runner.os == 'Linux'
@@ -69,7 +69,7 @@ jobs:
         run: rm -rf src-tauri/target/duckdb-sources
 
       - name: Cache Oracle Instant Client download
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dataomni/instantclient
           key: instantclient-${{ matrix.platform }}-${{ hashFiles('scripts/fetch-oracle-client.sh') }}
@@ -270,7 +270,7 @@ jobs:
           rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP"/AuthKey_*.p8
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DataOmni-${{ matrix.platform }}
           if-no-files-found: error
@@ -288,10 +288,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download the Windows packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: DataOmni-windows-x64
           path: packages
@@ -329,7 +329,7 @@ jobs:
       contents: write
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: packages
           merge-multiple: true
