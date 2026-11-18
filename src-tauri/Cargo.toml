@@ -21,10 +21,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = ["ai"]
+default = ["ai", "oracle"]
 # AI 设计（发往模型服务的请求）。内网 / 信创构建用 `--no-default-features` 关掉：
 # 代码不在二进制里，可以证明不出网。见 rfcs/editions-and-branching.md §6
 ai = []
+# Oracle 驱动（ODPI-C，运行时加载 Instant Client）。官网 DMG / Homebrew / Windows / Linux
+# 正式安装包默认开启；无闭源动态库构建或 Mac App Store 沙盒变体可关闭（TODOs M1）
+oracle = ["dep:oracle"]
+
+[[test]]
+name = "oracle_smoke"
+required-features = ["oracle"]
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -82,7 +89,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 roxmltree = "0.20"
 # Oracle（`services/oracle.rs`）。ODPI-C 编译进来，运行时 dlopen Instant Client；
 # 纯 Rust 的 `oracle-rs` 实验过，服务端一报错连接就断、错误码也丢了（TODOs 4.2）
-oracle = "0.6.3"
+oracle = { version = "0.6.3", optional = true }
 # DuckDB（`services/duckdb.rs`）。`bundled` 把 libduckdb 整个编进来（C++，冷编译多两分钟），
 # 可执行文件多约 33 MB、压缩后约 11 MB；parquet 与 json 两个扩展再多 1 MB 左右，读 parquet
 # 是 DuckDB 最常见的用法，一起编进去。时区扩展（ICU）要 cmake 构建，没开：带时区的时间按

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DatabaseType } from './connection';
 import {
   PENDING_FEATURES,
@@ -11,8 +11,15 @@ import {
   isDatabaseTypeSupported,
   hasGapsByDesign,
   hasQueryEditor,
+  loadCompiledDrivers,
+  resetCompiledDriversCacheForTests,
   speaksSql
 } from './databaseSupport';
+
+const invokeMock = vi.fn();
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args)
+}));
 
 /**
  * 「哪些数据库能用」有两份记录：后端 Cargo.toml 里 sqlx 编了哪些驱动，和前端
@@ -72,6 +79,24 @@ describe('数据库类型支持范围', () => {
     for (const type of Object.values(DatabaseType)) {
       expect(isDatabaseTypeSupported(type), type).toBe(true);
     }
+  });
+
+  it('带外部动态库的驱动拆为 Cargo feature 且默认开启，前端按后端驱动列表动态收窄', async () => {
+    expect(CARGO_TOML).toMatch(/^oracle\s*=\s*\{[^}]*optional\s*=\s*true/m);
+    expect(CARGO_TOML).toMatch(/^default\s*=\s*\[[^\]]*"oracle"/m);
+    expect(CARGO_TOML).toMatch(/^oracle\s*=\s*\["dep:oracle"\]/m);
+
+    resetCompiledDriversCacheForTests();
+    invokeMock.mockResolvedValueOnce([DatabaseType.PostgreSQL, DatabaseType.SQLite]);
+    const subset = await loadCompiledDrivers();
+    expect(subset.has(DatabaseType.PostgreSQL)).toBe(true);
+    expect(subset.has(DatabaseType.Oracle)).toBe(false);
+
+    // 未模拟后端 IPC 的单测环境回退至全量静态支持集
+    resetCompiledDriversCacheForTests();
+    invokeMock.mockResolvedValueOnce(null);
+    const fallback = await loadCompiledDrivers();
+    expect(fallback.has(DatabaseType.Oracle)).toBe(true);
   });
 });
 

@@ -19,25 +19,6 @@
 //! 状态每条语句之后问服务端（`DBMS_TRANSACTION.LOCAL_TRANSACTION_ID`），DDL 的隐式
 //! 提交也就自然反映出来。
 
-use crate::models::ConnectionProfile;
-use crate::services::query_error::QueryErrorDetails;
-use crate::services::query_error::{CONNECTION_LOST, CONNECTION_LOST_CODE};
-use crate::services::query_executor::{
-  admit_row_bytes, binary_json, flush_full_batch, flush_remaining_batch, number_duplicate_columns,
-  tagged_value, widen_f32, QueryColumnMetadata, QueryExecutionSummary, QueryResultBatch, QueryRow,
-  QueryTruncationReason, StreamOptions,
-};
-use crate::services::transaction_state::{TransactionState, TransactionStatus};
-use crate::services::write_batch::{
-  WriteBatchError, WriteStatement, ROW_COUNT_MISMATCH, ROW_COUNT_MISMATCH_CODE,
-};
-use crate::services::QueryError;
-use oracle::sql_type::{OracleType, Timestamp};
-use oracle::{Connection, Connector, InitParams, SqlValue};
-use serde_json::{Map, Value as JsonValue};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
-
 pub type OracleRegistry = crate::services::pool_registry::PoolRegistry<OraclePool>;
 
 /// 列类型的完整写法，`VARCHAR2(20 CHAR)`、`NUMBER(10,2)`、`RAW(8)`。
@@ -88,876 +69,6 @@ pub const ORACLE_CLIENT_MISSING: &str = "DATAOMNI_ORACLE_CLIENT_MISSING";
 /// Instant Client 在，但加载失败（缺系统库、平台不对）。数据是 ODPI-C 的原话
 pub const ORACLE_CLIENT_LOAD_FAILED: &str = "DATAOMNI_ORACLE_CLIENT_LOAD_FAILED";
 
-/// 开发与测试时覆盖 Instant Client 的位置
-const CLIENT_DIR_ENV: &str = "DATAOMNI_ORACLE_CLIENT_DIR";
-
-/// 空闲连接留几条。Oracle 的一次登录要几百毫秒，目录查询是零星的，四条够了
-const MAX_IDLE: usize = 4;
-
-/// 登录的等待上限，与 SQL Server 那一份同值。TCP 通了而握手不回（防火墙吞包、
-/// 监听器挂住）时驱动会一直等；前端对测试连接不再另设超时——那一步还包括读
-/// 钥匙串，而钥匙串授权框该等多久由用户定。超时后那条阻塞线程还会跑完，结果丢掉。
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// 每次往返取多少行
-const FETCH_ARRAY_SIZE: u32 = 256;
-
-static CLIENT_DIR: OnceLock<PathBuf> = OnceLock::new();
-static CLIENT: OnceLock<Result<(), QueryError>> = OnceLock::new();
-
-/// 应用启动时告诉这里：安装包里的 Instant Client 在哪个目录。
-///
-/// 只在第一次连 Oracle 时才真的加载——不连 Oracle 的用户不该为它付启动时间，
-/// 也不该因为它缺了什么而启动失败。
-pub fn set_client_dir(dir: PathBuf) {
-  let _ = CLIENT_DIR.set(dir);
-}
-
-static PINNED_CLIENT_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// 命令行用：只认安装包里的这一份，不认 [`CLIENT_DIR_ENV`]。命令行的环境变量是调用方给的，
-/// 指向别处的目录会让这个进程加载调用方的动态库，借应用的身份读钥匙串
-/// （`rfcs/agent-cli.md` §5.4）。界面由 launchd 启动，不继承调用方的环境
-pub fn pin_client_dir(dir: PathBuf) {
-  let _ = PINNED_CLIENT_DIR.set(dir);
-}
-
-fn client_dir() -> Option<PathBuf> {
-  if let Some(pinned) = PINNED_CLIENT_DIR.get() {
-    return Some(pinned.clone());
-  }
-  std::env::var_os(CLIENT_DIR_ENV).map(PathBuf::from).or_else(|| CLIENT_DIR.get().cloned())
-}
-
-/// 加载 Instant Client。整个进程只能做一次（ODPI-C 的全局上下文），失败也记住：
-/// 同一个目录里缺的文件不会在第二次连接时自己长出来。
-fn ensure_client() -> Result<(), QueryError> {
-  CLIENT
-    .get_or_init(|| {
-      let dir =
-        client_dir().ok_or_else(|| QueryError::message(format!("{ORACLE_CLIENT_MISSING}: -")))?;
-      if !has_client_library(&dir) {
-        return Err(QueryError::message(format!("{ORACLE_CLIENT_MISSING}: {}", dir.display())));
-      }
-      let dir = loadable_dir(&dir)
-        .map_err(|error| QueryError::message(format!("{ORACLE_CLIENT_LOAD_FAILED}: {error}")))?;
-      let load_failed =
-        |error: oracle::Error| QueryError::message(format!("{ORACLE_CLIENT_LOAD_FAILED}: {error}"));
-      let mut params = InitParams::new();
-      params
-        .oracle_client_lib_dir(&dir)
-        .and_then(|params| params.default_driver_name("DataOmni"))
-        .map_err(load_failed)?;
-      // 写不出来就照旧加载：诊断日志落在家目录，总比连不上 Oracle 强
-      if let Ok(config) = client_config_dir() {
-        params.oracle_client_config_dir(config).map_err(load_failed)?;
-      }
-      params.init().map(|_| ()).map_err(load_failed)
-    })
-    .clone()
-}
-
-/// 给 Instant Client 的配置目录（相当于本进程的 `TNS_ADMIN`），里面只有一份 `sqlnet.ora`。
-///
-/// 没有它的时候，客户端把诊断日志（ADR，每次连接失败记一条）写进 `$HOME/oradiag_<用户名>`，
-/// 在用户的家目录里凭空长出一个目录。`ADR_BASE` 把它挪进临时目录；不用
-/// `DIAG_ADR_ENABLED = OFF`，那样 `sqlnet.log` 会写进当前目录，命令行在哪儿跑就落在哪儿。
-///
-/// 盖掉用户自己的 `TNS_ADMIN` 不丢东西：连接串只用 Easy Connect 和完整描述符
-/// （[`OracleTarget::from_profile`]），不查 `tnsnames.ora`；要钱包的 TLS 也没做。
-fn client_config_dir() -> std::io::Result<PathBuf> {
-  let dir = std::env::temp_dir().join("dataomni-oracle");
-  std::fs::create_dir_all(&dir)?;
-  // 加引号：Windows 的临时目录在用户目录下，用户名可能带空格
-  std::fs::write(dir.join("sqlnet.ora"), format!("ADR_BASE = \"{}\"\n", dir.display()))?;
-  Ok(dir)
-}
-
-/// ODPI-C 按目录找的是**不带版本号**的名字（`libclntsh.dylib`、`libclntsh.so`），
-/// Instant Client 里它是指向 `…23.1` 的符号链接。安装包里放不了符号链接：打包时
-/// 会被当成文件再拷一份（macOS 上多出 56 MB）；也不能改名：依赖它的库（libociicus）
-/// 按原名找它，只剩改过名的那一份时进程直接崩（实验：SIGSEGV）。
-///
-/// 所以安装包里只放原样的文件，第一次加载时在临时目录里铺一层符号链接——每个文件
-/// 链回原处，再补上那个不带版本号的名字。文件本身一个字节都不动（许可要求原样分发）。
-#[cfg(unix)]
-fn loadable_dir(dir: &Path) -> std::io::Result<PathBuf> {
-  let plain = if cfg!(target_os = "macos") { "libclntsh.dylib" } else { "libclntsh.so" };
-  if dir.join(plain).exists() {
-    return Ok(dir.to_path_buf());
-  }
-  let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?.flatten().collect();
-  let versioned = entries
-    .iter()
-    .find(|entry| entry.file_name().to_string_lossy().starts_with(&format!("{plain}.")))
-    .map(std::fs::DirEntry::path)
-    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, plain))?;
-
-  // 按来源目录区分，同一份安装包每次落在同一个地方；两个进程同时铺也不打架：
-  // 已经在、而且指对了的链接直接用
-  let digest = dir
-    .to_string_lossy()
-    .bytes()
-    .fold(0u64, |hash, byte| hash.wrapping_mul(31).wrapping_add(u64::from(byte)));
-  let shadow = std::env::temp_dir().join(format!("dataomni-instantclient-{digest:016x}"));
-  std::fs::create_dir_all(&shadow)?;
-  let links = entries
-    .iter()
-    .map(|entry| (entry.path(), shadow.join(entry.file_name())))
-    .chain(std::iter::once((versioned, shadow.join(plain))));
-  for (source, link) in links {
-    if std::fs::read_link(&link).is_ok_and(|current| current == source) {
-      continue;
-    }
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(&source, &link)?;
-  }
-  Ok(shadow)
-}
-
-#[cfg(not(unix))]
-fn loadable_dir(dir: &Path) -> std::io::Result<PathBuf> {
-  Ok(dir.to_path_buf())
-}
-
-/// 带版本号的文件名也算：安装包里不放符号链接（打包时会被当成文件再拷一份，
-/// libclntsh 一个就 100 MB），ODPI-C 自己会按版本号去找
-fn has_client_library(dir: &Path) -> bool {
-  std::fs::read_dir(dir).is_ok_and(|entries| {
-    entries.flatten().any(|entry| {
-      let name = entry.file_name();
-      let name = name.to_string_lossy();
-      name.starts_with("libclntsh.") || name.eq_ignore_ascii_case("oci.dll")
-    })
-  })
-}
-
-/// 连上一台 Oracle 需要知道的全部。
-///
-/// 默认用 Easy Connect（`//host:port/service`），`database` 那一格填的是服务名。按 SID 连
-/// （[`ConnectionProfile::oracle_sid`]）时那一格是 SID：Easy Connect 写不了 SID，换成完整的连接描述符。
-/// TLS（要钱包）不做。
-#[derive(Clone)]
-pub struct OracleTarget {
-  connect_string: String,
-  username: String,
-  password: String,
-}
-
-impl OracleTarget {
-  pub fn from_profile(profile: &ConnectionProfile) -> Self {
-    let name = profile.database.as_deref().unwrap_or("");
-    let connect_string = if profile.oracle_sid() {
-      // 描述符里的地址由括号分隔，IPv6 不加方括号
-      let host = profile.host.trim_start_matches('[').trim_end_matches(']');
-      format!(
-        "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={host})(PORT={}))(CONNECT_DATA=(SID={name})))",
-        profile.port
-      )
-    } else {
-      // IPv6 地址不加方括号是 ORA-12262「Could not resolve hostname」
-      format!("//{}:{}/{name}", crate::models::url_host(&profile.host), profile.port)
-    };
-    Self { connect_string, username: profile.username.clone(), password: profile.password.clone() }
-  }
-}
-
-/// 会话的日期与数字格式：和结果里显示的写法一致。
-///
-/// 表格里改的值以文本绑定，由服务端按会话的 NLS 格式转成 DATE / TIMESTAMP。默认的
-/// `NLS_DATE_FORMAT` 是 `DD-MON-RR`，`2026-09-20 00:00:00` 写回去就是 ORA-01861；
-/// 小数点按地区设置可能是逗号。实验：设成下面这样之后，带不带小数秒、带不带时区的
-/// 写法都能转回去。
-///
-/// 带时区的那个用 `X`（小数点字符，由下面的 `NLS_NUMERIC_CHARACTERS` 定成 `.`）而不是字面的 `.`：
-/// `SS.FF TZH:TZM` 解析没有小数秒的值时把「空格加负号」当成了那个点，`00:00:00 -03:30` 读成
-/// `+03:30`（23ai 上逐个试过；`SSXFF` 带不带小数、正负偏移都对）
-const SESSION_FORMATS: &str = "ALTER SESSION SET \
-  NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS' \
-  NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF' \
-  NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD HH24:MI:SSXFF TZH:TZM' \
-  NLS_NUMERIC_CHARACTERS = '.,'";
-
-pub async fn connect(target: &OracleTarget) -> Result<Arc<Connection>, QueryError> {
-  let target = target.clone();
-  let attempt = blocking(move || {
-    ensure_client()?;
-    let connection = Connector::new(&target.username, &target.password, &target.connect_string)
-      .connect()
-      .map_err(|error| query_error(&error, None))?;
-    connection.execute(SESSION_FORMATS, &[]).map_err(|error| query_error(&error, None))?;
-    Ok(Arc::new(connection))
-  });
-  tokio::time::timeout(CONNECT_TIMEOUT, attempt).await.map_err(|_| {
-    QueryError::with_code(
-      CONNECTION_LOST_CODE,
-      format!("{CONNECTION_LOST}: timed out after {}s", CONNECT_TIMEOUT.as_secs()),
-    )
-  })?
-}
-
-/// 跑一段阻塞的驱动调用。线程池那一侧 panic 了也要变成一条错误——
-/// 不然这次调用永远不回来
-async fn blocking<T: Send + 'static>(
-  work: impl FnOnce() -> Result<T, QueryError> + Send + 'static,
-) -> Result<T, QueryError> {
-  tokio::task::spawn_blocking(work).await.map_err(|error| {
-    QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {error}"))
-  })?
-}
-
-/// 一台服务器的连接：一份连接参数，加几条空闲连接（目录查询用）。
-pub struct OraclePool {
-  target: OracleTarget,
-  idle: crate::services::pool_registry::IdleConnections<Arc<Connection>>,
-}
-
-/// 关掉连接要走一次网络（登出）；对端已经悄悄没了的话，这一步会一直等。
-/// 放到自己的线程上，不占异步运行时的工作线程
-fn release_in_background(connections: Vec<Arc<Connection>>) {
-  if !connections.is_empty() {
-    std::thread::spawn(move || drop(connections));
-  }
-}
-
-impl OraclePool {
-  /// `first` 是测试连接时连上的那一条，直接留着用，省一次登录
-  pub fn new(target: OracleTarget, first: Arc<Connection>) -> Arc<Self> {
-    Arc::new(Self {
-      target,
-      idle: crate::services::pool_registry::IdleConnections::new(first, MAX_IDLE),
-    })
-  }
-
-  /// 给一个会话用的连接：用完不放回，理由和 SQL Server 一样——会话上可能开着
-  /// 事务、改过 `ALTER SESSION`
-  pub async fn acquire_for_session(&self) -> Result<OracleConnection, QueryError> {
-    Ok(OracleConnection {
-      connection: Some(connect(&self.target).await?),
-      target: self.target.clone(),
-      autocommit: true,
-      transaction: TransactionState::default(),
-    })
-  }
-
-  /// 目录查询：带 `:1`、`:2` 绑定参数，返回**不带类型标签**的值，和插件 `select`
-  /// 的形状一样
-  pub async fn select(
-    self: &Arc<Self>,
-    sql: &str,
-    params: &[JsonValue],
-  ) -> Result<Vec<QueryRow>, QueryError> {
-    let (idle, stale) = self.idle.take();
-    release_in_background(stale);
-    let Some(connection) = idle else {
-      return self.select_on(connect(&self.target).await?, sql, params).await;
-    };
-    let result = self.select_on(connection, sql, params).await;
-    if keeps_connection(&result) {
-      return result;
-    }
-    // 池里的连接被服务端断掉了（重启、DBA 清会话）：只读，换一条新连接再读一次。
-    // 不然池里有几条，对象树和表数据页就连着报几次「连接已断开」
-    release_in_background(self.idle.drain());
-    self.select_on(connect(&self.target).await?, sql, params).await
-  }
-
-  async fn select_on(
-    self: &Arc<Self>,
-    connection: Arc<Connection>,
-    sql: &str,
-    params: &[JsonValue],
-  ) -> Result<Vec<QueryRow>, QueryError> {
-    let sql = sql.to_string();
-    let params = params.to_vec();
-    let worker = Arc::clone(&connection);
-    let result = blocking(move || select_rows(&worker, &sql, &params)).await;
-    if keeps_connection(&result) {
-      self.idle.put(connection);
-    }
-    result
-  }
-}
-
-impl OraclePool {
-  /// 一批写入，一个事务，要么全成要么全不成。约定与 `write_batch::execute_write_batch`
-  /// 相同：每条语句可以要求恰好影响几行，对不上整批回滚；出错的标在那一条上，
-  /// 提交失败标在 `statements.len()`。
-  pub async fn write_batch(
-    self: &Arc<Self>,
-    statements: &[WriteStatement],
-  ) -> Result<Vec<u64>, WriteBatchError> {
-    if statements.is_empty() {
-      return Ok(Vec::new());
-    }
-    let (idle, stale) = self.idle.take();
-    release_in_background(stale);
-    let connection = match idle {
-      Some(connection) => connection,
-      None => connect(&self.target).await.map_err(|error| WriteBatchError::at(0, error))?,
-    };
-    let batch: Vec<(String, Vec<JsonValue>, Option<u64>)> = statements
-      .iter()
-      .map(|statement| {
-        (statement_text(&statement.sql), statement.params.clone(), statement.expect_rows)
-      })
-      .collect();
-    let worker = Arc::clone(&connection);
-    let outcome = blocking(move || Ok(write_in_transaction(&worker, &batch)))
-      .await
-      .map_err(|error| WriteBatchError::at(0, error))?;
-    // 连接要回到池子里给目录查询用：失败时已经回滚过了，上面不会留着事务
-    let reusable = match &outcome {
-      Ok(_) => true,
-      Err((_, error)) => error.code.as_deref() != Some(CONNECTION_LOST_CODE),
-    };
-    if reusable {
-      self.idle.put(connection);
-    } else {
-      // 写不重试（不知道写进去没有），但同一批旧连接一起丢掉，下一次不再撞上
-      release_in_background(self.idle.drain());
-    }
-    outcome.map_err(|(index, error)| WriteBatchError::at(index, error))
-  }
-}
-
-fn write_in_transaction(
-  connection: &Connection,
-  batch: &[(String, Vec<JsonValue>, Option<u64>)],
-) -> Result<Vec<u64>, (usize, QueryError)> {
-  let mut affected = Vec::with_capacity(batch.len());
-  for (index, (sql, params, expect_rows)) in batch.iter().enumerate() {
-    let step = || -> Result<u64, QueryError> {
-      let binds = bind_values(params)?;
-      let bind_refs: Vec<&dyn oracle::sql_type::ToSql> =
-        binds.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
-      let executed =
-        connection.execute(sql, &bind_refs).map_err(|error| query_error(&error, Some(sql)))?;
-      let rows = executed.row_count().map_err(|error| query_error(&error, None))?;
-      if let Some(expected) = expect_rows {
-        if rows != *expected {
-          return Err(QueryError::with_code(
-            ROW_COUNT_MISMATCH_CODE,
-            format!("{ROW_COUNT_MISMATCH}: {expected} · {rows}"),
-          ));
-        }
-      }
-      Ok(rows)
-    };
-    match step() {
-      Ok(rows) => affected.push(rows),
-      Err(error) => {
-        let _ = connection.rollback();
-        return Err((index, error));
-      }
-    }
-  }
-  connection.commit().map_err(|error| {
-    let _ = connection.rollback();
-    (batch.len(), query_error(&error, None))
-  })?;
-  Ok(affected)
-}
-
-fn select_rows(
-  connection: &Connection,
-  sql: &str,
-  params: &[JsonValue],
-) -> Result<Vec<QueryRow>, QueryError> {
-  let binds = bind_values(params)?;
-  let bind_refs: Vec<&dyn oracle::sql_type::ToSql> =
-    binds.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
-  let rows = connection.query(sql, &bind_refs).map_err(|error| query_error(&error, Some(sql)))?;
-  let columns: Vec<(String, OracleType)> = rows
-    .column_info()
-    .iter()
-    .map(|info| (info.name().to_string(), info.oracle_type().clone()))
-    .collect();
-  let mut result = Vec::new();
-  for row in rows {
-    let row = row.map_err(|error| query_error(&error, Some(sql)))?;
-    let mut values = Map::new();
-    for ((name, oracle_type), value) in columns.iter().zip(row.sql_values()) {
-      values.insert(name.clone(), untagged(decode(oracle_type, value)?));
-    }
-    result.push(values);
-  }
-  Ok(result)
-}
-
-/// 绑定参数：只认标量，理由同 `write_batch` 的 `bind_params!`
-enum Bind {
-  Null(Option<String>),
-  Text(String),
-  Integer(i64),
-  Float(f64),
-  Boolean(bool),
-}
-
-/// 文本按 VARCHAR2 绑，不用驱动默认的 NVARCHAR2：目录里的名字都是 VARCHAR2，
-/// NVARCHAR2 的参数在 `COALESCE(:2, SYS_CONTEXT(...))` 里报 ORA-12704（字符集
-/// 不一致），在 `table_name = :1` 里让服务端把**列**转成 NVARCHAR2——数据字典上
-/// 的索引就用不上了
-impl oracle::sql_type::ToSql for Bind {
-  fn oratype(&self, conn: &Connection) -> oracle::Result<OracleType> {
-    match self {
-      Bind::Null(_) => Ok(OracleType::Varchar2(1)),
-      Bind::Text(value) => {
-        Ok(OracleType::Varchar2(u32::try_from(value.len().max(1)).unwrap_or(u32::MAX)))
-      }
-      Bind::Integer(value) => value.oratype(conn),
-      Bind::Float(value) => value.oratype(conn),
-      Bind::Boolean(value) => value.oratype(conn),
-    }
-  }
-
-  fn to_sql(&self, value: &mut SqlValue) -> oracle::Result<()> {
-    match self {
-      Bind::Null(inner) => inner.to_sql(value),
-      Bind::Text(inner) => inner.to_sql(value),
-      Bind::Integer(inner) => inner.to_sql(value),
-      Bind::Float(inner) => inner.to_sql(value),
-      Bind::Boolean(inner) => inner.to_sql(value),
-    }
-  }
-}
-
-impl oracle::sql_type::ToSqlNull for Bind {
-  fn oratype_for_null(_conn: &Connection) -> oracle::Result<OracleType> {
-    Ok(OracleType::Varchar2(1))
-  }
-}
-
-fn bind_values(params: &[JsonValue]) -> Result<Vec<Bind>, QueryError> {
-  params
-    .iter()
-    .map(|param| match param {
-      JsonValue::Null => Ok(Bind::Null(None)),
-      JsonValue::Bool(value) => Ok(Bind::Boolean(*value)),
-      JsonValue::Number(number) => Ok(match number.as_i64() {
-        Some(integer) => Bind::Integer(integer),
-        None => Bind::Float(number.as_f64().unwrap_or(f64::NAN)),
-      }),
-      JsonValue::String(text) => Ok(Bind::Text(text.clone())),
-      other => Err(QueryError::message(format!(
-        "{}: {other}",
-        crate::services::write_batch::UNSUPPORTED_PARAMETER_TYPE
-      ))),
-    })
-    .collect()
-}
-
-/// 插件的解码器返回的是裸值；我们的解码器给精度敏感的类型挂了标签
-fn untagged(value: JsonValue) -> JsonValue {
-  match value {
-    JsonValue::Object(mut map) if map.contains_key("type") => {
-      map.remove("value").unwrap_or(JsonValue::Null)
-    }
-    other => other,
-  }
-}
-
-/// 一个会话的连接。
-///
-/// 和 SQL Server 一样，执行期间把连接取出来：执行的 future 被丢掉时它就回不来了，
-/// 下一次用的时候重连。
-///
-/// 提交的规矩：自动提交开着、**而且这条语句之前没有开着的事务**，非查询语句成功之后
-/// 就提交。后半句要紧：用户按了「开始事务」（`SET TRANSACTION`）之后，自动提交的开关
-/// 还是开着的，这时再替他提交，就把他的事务拆成了一条一条。
-pub struct OracleConnection {
-  connection: Option<Arc<Connection>>,
-  target: OracleTarget,
-  autocommit: bool,
-  /// 上一条语句之后服务端报的事务状态
-  transaction: TransactionState,
-}
-
-/// future 被丢掉时（超时、取消）打断服务端那条语句。
-///
-/// 阻塞线程还在等驱动返回，拿不回来；但它手里的是同一条连接，`break_execution`
-/// 可以从别的线程调。
-struct BreakOnDrop {
-  connection: Arc<Connection>,
-  finished: bool,
-}
-
-impl Drop for BreakOnDrop {
-  fn drop(&mut self) {
-    if !self.finished {
-      let _ = self.connection.break_execution();
-    }
-  }
-}
-
-/// 阻塞那一侧送过来的东西
-enum Fetched {
-  /// 第一个之后还有几个结果集没给出来；在列之前送，到了行数上限丢掉接收端也不会漏
-  Omitted(usize),
-  Columns(Vec<QueryColumnMetadata>, Vec<String>),
-  Row(QueryRow),
-}
-
-impl OracleConnection {
-  /// 这条连接在 `limit` 之内答不答话。用途见 `SessionConnection::responds_within`。
-  ///
-  /// 超时靠驱动自己的 call timeout：阻塞线程上的 ping 被外面的 tokio 超时丢下之后
-  /// 还会一直卡着；让驱动在 `limit` 到了自己放弃，那条线程才回得来
-  pub async fn ping(&mut self, limit: std::time::Duration) -> bool {
-    let Some(connection) = self.connection.clone() else {
-      return true;
-    };
-    let probe = blocking(move || {
-      connection.set_call_timeout(Some(limit)).map_err(|error| query_error(&error, None))?;
-      let answered = connection.ping().is_ok();
-      // 连接还活着才需要把超时改回去；死了的连接会被丢掉
-      if answered {
-        let _ = connection.set_call_timeout(None);
-      }
-      Ok(answered)
-    });
-    let answered = matches!(
-      tokio::time::timeout(limit + std::time::Duration::from_secs(1), probe).await,
-      Ok(Ok(true))
-    );
-    if !answered {
-      release_in_background(self.connection.take().into_iter().collect());
-    }
-    answered
-  }
-
-  async fn take_connection(&mut self) -> Result<Arc<Connection>, QueryError> {
-    match self.connection.take() {
-      Some(connection) => Ok(connection),
-      None => connect(&self.target).await,
-    }
-  }
-
-  pub async fn execute_streaming(
-    &mut self,
-    sql: &str,
-    options: StreamOptions,
-    sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
-  ) -> Result<QueryExecutionSummary, QueryError> {
-    self.execute_streaming_with_params(sql, &[], options, sink).await
-  }
-
-  /// 带编辑器里的参数（`:1`…），按位置绑
-  pub async fn execute_streaming_with_params(
-    &mut self,
-    sql: &str,
-    params: &[JsonValue],
-    options: StreamOptions,
-    sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
-  ) -> Result<QueryExecutionSummary, QueryError> {
-    if options.explain_plan != crate::services::ExplainPlan::Off {
-      return self.explain(sql, options, sink).await;
-    }
-    // 事务控制语句本身不按「自动提交」再提交一次：`SET TRANSACTION` 之后提交等于
-    // 刚开的事务立刻结束，`SAVEPOINT` 之后提交等于保存点刚设就没了
-    let commit_after =
-      self.autocommit && !self.transaction().in_transaction() && !controls_transaction(sql);
-    let connection = self.take_connection().await?;
-    let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
-    let statement = statement_text(sql);
-    let binds = bind_values(params)?;
-    let refuse_non_query = options.non_query == crate::services::NonQueryHandling::Refuse;
-
-    // 通道留几批的余量：阻塞那一侧可以先读着，异步这一侧到了上限就丢掉接收端，
-    // 那一侧下一次送不出去就停
-    let (sender, mut receiver) =
-      tokio::sync::mpsc::channel::<Fetched>(options.batch_size.max(1) * 2);
-    let worker = Arc::clone(&connection);
-    let task = tokio::task::spawn_blocking(move || {
-      let outcome =
-        run_statement(&worker, &statement, &binds, refuse_non_query, commit_after, &sender);
-      // 成功失败都要问：失败的那一条也可能结束了事务（死锁回滚）
-      (outcome, open_transaction(&worker))
-    });
-
-    let mut header: Option<(Vec<QueryColumnMetadata>, Vec<String>)> = None;
-    let mut rows = Vec::with_capacity(options.batch_size);
-    let mut row_count = 0;
-    let mut batch_count = 0;
-    let mut bytes_read: usize = 0;
-    let mut truncation_reason = None;
-    let mut sink_error = None;
-    let mut omitted_result_sets = 0;
-
-    while let Some(fetched) = receiver.recv().await {
-      match fetched {
-        Fetched::Omitted(count) => omitted_result_sets = count,
-        Fetched::Columns(metadata, names) => header = Some((metadata, names)),
-        Fetched::Row(values) => {
-          if row_count >= options.row_limit {
-            truncation_reason = Some(QueryTruncationReason::RowLimit);
-            break;
-          }
-          match admit_row_bytes(&values, options.byte_limit, &mut bytes_read) {
-            Ok(true) => {}
-            Ok(false) => {
-              truncation_reason = Some(QueryTruncationReason::ByteLimit);
-              break;
-            }
-            Err(error) => {
-              sink_error = Some(error);
-              break;
-            }
-          }
-          rows.push(values);
-          row_count += 1;
-          if let Err(error) =
-            flush_full_batch(&mut rows, options.batch_size, &mut batch_count, row_count, sink)
-          {
-            sink_error = Some(error);
-            break;
-          }
-        }
-      }
-    }
-    // 到了上限就不再要：接收端一丢，阻塞那一侧下一次送不出去就停下，游标随
-    // 语句一起关掉。和 TDS 不同，Oracle 不要求把剩下的行读完
-    drop(receiver);
-    let (outcome, open) = task.await.map_err(|error| {
-      QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {error}"))
-    })?;
-    guard.finished = true;
-
-    self.settle(connection, keeps_connection(&outcome), open);
-    if let Some(error) = sink_error {
-      return Err(error);
-    }
-    if let Some(affected) = outcome? {
-      return Ok(QueryExecutionSummary::Affected { rows_affected: affected });
-    }
-    let Some((column_metadata, columns)) = header else {
-      return Ok(QueryExecutionSummary::Affected { rows_affected: 0 });
-    };
-    flush_remaining_batch(&mut rows, &mut batch_count, row_count, sink)?;
-    Ok(QueryExecutionSummary::Rows {
-      columns,
-      column_metadata,
-      row_count,
-      batch_count,
-      truncated: truncation_reason.is_some(),
-      truncation_reason,
-      row_limit: options.row_limit,
-      byte_limit: options.byte_limit,
-      bytes_read,
-      omitted_result_sets,
-      extra_result_sets: Vec::new(),
-    })
-  }
-
-  /// 取执行计划：结果是一行一格，格子里是 [`read_plan`] 拼的 JSON，由
-  /// `explain::parse_plan` 解析。语句本身不执行（`EXPLAIN PLAN` 只解析、优化）
-  async fn explain(
-    &mut self,
-    sql: &str,
-    options: StreamOptions,
-    sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
-  ) -> Result<QueryExecutionSummary, QueryError> {
-    let connection = self.take_connection().await?;
-    let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
-    let statement = statement_text(sql);
-    let worker = Arc::clone(&connection);
-    let (outcome, open) = blocking(move || {
-      let outcome = explain_plan(&worker, &statement);
-      Ok((outcome, open_transaction(&worker)))
-    })
-    .await?;
-    guard.finished = true;
-    self.settle(connection, keeps_connection(&outcome), open);
-    let plan = outcome?;
-    let mut rows = vec![plan];
-    let mut batch_count = 0;
-    flush_remaining_batch(&mut rows, &mut batch_count, 1, sink)?;
-    Ok(QueryExecutionSummary::Rows {
-      columns: vec![PLAN_COLUMN.to_string()],
-      column_metadata: vec![QueryColumnMetadata {
-        name: PLAN_COLUMN.to_string(),
-        ordinal: 0,
-        database_type: "JSON".to_string(),
-        logical_type: "json".to_string(),
-        nullable: Some(false),
-      }],
-      row_count: 1,
-      batch_count,
-      truncated: false,
-      truncation_reason: None,
-      row_limit: options.row_limit,
-      byte_limit: options.byte_limit,
-      bytes_read: 0,
-      omitted_result_sets: 0,
-      extra_result_sets: Vec::new(),
-    })
-  }
-
-  /// 一次调用之后：连接还能用就收回来，事务状态照服务端刚报的记
-  fn settle(&mut self, connection: Arc<Connection>, keeps: bool, open: Option<bool>) {
-    let started_at = std::mem::take(&mut self.transaction).started_at;
-    if !keeps {
-      return;
-    }
-    self.connection = Some(connection);
-    // 问不出来（这一句也失败了）就当作没有事务：连接多半已经不行了
-    if open == Some(true) {
-      self.transaction = TransactionState {
-        status: TransactionStatus::Active,
-        // 还是同一个事务就沿用开始时间，否则状态栏上的计时每条语句都归零
-        started_at: started_at.or_else(|| Some(chrono::Utc::now().to_rfc3339())),
-      };
-    }
-  }
-
-  /// 下一条语句按不按自动提交走
-  pub fn set_autocommit(&mut self, autocommit: bool) {
-    self.autocommit = autocommit;
-  }
-
-  /// 服务端上一次报的事务状态。连接被放弃过（超时、取消）就是空闲：那条连接
-  /// 已经丢了，服务端会回滚它上面的事务
-  pub fn transaction(&self) -> TransactionState {
-    match self.connection {
-      Some(_) => self.transaction.clone(),
-      None => TransactionState::default(),
-    }
-  }
-
-  /// 同一条语句按多行参数执行（数组 DML，CSV 导入走这里），返回影响行数。
-  ///
-  /// `params` 按语句的绑定个数一行接一行地排——导入把一批的值首尾相接放在一起。
-  /// 不拼多行的 `INSERT ALL`：实验里 500 行 × 5 列的 `INSERT ALL` 光解析就 1.7 秒，
-  /// 数组 DML 同样的量 0.2 秒、5000 行 0.8 秒。值一律按文本绑，由服务端照会话的
-  /// NLS 格式转成列的类型，和另外几家一样。
-  pub async fn execute_with_params(
-    &mut self,
-    sql: &str,
-    params: &[Option<String>],
-  ) -> Result<u64, QueryError> {
-    let commit_after = self.autocommit && !self.transaction().in_transaction();
-    let connection = self.take_connection().await?;
-    let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
-    let statement = statement_text(sql);
-    let params = params.to_vec();
-    let worker = Arc::clone(&connection);
-    let (outcome, open) = blocking(move || {
-      let outcome = execute_many(&worker, &statement, &params, commit_after);
-      Ok((outcome, open_transaction(&worker)))
-    })
-    .await?;
-    guard.finished = true;
-    self.settle(connection, keeps_connection(&outcome), open);
-    outcome
-  }
-
-  /// 见 [`describe`]
-  pub async fn describe_columns(
-    &mut self,
-    sql: &str,
-  ) -> Result<Vec<QueryColumnMetadata>, QueryError> {
-    let connection = self.take_connection().await?;
-    let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
-    let statement = statement_text(sql);
-    let worker = Arc::clone(&connection);
-    let outcome = blocking(move || describe(&worker, &statement)).await;
-    guard.finished = true;
-    if keeps_connection(&outcome) {
-      self.connection = Some(connection);
-    }
-    outcome
-  }
-
-  /// 一次没有结果集可言的执行（事务控制这类）
-  pub async fn execute_batch(&mut self, sql: &str) -> Result<u64, QueryError> {
-    let mut rows = Vec::new();
-    let summary = self
-      .execute_streaming(sql, StreamOptions::limited(1, 1 << 20, 1), &mut |batch| {
-        rows.extend(batch.rows);
-        Ok(())
-      })
-      .await?;
-    Ok(match summary {
-      QueryExecutionSummary::Affected { rows_affected } => rows_affected,
-      QueryExecutionSummary::Rows { .. } => 0,
-    })
-  }
-}
-
-/// 这条连接上有没有开着的事务。问不出来是 `None`
-fn open_transaction(connection: &Connection) -> Option<bool> {
-  connection
-    .query_row_as::<Option<String>>("SELECT DBMS_TRANSACTION.LOCAL_TRANSACTION_ID FROM dual", &[])
-    .ok()
-    .map(|id| id.is_some())
-}
-
-const PLAN_COLUMN: &str = "plan";
-const EXPLAIN_PREFIX: &str = "EXPLAIN PLAN SET STATEMENT_ID = 'DATAOMNI' FOR ";
-/// 计划的每一步。别名带引号，理由同目录查询：不带引号的别名被折成大写
-const PLAN_STEPS: &str = r#"SELECT id AS "id", parent_id AS "parent_id",
-  operation AS "operation", options AS "options",
-  object_owner AS "object_owner", object_name AS "object_name", object_type AS "object_type",
-  cardinality AS "cardinality", bytes AS "bytes", cost AS "cost",
-  cpu_cost AS "cpu_cost", io_cost AS "io_cost", time AS "time",
-  access_predicates AS "access_predicates", filter_predicates AS "filter_predicates",
-  projection AS "projection"
-FROM plan_table WHERE statement_id = 'DATAOMNI' ORDER BY id"#;
-/// 「文本」那一页：`DBMS_XPLAN` 的原文，Oracle 用户认得的那张表加谓词与备注
-const PLAN_TEXT: &str = r#"SELECT plan_table_output AS "line"
-FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', 'DATAOMNI', 'TYPICAL'))"#;
-
-/// `EXPLAIN PLAN` 写进会话的 `PLAN_TABLE`，读出来之后撤掉。
-///
-/// 实验（Oracle Free 23ai）：写 `PLAN_TABLE` 本身就开了一个事务。所以之前没有事务
-/// 就整个回滚；之前有（用户开着的）就只退回到这里设的保存点，用户的改动原样留着
-/// ——整个回滚会把它们一起撤掉，而照原样留着则让状态栏凭空多出一个事务。问不出
-/// 之前有没有时按「有」处理：保存点在两种情况下都不会撤掉不该撤的东西。
-fn explain_plan(connection: &Connection, statement: &str) -> Result<QueryRow, QueryError> {
-  let open_before = open_transaction(connection) != Some(false);
-  if open_before {
-    connection
-      .execute("SAVEPOINT dataomni_explain", &[])
-      .map_err(|error| query_error(&error, None))?;
-  }
-  let plan = read_plan(connection, statement);
-  let undo = if open_before {
-    connection.execute("ROLLBACK TO SAVEPOINT dataomni_explain", &[]).map(|_| ())
-  } else {
-    connection.rollback()
-  };
-  let plan = plan?;
-  undo.map_err(|error| query_error(&error, None))?;
-  Ok(plan)
-}
-
-fn read_plan(connection: &Connection, statement: &str) -> Result<QueryRow, QueryError> {
-  let wrapped = format!("{EXPLAIN_PREFIX}{statement}");
-  connection
-    .execute(&wrapped, &[])
-    .map_err(|error| without_prefix(query_error(&error, Some(&wrapped)), EXPLAIN_PREFIX))?;
-  let steps = select_rows(connection, PLAN_STEPS, &[])?;
-  let text = select_rows(connection, PLAN_TEXT, &[])?
-    .iter()
-    .map(|row| row.get("line").and_then(JsonValue::as_str).unwrap_or_default().to_string())
-    .collect::<Vec<_>>()
-    .join("\n");
-  let payload = serde_json::json!({ "steps": steps, "text": text });
-  let mut row = Map::new();
-  row.insert(PLAN_COLUMN.to_string(), JsonValue::String(payload.to_string()));
-  Ok(row)
-}
-
-/// 出错位置是相对包了一层的那条语句算的，错误面板标的是用户写的那条
-fn without_prefix(mut error: QueryError, prefix: &str) -> QueryError {
-  let shift = prefix.chars().count() as u32;
-  if let Some(details) = error.details.as_mut() {
-    details.position = details.position.and_then(|position| position.checked_sub(shift));
-    details.position = details.position.filter(|position| *position > 0);
-  }
-  error
-}
-
 /// 这条语句自己就在开、关事务：关掉自动提交时不用为它做什么，自动提交开着时
 /// 也不该在它后面再提交一次
 pub fn controls_transaction(sql: &str) -> bool {
@@ -966,456 +77,1457 @@ pub fn controls_transaction(sql: &str) -> bool {
     || (first == "SET" && second == "TRANSACTION")
 }
 
-/// 执行一条语句（阻塞那一侧）。查询的行一行行送进通道；非查询按规矩提交
-fn run_statement(
-  connection: &Connection,
-  statement: &str,
-  binds: &[Bind],
-  refuse_non_query: bool,
-  commit_after: bool,
-  sender: &tokio::sync::mpsc::Sender<Fetched>,
-) -> Result<Option<u64>, QueryError> {
-  let bind_refs: Vec<&dyn oracle::sql_type::ToSql> =
-    binds.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
-  let mut prepared = connection
-    .statement(statement)
-    .fetch_array_size(FETCH_ARRAY_SIZE)
-    .build()
-    .map_err(|error| query_error(&error, Some(statement)))?;
-  if !prepared.is_query() {
-    if refuse_non_query {
-      return Err(QueryError::message(crate::services::query_executor::NON_QUERY_MESSAGE));
+#[cfg(not(feature = "oracle"))]
+mod disabled {
+  use crate::services::query_executor::{
+    QueryColumnMetadata, QueryExecutionSummary, QueryResultBatch, QueryRow, StreamOptions,
+  };
+  use crate::services::transaction_state::TransactionState;
+  use crate::services::write_batch::{WriteBatchError, WriteStatement};
+  use crate::services::QueryError;
+  use serde_json::Value as JsonValue;
+  use std::path::PathBuf;
+  use std::sync::Arc;
+
+  /// 未编入 `oracle` feature 时不可构造的池类型：类型系统保证登记表恒空、零运行期分支
+  #[derive(Debug)]
+  pub enum OraclePool {}
+
+  #[derive(Debug)]
+  pub enum OracleConnection {}
+
+  pub fn set_client_dir(_dir: PathBuf) {}
+
+  pub fn pin_client_dir(_dir: PathBuf) {}
+
+  impl OraclePool {
+    pub async fn acquire_for_session(&self) -> Result<OracleConnection, QueryError> {
+      match *self {}
     }
-    prepared.execute(&bind_refs).map_err(|error| query_error(&error, Some(statement)))?;
-    // 块用 `DBMS_SQL.RETURN_RESULT` 交回的结果集：先全部取出来好报个数，再读第一个
-    let mut implicit = Vec::new();
-    if prepared.is_plsql() {
-      while let Some(cursor) =
-        prepared.implicit_result().map_err(|error| query_error(&error, Some(statement)))?
-      {
-        implicit.push(cursor);
+
+    pub async fn select(
+      self: &Arc<Self>,
+      _sql: &str,
+      _params: &[JsonValue],
+    ) -> Result<Vec<QueryRow>, QueryError> {
+      match **self {}
+    }
+
+    pub async fn write_batch(
+      self: &Arc<Self>,
+      _statements: &[WriteStatement],
+    ) -> Result<Vec<u64>, WriteBatchError> {
+      match **self {}
+    }
+  }
+
+  impl OracleConnection {
+    pub async fn ping(&mut self, _limit: std::time::Duration) -> bool {
+      match *self {}
+    }
+
+    pub async fn execute_streaming(
+      &mut self,
+      _sql: &str,
+      _options: StreamOptions,
+      _sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
+    ) -> Result<QueryExecutionSummary, QueryError> {
+      match *self {}
+    }
+
+    pub async fn execute_streaming_with_params(
+      &mut self,
+      _sql: &str,
+      _params: &[JsonValue],
+      _options: StreamOptions,
+      _sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
+    ) -> Result<QueryExecutionSummary, QueryError> {
+      match *self {}
+    }
+
+    pub fn set_autocommit(&mut self, _autocommit: bool) {
+      match *self {}
+    }
+
+    pub fn transaction(&self) -> TransactionState {
+      match *self {}
+    }
+
+    pub async fn execute_with_params(
+      &mut self,
+      _sql: &str,
+      _params: &[Option<String>],
+    ) -> Result<u64, QueryError> {
+      match *self {}
+    }
+
+    pub async fn describe_columns(
+      &mut self,
+      _sql: &str,
+    ) -> Result<Vec<QueryColumnMetadata>, QueryError> {
+      match *self {}
+    }
+
+    pub async fn execute_batch(&mut self, _sql: &str) -> Result<u64, QueryError> {
+      match *self {}
+    }
+  }
+}
+
+#[cfg(not(feature = "oracle"))]
+pub use disabled::*;
+
+#[cfg(feature = "oracle")]
+mod imp {
+  use super::{controls_transaction, ORACLE_CLIENT_LOAD_FAILED, ORACLE_CLIENT_MISSING};
+  use crate::models::ConnectionProfile;
+  use crate::services::query_error::QueryErrorDetails;
+  use crate::services::query_error::{CONNECTION_LOST, CONNECTION_LOST_CODE};
+  use crate::services::query_executor::{
+    admit_row_bytes, binary_json, flush_full_batch, flush_remaining_batch,
+    number_duplicate_columns, tagged_value, widen_f32, QueryColumnMetadata, QueryExecutionSummary,
+    QueryResultBatch, QueryRow, QueryTruncationReason, StreamOptions,
+  };
+  use crate::services::transaction_state::{TransactionState, TransactionStatus};
+  use crate::services::write_batch::{
+    WriteBatchError, WriteStatement, ROW_COUNT_MISMATCH, ROW_COUNT_MISMATCH_CODE,
+  };
+  use crate::services::QueryError;
+  use oracle::sql_type::{OracleType, Timestamp};
+  use oracle::{Connection, Connector, InitParams, SqlValue};
+  use serde_json::{Map, Value as JsonValue};
+  use std::path::{Path, PathBuf};
+  use std::sync::{Arc, OnceLock};
+
+  /// 开发与测试时覆盖 Instant Client 的位置
+  const CLIENT_DIR_ENV: &str = "DATAOMNI_ORACLE_CLIENT_DIR";
+
+  /// 空闲连接留几条。Oracle 的一次登录要几百毫秒，目录查询是零星的，四条够了
+  const MAX_IDLE: usize = 4;
+
+  /// 登录的等待上限，与 SQL Server 那一份同值。TCP 通了而握手不回（防火墙吞包、
+  /// 监听器挂住）时驱动会一直等；前端对测试连接不再另设超时——那一步还包括读
+  /// 钥匙串，而钥匙串授权框该等多久由用户定。超时后那条阻塞线程还会跑完，结果丢掉。
+  const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+  /// 每次往返取多少行
+  const FETCH_ARRAY_SIZE: u32 = 256;
+
+  static CLIENT_DIR: OnceLock<PathBuf> = OnceLock::new();
+  static CLIENT: OnceLock<Result<(), QueryError>> = OnceLock::new();
+
+  /// 应用启动时告诉这里：安装包里的 Instant Client 在哪个目录。
+  ///
+  /// 只在第一次连 Oracle 时才真的加载——不连 Oracle 的用户不该为它付启动时间，
+  /// 也不该因为它缺了什么而启动失败。
+  pub fn set_client_dir(dir: PathBuf) {
+    let _ = CLIENT_DIR.set(dir);
+  }
+
+  static PINNED_CLIENT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+  /// 命令行用：只认安装包里的这一份，不认 [`CLIENT_DIR_ENV`]。命令行的环境变量是调用方给的，
+  /// 指向别处的目录会让这个进程加载调用方的动态库，借应用的身份读钥匙串
+  /// （`rfcs/agent-cli.md` §5.4）。界面由 launchd 启动，不继承调用方的环境
+  pub fn pin_client_dir(dir: PathBuf) {
+    let _ = PINNED_CLIENT_DIR.set(dir);
+  }
+
+  fn client_dir() -> Option<PathBuf> {
+    if let Some(pinned) = PINNED_CLIENT_DIR.get() {
+      return Some(pinned.clone());
+    }
+    std::env::var_os(CLIENT_DIR_ENV).map(PathBuf::from).or_else(|| CLIENT_DIR.get().cloned())
+  }
+
+  /// 加载 Instant Client。整个进程只能做一次（ODPI-C 的全局上下文），失败也记住：
+  /// 同一个目录里缺的文件不会在第二次连接时自己长出来。
+  fn ensure_client() -> Result<(), QueryError> {
+    CLIENT
+      .get_or_init(|| {
+        let dir =
+          client_dir().ok_or_else(|| QueryError::message(format!("{ORACLE_CLIENT_MISSING}: -")))?;
+        if !has_client_library(&dir) {
+          return Err(QueryError::message(format!("{ORACLE_CLIENT_MISSING}: {}", dir.display())));
+        }
+        let dir = loadable_dir(&dir)
+          .map_err(|error| QueryError::message(format!("{ORACLE_CLIENT_LOAD_FAILED}: {error}")))?;
+        let load_failed = |error: oracle::Error| {
+          QueryError::message(format!("{ORACLE_CLIENT_LOAD_FAILED}: {error}"))
+        };
+        let mut params = InitParams::new();
+        params
+          .oracle_client_lib_dir(&dir)
+          .and_then(|params| params.default_driver_name("DataOmni"))
+          .map_err(load_failed)?;
+        // 写不出来就照旧加载：诊断日志落在家目录，总比连不上 Oracle 强
+        if let Ok(config) = client_config_dir() {
+          params.oracle_client_config_dir(config).map_err(load_failed)?;
+        }
+        params.init().map(|_| ()).map_err(load_failed)
+      })
+      .clone()
+  }
+
+  /// 给 Instant Client 的配置目录（相当于本进程的 `TNS_ADMIN`），里面只有一份 `sqlnet.ora`。
+  ///
+  /// 没有它的时候，客户端把诊断日志（ADR，每次连接失败记一条）写进 `$HOME/oradiag_<用户名>`，
+  /// 在用户的家目录里凭空长出一个目录。`ADR_BASE` 把它挪进临时目录；不用
+  /// `DIAG_ADR_ENABLED = OFF`，那样 `sqlnet.log` 会写进当前目录，命令行在哪儿跑就落在哪儿。
+  ///
+  /// 盖掉用户自己的 `TNS_ADMIN` 不丢东西：连接串只用 Easy Connect 和完整描述符
+  /// （[`OracleTarget::from_profile`]），不查 `tnsnames.ora`；要钱包的 TLS 也没做。
+  fn client_config_dir() -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join("dataomni-oracle");
+    std::fs::create_dir_all(&dir)?;
+    // 加引号：Windows 的临时目录在用户目录下，用户名可能带空格
+    std::fs::write(dir.join("sqlnet.ora"), format!("ADR_BASE = \"{}\"\n", dir.display()))?;
+    Ok(dir)
+  }
+
+  /// ODPI-C 按目录找的是**不带版本号**的名字（`libclntsh.dylib`、`libclntsh.so`），
+  /// Instant Client 里它是指向 `…23.1` 的符号链接。安装包里放不了符号链接：打包时
+  /// 会被当成文件再拷一份（macOS 上多出 56 MB）；也不能改名：依赖它的库（libociicus）
+  /// 按原名找它，只剩改过名的那一份时进程直接崩（实验：SIGSEGV）。
+  ///
+  /// 所以安装包里只放原样的文件，第一次加载时在临时目录里铺一层符号链接——每个文件
+  /// 链回原处，再补上那个不带版本号的名字。文件本身一个字节都不动（许可要求原样分发）。
+  #[cfg(unix)]
+  fn loadable_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    let plain = if cfg!(target_os = "macos") { "libclntsh.dylib" } else { "libclntsh.so" };
+    if dir.join(plain).exists() {
+      return Ok(dir.to_path_buf());
+    }
+    let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?.flatten().collect();
+    let versioned = entries
+      .iter()
+      .find(|entry| entry.file_name().to_string_lossy().starts_with(&format!("{plain}.")))
+      .map(std::fs::DirEntry::path)
+      .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, plain))?;
+
+    // 按来源目录区分，同一份安装包每次落在同一个地方；两个进程同时铺也不打架：
+    // 已经在、而且指对了的链接直接用
+    let digest = dir
+      .to_string_lossy()
+      .bytes()
+      .fold(0u64, |hash, byte| hash.wrapping_mul(31).wrapping_add(u64::from(byte)));
+    let shadow = std::env::temp_dir().join(format!("dataomni-instantclient-{digest:016x}"));
+    std::fs::create_dir_all(&shadow)?;
+    let links = entries
+      .iter()
+      .map(|entry| (entry.path(), shadow.join(entry.file_name())))
+      .chain(std::iter::once((versioned, shadow.join(plain))));
+    for (source, link) in links {
+      if std::fs::read_link(&link).is_ok_and(|current| current == source) {
+        continue;
+      }
+      let _ = std::fs::remove_file(&link);
+      std::os::unix::fs::symlink(&source, &link)?;
+    }
+    Ok(shadow)
+  }
+
+  #[cfg(not(unix))]
+  fn loadable_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    Ok(dir.to_path_buf())
+  }
+
+  /// 带版本号的文件名也算：安装包里不放符号链接（打包时会被当成文件再拷一份，
+  /// libclntsh 一个就 100 MB），ODPI-C 自己会按版本号去找
+  fn has_client_library(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+      entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("libclntsh.") || name.eq_ignore_ascii_case("oci.dll")
+      })
+    })
+  }
+
+  /// 连上一台 Oracle 需要知道的全部。
+  ///
+  /// 默认用 Easy Connect（`//host:port/service`），`database` 那一格填的是服务名。按 SID 连
+  /// （[`ConnectionProfile::oracle_sid`]）时那一格是 SID：Easy Connect 写不了 SID，换成完整的连接描述符。
+  /// TLS（要钱包）不做。
+  #[derive(Clone)]
+  pub struct OracleTarget {
+    connect_string: String,
+    username: String,
+    password: String,
+  }
+
+  impl OracleTarget {
+    pub fn from_profile(profile: &ConnectionProfile) -> Self {
+      let name = profile.database.as_deref().unwrap_or("");
+      let connect_string = if profile.oracle_sid() {
+        // 描述符里的地址由括号分隔，IPv6 不加方括号
+        let host = profile.host.trim_start_matches('[').trim_end_matches(']');
+        format!(
+          "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={host})(PORT={}))(CONNECT_DATA=(SID={name})))",
+          profile.port
+        )
+      } else {
+        // IPv6 地址不加方括号是 ORA-12262「Could not resolve hostname」
+        format!("//{}:{}/{name}", crate::models::url_host(&profile.host), profile.port)
+      };
+      Self {
+        connect_string,
+        username: profile.username.clone(),
+        password: profile.password.clone(),
       }
     }
-    // PL/SQL 块的「影响行数」驱动恒报 1，那不是任何一张表上的行数
-    let affected = if prepared.is_plsql() {
-      0
-    } else {
-      prepared.row_count().map_err(|error| query_error(&error, None))?
-    };
-    if commit_after {
-      connection.commit().map_err(|error| query_error(&error, None))?;
+  }
+
+  /// 会话的日期与数字格式：和结果里显示的写法一致。
+  ///
+  /// 表格里改的值以文本绑定，由服务端按会话的 NLS 格式转成 DATE / TIMESTAMP。默认的
+  /// `NLS_DATE_FORMAT` 是 `DD-MON-RR`，`2026-09-20 00:00:00` 写回去就是 ORA-01861；
+  /// 小数点按地区设置可能是逗号。实验：设成下面这样之后，带不带小数秒、带不带时区的
+  /// 写法都能转回去。
+  ///
+  /// 带时区的那个用 `X`（小数点字符，由下面的 `NLS_NUMERIC_CHARACTERS` 定成 `.`）而不是字面的 `.`：
+  /// `SS.FF TZH:TZM` 解析没有小数秒的值时把「空格加负号」当成了那个点，`00:00:00 -03:30` 读成
+  /// `+03:30`（23ai 上逐个试过；`SSXFF` 带不带小数、正负偏移都对）
+  const SESSION_FORMATS: &str = "ALTER SESSION SET \
+  NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS' \
+  NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF' \
+  NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD HH24:MI:SSXFF TZH:TZM' \
+  NLS_NUMERIC_CHARACTERS = '.,'";
+
+  pub async fn connect(target: &OracleTarget) -> Result<Arc<Connection>, QueryError> {
+    let target = target.clone();
+    let attempt = blocking(move || {
+      ensure_client()?;
+      let connection = Connector::new(&target.username, &target.password, &target.connect_string)
+        .connect()
+        .map_err(|error| query_error(&error, None))?;
+      connection.execute(SESSION_FORMATS, &[]).map_err(|error| query_error(&error, None))?;
+      Ok(Arc::new(connection))
+    });
+    tokio::time::timeout(CONNECT_TIMEOUT, attempt).await.map_err(|_| {
+      QueryError::with_code(
+        CONNECTION_LOST_CODE,
+        format!("{CONNECTION_LOST}: timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+      )
+    })?
+  }
+
+  /// 跑一段阻塞的驱动调用。线程池那一侧 panic 了也要变成一条错误——
+  /// 不然这次调用永远不回来
+  async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, QueryError> + Send + 'static,
+  ) -> Result<T, QueryError> {
+    tokio::task::spawn_blocking(work).await.map_err(|error| {
+      QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {error}"))
+    })?
+  }
+
+  /// 一台服务器的连接：一份连接参数，加几条空闲连接（目录查询用）。
+  pub struct OraclePool {
+    target: OracleTarget,
+    idle: crate::services::pool_registry::IdleConnections<Arc<Connection>>,
+  }
+
+  /// 关掉连接要走一次网络（登出）；对端已经悄悄没了的话，这一步会一直等。
+  /// 放到自己的线程上，不占异步运行时的工作线程
+  fn release_in_background(connections: Vec<Arc<Connection>>) {
+    if !connections.is_empty() {
+      std::thread::spawn(move || drop(connections));
     }
-    let mut cursors = implicit.into_iter();
-    let Some(mut first) = cursors.next() else {
-      return Ok(Some(affected));
+  }
+
+  impl OraclePool {
+    /// `first` 是测试连接时连上的那一条，直接留着用，省一次登录
+    pub fn new(target: OracleTarget, first: Arc<Connection>) -> Arc<Self> {
+      Arc::new(Self {
+        target,
+        idle: crate::services::pool_registry::IdleConnections::new(first, MAX_IDLE),
+      })
+    }
+
+    /// 给一个会话用的连接：用完不放回，理由和 SQL Server 一样——会话上可能开着
+    /// 事务、改过 `ALTER SESSION`
+    pub async fn acquire_for_session(&self) -> Result<OracleConnection, QueryError> {
+      Ok(OracleConnection {
+        connection: Some(connect(&self.target).await?),
+        target: self.target.clone(),
+        autocommit: true,
+        transaction: TransactionState::default(),
+      })
+    }
+
+    /// 目录查询：带 `:1`、`:2` 绑定参数，返回**不带类型标签**的值，和插件 `select`
+    /// 的形状一样
+    pub async fn select(
+      self: &Arc<Self>,
+      sql: &str,
+      params: &[JsonValue],
+    ) -> Result<Vec<QueryRow>, QueryError> {
+      let (idle, stale) = self.idle.take();
+      release_in_background(stale);
+      let Some(connection) = idle else {
+        return self.select_on(connect(&self.target).await?, sql, params).await;
+      };
+      let result = self.select_on(connection, sql, params).await;
+      if keeps_connection(&result) {
+        return result;
+      }
+      // 池里的连接被服务端断掉了（重启、DBA 清会话）：只读，换一条新连接再读一次。
+      // 不然池里有几条，对象树和表数据页就连着报几次「连接已断开」
+      release_in_background(self.idle.drain());
+      self.select_on(connect(&self.target).await?, sql, params).await
+    }
+
+    async fn select_on(
+      self: &Arc<Self>,
+      connection: Arc<Connection>,
+      sql: &str,
+      params: &[JsonValue],
+    ) -> Result<Vec<QueryRow>, QueryError> {
+      let sql = sql.to_string();
+      let params = params.to_vec();
+      let worker = Arc::clone(&connection);
+      let result = blocking(move || select_rows(&worker, &sql, &params)).await;
+      if keeps_connection(&result) {
+        self.idle.put(connection);
+      }
+      result
+    }
+  }
+
+  impl OraclePool {
+    /// 一批写入，一个事务，要么全成要么全不成。约定与 `write_batch::execute_write_batch`
+    /// 相同：每条语句可以要求恰好影响几行，对不上整批回滚；出错的标在那一条上，
+    /// 提交失败标在 `statements.len()`。
+    pub async fn write_batch(
+      self: &Arc<Self>,
+      statements: &[WriteStatement],
+    ) -> Result<Vec<u64>, WriteBatchError> {
+      if statements.is_empty() {
+        return Ok(Vec::new());
+      }
+      let (idle, stale) = self.idle.take();
+      release_in_background(stale);
+      let connection = match idle {
+        Some(connection) => connection,
+        None => connect(&self.target).await.map_err(|error| WriteBatchError::at(0, error))?,
+      };
+      let batch: Vec<(String, Vec<JsonValue>, Option<u64>)> = statements
+        .iter()
+        .map(|statement| {
+          (statement_text(&statement.sql), statement.params.clone(), statement.expect_rows)
+        })
+        .collect();
+      let worker = Arc::clone(&connection);
+      let outcome = blocking(move || Ok(write_in_transaction(&worker, &batch)))
+        .await
+        .map_err(|error| WriteBatchError::at(0, error))?;
+      // 连接要回到池子里给目录查询用：失败时已经回滚过了，上面不会留着事务
+      let reusable = match &outcome {
+        Ok(_) => true,
+        Err((_, error)) => error.code.as_deref() != Some(CONNECTION_LOST_CODE),
+      };
+      if reusable {
+        self.idle.put(connection);
+      } else {
+        // 写不重试（不知道写进去没有），但同一批旧连接一起丢掉，下一次不再撞上
+        release_in_background(self.idle.drain());
+      }
+      outcome.map_err(|(index, error)| WriteBatchError::at(index, error))
+    }
+  }
+
+  fn write_in_transaction(
+    connection: &Connection,
+    batch: &[(String, Vec<JsonValue>, Option<u64>)],
+  ) -> Result<Vec<u64>, (usize, QueryError)> {
+    let mut affected = Vec::with_capacity(batch.len());
+    for (index, (sql, params, expect_rows)) in batch.iter().enumerate() {
+      let step = || -> Result<u64, QueryError> {
+        let binds = bind_values(params)?;
+        let bind_refs: Vec<&dyn oracle::sql_type::ToSql> =
+          binds.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
+        let executed =
+          connection.execute(sql, &bind_refs).map_err(|error| query_error(&error, Some(sql)))?;
+        let rows = executed.row_count().map_err(|error| query_error(&error, None))?;
+        if let Some(expected) = expect_rows {
+          if rows != *expected {
+            return Err(QueryError::with_code(
+              ROW_COUNT_MISMATCH_CODE,
+              format!("{ROW_COUNT_MISMATCH}: {expected} · {rows}"),
+            ));
+          }
+        }
+        Ok(rows)
+      };
+      match step() {
+        Ok(rows) => affected.push(rows),
+        Err(error) => {
+          let _ = connection.rollback();
+          return Err((index, error));
+        }
+      }
+    }
+    connection.commit().map_err(|error| {
+      let _ = connection.rollback();
+      (batch.len(), query_error(&error, None))
+    })?;
+    Ok(affected)
+  }
+
+  fn select_rows(
+    connection: &Connection,
+    sql: &str,
+    params: &[JsonValue],
+  ) -> Result<Vec<QueryRow>, QueryError> {
+    let binds = bind_values(params)?;
+    let bind_refs: Vec<&dyn oracle::sql_type::ToSql> =
+      binds.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
+    let rows = connection.query(sql, &bind_refs).map_err(|error| query_error(&error, Some(sql)))?;
+    let columns: Vec<(String, OracleType)> = rows
+      .column_info()
+      .iter()
+      .map(|info| (info.name().to_string(), info.oracle_type().clone()))
+      .collect();
+    let mut result = Vec::new();
+    for row in rows {
+      let row = row.map_err(|error| query_error(&error, Some(sql)))?;
+      let mut values = Map::new();
+      for ((name, oracle_type), value) in columns.iter().zip(row.sql_values()) {
+        values.insert(name.clone(), untagged(decode(oracle_type, value)?));
+      }
+      result.push(values);
+    }
+    Ok(result)
+  }
+
+  /// 绑定参数：只认标量，理由同 `write_batch` 的 `bind_params!`
+  enum Bind {
+    Null(Option<String>),
+    Text(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+  }
+
+  /// 文本按 VARCHAR2 绑，不用驱动默认的 NVARCHAR2：目录里的名字都是 VARCHAR2，
+  /// NVARCHAR2 的参数在 `COALESCE(:2, SYS_CONTEXT(...))` 里报 ORA-12704（字符集
+  /// 不一致），在 `table_name = :1` 里让服务端把**列**转成 NVARCHAR2——数据字典上
+  /// 的索引就用不上了
+  impl oracle::sql_type::ToSql for Bind {
+    fn oratype(&self, conn: &Connection) -> oracle::Result<OracleType> {
+      match self {
+        Bind::Null(_) => Ok(OracleType::Varchar2(1)),
+        Bind::Text(value) => {
+          Ok(OracleType::Varchar2(u32::try_from(value.len().max(1)).unwrap_or(u32::MAX)))
+        }
+        Bind::Integer(value) => value.oratype(conn),
+        Bind::Float(value) => value.oratype(conn),
+        Bind::Boolean(value) => value.oratype(conn),
+      }
+    }
+
+    fn to_sql(&self, value: &mut SqlValue) -> oracle::Result<()> {
+      match self {
+        Bind::Null(inner) => inner.to_sql(value),
+        Bind::Text(inner) => inner.to_sql(value),
+        Bind::Integer(inner) => inner.to_sql(value),
+        Bind::Float(inner) => inner.to_sql(value),
+        Bind::Boolean(inner) => inner.to_sql(value),
+      }
+    }
+  }
+
+  impl oracle::sql_type::ToSqlNull for Bind {
+    fn oratype_for_null(_conn: &Connection) -> oracle::Result<OracleType> {
+      Ok(OracleType::Varchar2(1))
+    }
+  }
+
+  fn bind_values(params: &[JsonValue]) -> Result<Vec<Bind>, QueryError> {
+    params
+      .iter()
+      .map(|param| match param {
+        JsonValue::Null => Ok(Bind::Null(None)),
+        JsonValue::Bool(value) => Ok(Bind::Boolean(*value)),
+        JsonValue::Number(number) => Ok(match number.as_i64() {
+          Some(integer) => Bind::Integer(integer),
+          None => Bind::Float(number.as_f64().unwrap_or(f64::NAN)),
+        }),
+        JsonValue::String(text) => Ok(Bind::Text(text.clone())),
+        other => Err(QueryError::message(format!(
+          "{}: {other}",
+          crate::services::write_batch::UNSUPPORTED_PARAMETER_TYPE
+        ))),
+      })
+      .collect()
+  }
+
+  /// 插件的解码器返回的是裸值；我们的解码器给精度敏感的类型挂了标签
+  fn untagged(value: JsonValue) -> JsonValue {
+    match value {
+      JsonValue::Object(mut map) if map.contains_key("type") => {
+        map.remove("value").unwrap_or(JsonValue::Null)
+      }
+      other => other,
+    }
+  }
+
+  /// 一个会话的连接。
+  ///
+  /// 和 SQL Server 一样，执行期间把连接取出来：执行的 future 被丢掉时它就回不来了，
+  /// 下一次用的时候重连。
+  ///
+  /// 提交的规矩：自动提交开着、**而且这条语句之前没有开着的事务**，非查询语句成功之后
+  /// 就提交。后半句要紧：用户按了「开始事务」（`SET TRANSACTION`）之后，自动提交的开关
+  /// 还是开着的，这时再替他提交，就把他的事务拆成了一条一条。
+  pub struct OracleConnection {
+    connection: Option<Arc<Connection>>,
+    target: OracleTarget,
+    autocommit: bool,
+    /// 上一条语句之后服务端报的事务状态
+    transaction: TransactionState,
+  }
+
+  /// future 被丢掉时（超时、取消）打断服务端那条语句。
+  ///
+  /// 阻塞线程还在等驱动返回，拿不回来；但它手里的是同一条连接，`break_execution`
+  /// 可以从别的线程调。
+  struct BreakOnDrop {
+    connection: Arc<Connection>,
+    finished: bool,
+  }
+
+  impl Drop for BreakOnDrop {
+    fn drop(&mut self) {
+      if !self.finished {
+        let _ = self.connection.break_execution();
+      }
+    }
+  }
+
+  /// 阻塞那一侧送过来的东西
+  enum Fetched {
+    /// 第一个之后还有几个结果集没给出来；在列之前送，到了行数上限丢掉接收端也不会漏
+    Omitted(usize),
+    Columns(Vec<QueryColumnMetadata>, Vec<String>),
+    Row(QueryRow),
+  }
+
+  impl OracleConnection {
+    /// 这条连接在 `limit` 之内答不答话。用途见 `SessionConnection::responds_within`。
+    ///
+    /// 超时靠驱动自己的 call timeout：阻塞线程上的 ping 被外面的 tokio 超时丢下之后
+    /// 还会一直卡着；让驱动在 `limit` 到了自己放弃，那条线程才回得来
+    pub async fn ping(&mut self, limit: std::time::Duration) -> bool {
+      let Some(connection) = self.connection.clone() else {
+        return true;
+      };
+      let probe = blocking(move || {
+        connection.set_call_timeout(Some(limit)).map_err(|error| query_error(&error, None))?;
+        let answered = connection.ping().is_ok();
+        // 连接还活着才需要把超时改回去；死了的连接会被丢掉
+        if answered {
+          let _ = connection.set_call_timeout(None);
+        }
+        Ok(answered)
+      });
+      let answered = matches!(
+        tokio::time::timeout(limit + std::time::Duration::from_secs(1), probe).await,
+        Ok(Ok(true))
+      );
+      if !answered {
+        release_in_background(self.connection.take().into_iter().collect());
+      }
+      answered
+    }
+
+    async fn take_connection(&mut self) -> Result<Arc<Connection>, QueryError> {
+      match self.connection.take() {
+        Some(connection) => Ok(connection),
+        None => connect(&self.target).await,
+      }
+    }
+
+    pub async fn execute_streaming(
+      &mut self,
+      sql: &str,
+      options: StreamOptions,
+      sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
+    ) -> Result<QueryExecutionSummary, QueryError> {
+      self.execute_streaming_with_params(sql, &[], options, sink).await
+    }
+
+    /// 带编辑器里的参数（`:1`…），按位置绑
+    pub async fn execute_streaming_with_params(
+      &mut self,
+      sql: &str,
+      params: &[JsonValue],
+      options: StreamOptions,
+      sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
+    ) -> Result<QueryExecutionSummary, QueryError> {
+      if options.explain_plan != crate::services::ExplainPlan::Off {
+        return self.explain(sql, options, sink).await;
+      }
+      // 事务控制语句本身不按「自动提交」再提交一次：`SET TRANSACTION` 之后提交等于
+      // 刚开的事务立刻结束，`SAVEPOINT` 之后提交等于保存点刚设就没了
+      let commit_after =
+        self.autocommit && !self.transaction().in_transaction() && !controls_transaction(sql);
+      let connection = self.take_connection().await?;
+      let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
+      let statement = statement_text(sql);
+      let binds = bind_values(params)?;
+      let refuse_non_query = options.non_query == crate::services::NonQueryHandling::Refuse;
+
+      // 通道留几批的余量：阻塞那一侧可以先读着，异步这一侧到了上限就丢掉接收端，
+      // 那一侧下一次送不出去就停
+      let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<Fetched>(options.batch_size.max(1) * 2);
+      let worker = Arc::clone(&connection);
+      let task = tokio::task::spawn_blocking(move || {
+        let outcome =
+          run_statement(&worker, &statement, &binds, refuse_non_query, commit_after, &sender);
+        // 成功失败都要问：失败的那一条也可能结束了事务（死锁回滚）
+        (outcome, open_transaction(&worker))
+      });
+
+      let mut header: Option<(Vec<QueryColumnMetadata>, Vec<String>)> = None;
+      let mut rows = Vec::with_capacity(options.batch_size);
+      let mut row_count = 0;
+      let mut batch_count = 0;
+      let mut bytes_read: usize = 0;
+      let mut truncation_reason = None;
+      let mut sink_error = None;
+      let mut omitted_result_sets = 0;
+
+      while let Some(fetched) = receiver.recv().await {
+        match fetched {
+          Fetched::Omitted(count) => omitted_result_sets = count,
+          Fetched::Columns(metadata, names) => header = Some((metadata, names)),
+          Fetched::Row(values) => {
+            if row_count >= options.row_limit {
+              truncation_reason = Some(QueryTruncationReason::RowLimit);
+              break;
+            }
+            match admit_row_bytes(&values, options.byte_limit, &mut bytes_read) {
+              Ok(true) => {}
+              Ok(false) => {
+                truncation_reason = Some(QueryTruncationReason::ByteLimit);
+                break;
+              }
+              Err(error) => {
+                sink_error = Some(error);
+                break;
+              }
+            }
+            rows.push(values);
+            row_count += 1;
+            if let Err(error) =
+              flush_full_batch(&mut rows, options.batch_size, &mut batch_count, row_count, sink)
+            {
+              sink_error = Some(error);
+              break;
+            }
+          }
+        }
+      }
+      // 到了上限就不再要：接收端一丢，阻塞那一侧下一次送不出去就停下，游标随
+      // 语句一起关掉。和 TDS 不同，Oracle 不要求把剩下的行读完
+      drop(receiver);
+      let (outcome, open) = task.await.map_err(|error| {
+        QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {error}"))
+      })?;
+      guard.finished = true;
+
+      self.settle(connection, keeps_connection(&outcome), open);
+      if let Some(error) = sink_error {
+        return Err(error);
+      }
+      if let Some(affected) = outcome? {
+        return Ok(QueryExecutionSummary::Affected { rows_affected: affected });
+      }
+      let Some((column_metadata, columns)) = header else {
+        return Ok(QueryExecutionSummary::Affected { rows_affected: 0 });
+      };
+      flush_remaining_batch(&mut rows, &mut batch_count, row_count, sink)?;
+      Ok(QueryExecutionSummary::Rows {
+        columns,
+        column_metadata,
+        row_count,
+        batch_count,
+        truncated: truncation_reason.is_some(),
+        truncation_reason,
+        row_limit: options.row_limit,
+        byte_limit: options.byte_limit,
+        bytes_read,
+        omitted_result_sets,
+        extra_result_sets: Vec::new(),
+      })
+    }
+
+    /// 取执行计划：结果是一行一格，格子里是 [`read_plan`] 拼的 JSON，由
+    /// `explain::parse_plan` 解析。语句本身不执行（`EXPLAIN PLAN` 只解析、优化）
+    async fn explain(
+      &mut self,
+      sql: &str,
+      options: StreamOptions,
+      sink: &mut (dyn FnMut(QueryResultBatch) -> Result<(), QueryError> + Send),
+    ) -> Result<QueryExecutionSummary, QueryError> {
+      let connection = self.take_connection().await?;
+      let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
+      let statement = statement_text(sql);
+      let worker = Arc::clone(&connection);
+      let (outcome, open) = blocking(move || {
+        let outcome = explain_plan(&worker, &statement);
+        Ok((outcome, open_transaction(&worker)))
+      })
+      .await?;
+      guard.finished = true;
+      self.settle(connection, keeps_connection(&outcome), open);
+      let plan = outcome?;
+      let mut rows = vec![plan];
+      let mut batch_count = 0;
+      flush_remaining_batch(&mut rows, &mut batch_count, 1, sink)?;
+      Ok(QueryExecutionSummary::Rows {
+        columns: vec![PLAN_COLUMN.to_string()],
+        column_metadata: vec![QueryColumnMetadata {
+          name: PLAN_COLUMN.to_string(),
+          ordinal: 0,
+          database_type: "JSON".to_string(),
+          logical_type: "json".to_string(),
+          nullable: Some(false),
+        }],
+        row_count: 1,
+        batch_count,
+        truncated: false,
+        truncation_reason: None,
+        row_limit: options.row_limit,
+        byte_limit: options.byte_limit,
+        bytes_read: 0,
+        omitted_result_sets: 0,
+        extra_result_sets: Vec::new(),
+      })
+    }
+
+    /// 一次调用之后：连接还能用就收回来，事务状态照服务端刚报的记
+    fn settle(&mut self, connection: Arc<Connection>, keeps: bool, open: Option<bool>) {
+      let started_at = std::mem::take(&mut self.transaction).started_at;
+      if !keeps {
+        return;
+      }
+      self.connection = Some(connection);
+      // 问不出来（这一句也失败了）就当作没有事务：连接多半已经不行了
+      if open == Some(true) {
+        self.transaction = TransactionState {
+          status: TransactionStatus::Active,
+          // 还是同一个事务就沿用开始时间，否则状态栏上的计时每条语句都归零
+          started_at: started_at.or_else(|| Some(chrono::Utc::now().to_rfc3339())),
+        };
+      }
+    }
+
+    /// 下一条语句按不按自动提交走
+    pub fn set_autocommit(&mut self, autocommit: bool) {
+      self.autocommit = autocommit;
+    }
+
+    /// 服务端上一次报的事务状态。连接被放弃过（超时、取消）就是空闲：那条连接
+    /// 已经丢了，服务端会回滚它上面的事务
+    pub fn transaction(&self) -> TransactionState {
+      match self.connection {
+        Some(_) => self.transaction.clone(),
+        None => TransactionState::default(),
+      }
+    }
+
+    /// 同一条语句按多行参数执行（数组 DML，CSV 导入走这里），返回影响行数。
+    ///
+    /// `params` 按语句的绑定个数一行接一行地排——导入把一批的值首尾相接放在一起。
+    /// 不拼多行的 `INSERT ALL`：实验里 500 行 × 5 列的 `INSERT ALL` 光解析就 1.7 秒，
+    /// 数组 DML 同样的量 0.2 秒、5000 行 0.8 秒。值一律按文本绑，由服务端照会话的
+    /// NLS 格式转成列的类型，和另外几家一样。
+    pub async fn execute_with_params(
+      &mut self,
+      sql: &str,
+      params: &[Option<String>],
+    ) -> Result<u64, QueryError> {
+      let commit_after = self.autocommit && !self.transaction().in_transaction();
+      let connection = self.take_connection().await?;
+      let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
+      let statement = statement_text(sql);
+      let params = params.to_vec();
+      let worker = Arc::clone(&connection);
+      let (outcome, open) = blocking(move || {
+        let outcome = execute_many(&worker, &statement, &params, commit_after);
+        Ok((outcome, open_transaction(&worker)))
+      })
+      .await?;
+      guard.finished = true;
+      self.settle(connection, keeps_connection(&outcome), open);
+      outcome
+    }
+
+    /// 见 [`describe`]
+    pub async fn describe_columns(
+      &mut self,
+      sql: &str,
+    ) -> Result<Vec<QueryColumnMetadata>, QueryError> {
+      let connection = self.take_connection().await?;
+      let mut guard = BreakOnDrop { connection: Arc::clone(&connection), finished: false };
+      let statement = statement_text(sql);
+      let worker = Arc::clone(&connection);
+      let outcome = blocking(move || describe(&worker, &statement)).await;
+      guard.finished = true;
+      if keeps_connection(&outcome) {
+        self.connection = Some(connection);
+      }
+      outcome
+    }
+
+    /// 一次没有结果集可言的执行（事务控制这类）
+    pub async fn execute_batch(&mut self, sql: &str) -> Result<u64, QueryError> {
+      let mut rows = Vec::new();
+      let summary = self
+        .execute_streaming(sql, StreamOptions::limited(1, 1 << 20, 1), &mut |batch| {
+          rows.extend(batch.rows);
+          Ok(())
+        })
+        .await?;
+      Ok(match summary {
+        QueryExecutionSummary::Affected { rows_affected } => rows_affected,
+        QueryExecutionSummary::Rows { .. } => 0,
+      })
+    }
+  }
+
+  /// 这条连接上有没有开着的事务。问不出来是 `None`
+  fn open_transaction(connection: &Connection) -> Option<bool> {
+    connection
+      .query_row_as::<Option<String>>("SELECT DBMS_TRANSACTION.LOCAL_TRANSACTION_ID FROM dual", &[])
+      .ok()
+      .map(|id| id.is_some())
+  }
+
+  const PLAN_COLUMN: &str = "plan";
+  const EXPLAIN_PREFIX: &str = "EXPLAIN PLAN SET STATEMENT_ID = 'DATAOMNI' FOR ";
+  /// 计划的每一步。别名带引号，理由同目录查询：不带引号的别名被折成大写
+  const PLAN_STEPS: &str = r#"SELECT id AS "id", parent_id AS "parent_id",
+  operation AS "operation", options AS "options",
+  object_owner AS "object_owner", object_name AS "object_name", object_type AS "object_type",
+  cardinality AS "cardinality", bytes AS "bytes", cost AS "cost",
+  cpu_cost AS "cpu_cost", io_cost AS "io_cost", time AS "time",
+  access_predicates AS "access_predicates", filter_predicates AS "filter_predicates",
+  projection AS "projection"
+FROM plan_table WHERE statement_id = 'DATAOMNI' ORDER BY id"#;
+  /// 「文本」那一页：`DBMS_XPLAN` 的原文，Oracle 用户认得的那张表加谓词与备注
+  const PLAN_TEXT: &str = r#"SELECT plan_table_output AS "line"
+FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', 'DATAOMNI', 'TYPICAL'))"#;
+
+  /// `EXPLAIN PLAN` 写进会话的 `PLAN_TABLE`，读出来之后撤掉。
+  ///
+  /// 实验（Oracle Free 23ai）：写 `PLAN_TABLE` 本身就开了一个事务。所以之前没有事务
+  /// 就整个回滚；之前有（用户开着的）就只退回到这里设的保存点，用户的改动原样留着
+  /// ——整个回滚会把它们一起撤掉，而照原样留着则让状态栏凭空多出一个事务。问不出
+  /// 之前有没有时按「有」处理：保存点在两种情况下都不会撤掉不该撤的东西。
+  fn explain_plan(connection: &Connection, statement: &str) -> Result<QueryRow, QueryError> {
+    let open_before = open_transaction(connection) != Some(false);
+    if open_before {
+      connection
+        .execute("SAVEPOINT dataomni_explain", &[])
+        .map_err(|error| query_error(&error, None))?;
+    }
+    let plan = read_plan(connection, statement);
+    let undo = if open_before {
+      connection.execute("ROLLBACK TO SAVEPOINT dataomni_explain", &[]).map(|_| ())
+    } else {
+      connection.rollback()
     };
-    if sender.blocking_send(Fetched::Omitted(cursors.len())).is_err() {
+    let plan = plan?;
+    undo.map_err(|error| query_error(&error, None))?;
+    Ok(plan)
+  }
+
+  fn read_plan(connection: &Connection, statement: &str) -> Result<QueryRow, QueryError> {
+    let wrapped = format!("{EXPLAIN_PREFIX}{statement}");
+    connection
+      .execute(&wrapped, &[])
+      .map_err(|error| without_prefix(query_error(&error, Some(&wrapped)), EXPLAIN_PREFIX))?;
+    let steps = select_rows(connection, PLAN_STEPS, &[])?;
+    let text = select_rows(connection, PLAN_TEXT, &[])?
+      .iter()
+      .map(|row| row.get("line").and_then(JsonValue::as_str).unwrap_or_default().to_string())
+      .collect::<Vec<_>>()
+      .join("\n");
+    let payload = serde_json::json!({ "steps": steps, "text": text });
+    let mut row = Map::new();
+    row.insert(PLAN_COLUMN.to_string(), JsonValue::String(payload.to_string()));
+    Ok(row)
+  }
+
+  /// 出错位置是相对包了一层的那条语句算的，错误面板标的是用户写的那条
+  fn without_prefix(mut error: QueryError, prefix: &str) -> QueryError {
+    let shift = prefix.chars().count() as u32;
+    if let Some(details) = error.details.as_mut() {
+      details.position = details.position.and_then(|position| position.checked_sub(shift));
+      details.position = details.position.filter(|position| *position > 0);
+    }
+    error
+  }
+
+  /// 执行一条语句（阻塞那一侧）。查询的行一行行送进通道；非查询按规矩提交
+  fn run_statement(
+    connection: &Connection,
+    statement: &str,
+    binds: &[Bind],
+    refuse_non_query: bool,
+    commit_after: bool,
+    sender: &tokio::sync::mpsc::Sender<Fetched>,
+  ) -> Result<Option<u64>, QueryError> {
+    let bind_refs: Vec<&dyn oracle::sql_type::ToSql> =
+      binds.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
+    let mut prepared = connection
+      .statement(statement)
+      .fetch_array_size(FETCH_ARRAY_SIZE)
+      .build()
+      .map_err(|error| query_error(&error, Some(statement)))?;
+    if !prepared.is_query() {
+      if refuse_non_query {
+        return Err(QueryError::message(crate::services::query_executor::NON_QUERY_MESSAGE));
+      }
+      prepared.execute(&bind_refs).map_err(|error| query_error(&error, Some(statement)))?;
+      // 块用 `DBMS_SQL.RETURN_RESULT` 交回的结果集：先全部取出来好报个数，再读第一个
+      let mut implicit = Vec::new();
+      if prepared.is_plsql() {
+        while let Some(cursor) =
+          prepared.implicit_result().map_err(|error| query_error(&error, Some(statement)))?
+        {
+          implicit.push(cursor);
+        }
+      }
+      // PL/SQL 块的「影响行数」驱动恒报 1，那不是任何一张表上的行数
+      let affected = if prepared.is_plsql() {
+        0
+      } else {
+        prepared.row_count().map_err(|error| query_error(&error, None))?
+      };
+      if commit_after {
+        connection.commit().map_err(|error| query_error(&error, None))?;
+      }
+      let mut cursors = implicit.into_iter();
+      let Some(mut first) = cursors.next() else {
+        return Ok(Some(affected));
+      };
+      if sender.blocking_send(Fetched::Omitted(cursors.len())).is_err() {
+        return Ok(None);
+      }
+      let rows = first.query().map_err(|error| query_error(&error, Some(statement)))?;
+      return send_rows(rows, statement, sender);
+    }
+    let rows = prepared.query(&bind_refs).map_err(|error| query_error(&error, Some(statement)))?;
+    send_rows(rows, statement, sender)
+  }
+
+  /// 一个结果集的列与行一行行送进通道；接收端丢掉了（到了上限）就停
+  fn send_rows(
+    rows: oracle::ResultSet<oracle::Row>,
+    statement: &str,
+    sender: &tokio::sync::mpsc::Sender<Fetched>,
+  ) -> Result<Option<u64>, QueryError> {
+    let columns: Vec<(String, OracleType, bool)> = rows
+      .column_info()
+      .iter()
+      .map(|info| (info.name().to_string(), info.oracle_type().clone(), info.nullable()))
+      .collect();
+    let (metadata, names) = column_header(&columns);
+    if sender.blocking_send(Fetched::Columns(metadata, names.clone())).is_err() {
       return Ok(None);
     }
-    let rows = first.query().map_err(|error| query_error(&error, Some(statement)))?;
-    return send_rows(rows, statement, sender);
-  }
-  let rows = prepared.query(&bind_refs).map_err(|error| query_error(&error, Some(statement)))?;
-  send_rows(rows, statement, sender)
-}
-
-/// 一个结果集的列与行一行行送进通道；接收端丢掉了（到了上限）就停
-fn send_rows(
-  rows: oracle::ResultSet<oracle::Row>,
-  statement: &str,
-  sender: &tokio::sync::mpsc::Sender<Fetched>,
-) -> Result<Option<u64>, QueryError> {
-  let columns: Vec<(String, OracleType, bool)> = rows
-    .column_info()
-    .iter()
-    .map(|info| (info.name().to_string(), info.oracle_type().clone(), info.nullable()))
-    .collect();
-  let (metadata, names) = column_header(&columns);
-  if sender.blocking_send(Fetched::Columns(metadata, names.clone())).is_err() {
-    return Ok(None);
-  }
-  for row in rows {
-    let row = row.map_err(|error| query_error(&error, Some(statement)))?;
-    let mut values = Map::new();
-    for ((name, (_, oracle_type, _)), value) in names.iter().zip(&columns).zip(row.sql_values()) {
-      values.insert(name.clone(), decode(oracle_type, value)?);
+    for row in rows {
+      let row = row.map_err(|error| query_error(&error, Some(statement)))?;
+      let mut values = Map::new();
+      for ((name, (_, oracle_type, _)), value) in names.iter().zip(&columns).zip(row.sql_values()) {
+        values.insert(name.clone(), decode(oracle_type, value)?);
+      }
+      if sender.blocking_send(Fetched::Row(values)).is_err() {
+        break;
+      }
     }
-    if sender.blocking_send(Fetched::Row(values)).is_err() {
-      break;
+    Ok(None)
+  }
+
+  fn execute_many(
+    connection: &Connection,
+    statement: &str,
+    params: &[Option<String>],
+    commit_after: bool,
+  ) -> Result<u64, QueryError> {
+    // 同一条语句第二次准备走语句缓存，问一次绑定个数不多花什么
+    let width = connection
+      .statement(statement)
+      .build()
+      .map_err(|error| query_error(&error, Some(statement)))?
+      .bind_count();
+    if width == 0 || !params.len().is_multiple_of(width) {
+      return Err(QueryError::message(format!(
+        "{} parameters do not fill rows of the statement's {width} binds",
+        params.len()
+      )));
+    }
+    let rows = params.len() / width;
+    // 数组 DML 出错时驱动报的「位置」是第几行，不是语句里的字符位置，所以不带语句
+    let failed = |error: oracle::Error| query_error(&error, None);
+    let mut batch = connection.batch(statement, rows).build().map_err(failed)?;
+    for row in params.chunks_exact(width) {
+      let binds: Vec<&dyn oracle::sql_type::ToSql> =
+        row.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
+      batch.append_row(&binds).map_err(failed)?;
+    }
+    batch.execute().map_err(failed)?;
+    if commit_after {
+      connection.commit().map_err(failed)?;
+    }
+    Ok(rows as u64)
+  }
+
+  /// 结果集的列：同名的编上号，元数据与行里的键用的是同一份名字
+  fn column_header(
+    columns: &[(String, OracleType, bool)],
+  ) -> (Vec<QueryColumnMetadata>, Vec<String>) {
+    let names = number_duplicate_columns(columns.iter().map(|(name, _, _)| name.as_str()));
+    let metadata = columns
+      .iter()
+      .zip(&names)
+      .enumerate()
+      .map(|(ordinal, ((_, oracle_type, nullable), name))| QueryColumnMetadata {
+        name: name.clone(),
+        ordinal,
+        database_type: oracle_type.to_string(),
+        logical_type: logical_type(oracle_type).to_string(),
+        nullable: Some(*nullable),
+      })
+      .collect();
+    (metadata, names)
+  }
+
+  /// 只问「这条语句返回哪些列」，一行都不取（导出要先写表头）。
+  ///
+  /// 驱动没有「只描述」的模式，列信息要执行之后才有。实验（Oracle Free 23ai，一条
+  /// 两百万行随机排序的查询）：预取设成 0 时执行 0.2 秒就返回了列，预取 2 行要 9.6 秒
+  /// ——排序是在取第一行时才做的。所以执行但不取。不是查询的语句只准备、不执行：
+  /// 准备一条 `CREATE TABLE` 不会建表（同一次实验里核对过）。
+  fn describe(connection: &Connection, sql: &str) -> Result<Vec<QueryColumnMetadata>, QueryError> {
+    let mut prepared = connection
+      .statement(sql)
+      .prefetch_rows(0)
+      .build()
+      .map_err(|error| query_error(&error, Some(sql)))?;
+    if !prepared.is_query() {
+      return Ok(Vec::new());
+    }
+    let rows = prepared.query(&[]).map_err(|error| query_error(&error, Some(sql)))?;
+    let columns: Vec<(String, OracleType, bool)> = rows
+      .column_info()
+      .iter()
+      .map(|info| (info.name().to_string(), info.oracle_type().clone(), info.nullable()))
+      .collect();
+    Ok(column_header(&columns).0)
+  }
+
+  /// 发给服务端的那段文本。
+  ///
+  /// 编辑器按分号切语句，每条后面补一个分号；Oracle 的 SQL 语句**不收**结尾的
+  /// 分号（ORA-00933 / ORA-00911），而 PL/SQL 块正相反，`END;` 的分号是块的一部分。
+  fn statement_text(sql: &str) -> String {
+    let trimmed = sql.trim();
+    if is_plsql(trimmed) {
+      return trimmed.to_string();
+    }
+    trimmed.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).to_string()
+  }
+
+  fn is_plsql(sql: &str) -> bool {
+    let (first, second) = crate::services::transaction_state::leading_keywords(sql);
+    match first.as_str() {
+      "BEGIN" | "DECLARE" => true,
+      "CREATE" => {
+        let words: Vec<String> =
+          sql.split_whitespace().take(6).map(|word| word.to_ascii_uppercase()).collect();
+        let kind_at = if second == "OR" { 3 } else { 1 };
+        words.get(kind_at).is_some_and(|kind| {
+          matches!(kind.as_str(), "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE")
+        }) || words.iter().any(|word| word == "EDITIONABLE" || word == "NONEDITIONABLE")
+      }
+      _ => false,
     }
   }
-  Ok(None)
-}
 
-fn execute_many(
-  connection: &Connection,
-  statement: &str,
-  params: &[Option<String>],
-  commit_after: bool,
-) -> Result<u64, QueryError> {
-  // 同一条语句第二次准备走语句缓存，问一次绑定个数不多花什么
-  let width = connection
-    .statement(statement)
-    .build()
-    .map_err(|error| query_error(&error, Some(statement)))?
-    .bind_count();
-  if width == 0 || !params.len().is_multiple_of(width) {
-    return Err(QueryError::message(format!(
-      "{} parameters do not fill rows of the statement's {width} binds",
-      params.len()
-    )));
-  }
-  let rows = params.len() / width;
-  // 数组 DML 出错时驱动报的「位置」是第几行，不是语句里的字符位置，所以不带语句
-  let failed = |error: oracle::Error| query_error(&error, None);
-  let mut batch = connection.batch(statement, rows).build().map_err(failed)?;
-  for row in params.chunks_exact(width) {
-    let binds: Vec<&dyn oracle::sql_type::ToSql> =
-      row.iter().map(|value| value as &dyn oracle::sql_type::ToSql).collect();
-    batch.append_row(&binds).map_err(failed)?;
-  }
-  batch.execute().map_err(failed)?;
-  if commit_after {
-    connection.commit().map_err(failed)?;
-  }
-  Ok(rows as u64)
-}
-
-/// 结果集的列：同名的编上号，元数据与行里的键用的是同一份名字
-fn column_header(
-  columns: &[(String, OracleType, bool)],
-) -> (Vec<QueryColumnMetadata>, Vec<String>) {
-  let names = number_duplicate_columns(columns.iter().map(|(name, _, _)| name.as_str()));
-  let metadata = columns
-    .iter()
-    .zip(&names)
-    .enumerate()
-    .map(|(ordinal, ((_, oracle_type, nullable), name))| QueryColumnMetadata {
-      name: name.clone(),
-      ordinal,
-      database_type: oracle_type.to_string(),
-      logical_type: logical_type(oracle_type).to_string(),
-      nullable: Some(*nullable),
-    })
-    .collect();
-  (metadata, names)
-}
-
-/// 只问「这条语句返回哪些列」，一行都不取（导出要先写表头）。
-///
-/// 驱动没有「只描述」的模式，列信息要执行之后才有。实验（Oracle Free 23ai，一条
-/// 两百万行随机排序的查询）：预取设成 0 时执行 0.2 秒就返回了列，预取 2 行要 9.6 秒
-/// ——排序是在取第一行时才做的。所以执行但不取。不是查询的语句只准备、不执行：
-/// 准备一条 `CREATE TABLE` 不会建表（同一次实验里核对过）。
-fn describe(connection: &Connection, sql: &str) -> Result<Vec<QueryColumnMetadata>, QueryError> {
-  let mut prepared = connection
-    .statement(sql)
-    .prefetch_rows(0)
-    .build()
-    .map_err(|error| query_error(&error, Some(sql)))?;
-  if !prepared.is_query() {
-    return Ok(Vec::new());
-  }
-  let rows = prepared.query(&[]).map_err(|error| query_error(&error, Some(sql)))?;
-  let columns: Vec<(String, OracleType, bool)> = rows
-    .column_info()
-    .iter()
-    .map(|info| (info.name().to_string(), info.oracle_type().clone(), info.nullable()))
-    .collect();
-  Ok(column_header(&columns).0)
-}
-
-/// 发给服务端的那段文本。
-///
-/// 编辑器按分号切语句，每条后面补一个分号；Oracle 的 SQL 语句**不收**结尾的
-/// 分号（ORA-00933 / ORA-00911），而 PL/SQL 块正相反，`END;` 的分号是块的一部分。
-fn statement_text(sql: &str) -> String {
-  let trimmed = sql.trim();
-  if is_plsql(trimmed) {
-    return trimmed.to_string();
-  }
-  trimmed.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).to_string()
-}
-
-fn is_plsql(sql: &str) -> bool {
-  let (first, second) = crate::services::transaction_state::leading_keywords(sql);
-  match first.as_str() {
-    "BEGIN" | "DECLARE" => true,
-    "CREATE" => {
-      let words: Vec<String> =
-        sql.split_whitespace().take(6).map(|word| word.to_ascii_uppercase()).collect();
-      let kind_at = if second == "OR" { 3 } else { 1 };
-      words.get(kind_at).is_some_and(|kind| {
-        matches!(kind.as_str(), "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE")
-      }) || words.iter().any(|word| word == "EDITIONABLE" || word == "NONEDITIONABLE")
+  fn logical_type(oracle_type: &OracleType) -> &'static str {
+    match oracle_type {
+      OracleType::Number(_, 0) | OracleType::Int64 | OracleType::UInt64 => "integer",
+      OracleType::Number(_, _)
+      | OracleType::Float(_)
+      | OracleType::BinaryFloat
+      | OracleType::BinaryDouble => "decimal",
+      OracleType::Date
+      | OracleType::Timestamp(_)
+      | OracleType::TimestampTZ(_)
+      | OracleType::TimestampLTZ(_) => "datetime",
+      OracleType::Raw(_) | OracleType::LongRaw | OracleType::BLOB | OracleType::BFILE => "binary",
+      OracleType::Boolean => "boolean",
+      OracleType::Json => "json",
+      OracleType::Varchar2(_)
+      | OracleType::NVarchar2(_)
+      | OracleType::Char(_)
+      | OracleType::NChar(_)
+      | OracleType::Long
+      | OracleType::CLOB
+      | OracleType::NCLOB
+      | OracleType::Rowid
+      | OracleType::Xml
+      | OracleType::IntervalDS(_, _)
+      | OracleType::IntervalYM(_) => "text",
+      _ => "unknown",
     }
-    _ => false,
   }
-}
 
-fn logical_type(oracle_type: &OracleType) -> &'static str {
-  match oracle_type {
-    OracleType::Number(_, 0) | OracleType::Int64 | OracleType::UInt64 => "integer",
-    OracleType::Number(_, _)
-    | OracleType::Float(_)
-    | OracleType::BinaryFloat
-    | OracleType::BinaryDouble => "decimal",
-    OracleType::Date
-    | OracleType::Timestamp(_)
-    | OracleType::TimestampTZ(_)
-    | OracleType::TimestampLTZ(_) => "datetime",
-    OracleType::Raw(_) | OracleType::LongRaw | OracleType::BLOB | OracleType::BFILE => "binary",
-    OracleType::Boolean => "boolean",
-    OracleType::Json => "json",
-    OracleType::Varchar2(_)
-    | OracleType::NVarchar2(_)
-    | OracleType::Char(_)
-    | OracleType::NChar(_)
-    | OracleType::Long
-    | OracleType::CLOB
-    | OracleType::NCLOB
-    | OracleType::Rowid
-    | OracleType::Xml
-    | OracleType::IntervalDS(_, _)
-    | OracleType::IntervalYM(_) => "text",
-    _ => "unknown",
-  }
-}
+  /// JavaScript 数能精确表示的最大整数
+  const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 
-/// JavaScript 数能精确表示的最大整数
-const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
-
-/// 一个单元格。约定和另外几家相同：超出安全整数的、小数、时间与二进制带类型
-/// 标签，以文本传；其余是裸值。
-fn decode(oracle_type: &OracleType, value: &SqlValue) -> Result<JsonValue, QueryError> {
-  if value.is_null().map_err(|error| query_error(&error, None))? {
-    return Ok(JsonValue::Null);
-  }
-  let text = || value.get::<String>().map_err(|error| query_error(&error, None));
-  Ok(match oracle_type {
-    OracleType::Number(_, scale) if *scale > 0 => {
-      tagged_value("decimal", with_scale(&text()?, usize::from(scale.unsigned_abs())))
+  /// 一个单元格。约定和另外几家相同：超出安全整数的、小数、时间与二进制带类型
+  /// 标签，以文本传；其余是裸值。
+  fn decode(oracle_type: &OracleType, value: &SqlValue) -> Result<JsonValue, QueryError> {
+    if value.is_null().map_err(|error| query_error(&error, None))? {
+      return Ok(JsonValue::Null);
     }
-    OracleType::Number(_, 0) | OracleType::Int64 | OracleType::UInt64 => {
-      let digits = text()?;
-      match digits.parse::<i64>() {
-        Ok(integer) if integer.unsigned_abs() <= MAX_SAFE_INTEGER.unsigned_abs() => {
-          JsonValue::from(integer)
+    let text = || value.get::<String>().map_err(|error| query_error(&error, None));
+    Ok(match oracle_type {
+      OracleType::Number(_, scale) if *scale > 0 => {
+        tagged_value("decimal", with_scale(&text()?, usize::from(scale.unsigned_abs())))
+      }
+      OracleType::Number(_, 0) | OracleType::Int64 | OracleType::UInt64 => {
+        let digits = text()?;
+        match digits.parse::<i64>() {
+          Ok(integer) if integer.unsigned_abs() <= MAX_SAFE_INTEGER.unsigned_abs() => {
+            JsonValue::from(integer)
+          }
+          _ => tagged_value("bigint", digits),
         }
-        _ => tagged_value("bigint", digits),
       }
-    }
-    // 不带精度的 NUMBER、FLOAT：服务端给什么位数就是什么位数
-    OracleType::Number(_, _) | OracleType::Float(_) => {
-      tagged_value("decimal", leading_zero(&text()?))
-    }
-    OracleType::BinaryFloat | OracleType::BinaryDouble => {
-      // 单精度按它自己的最短写法放宽，不然 0.1 成了 0.10000000149011612
-      let number = if *oracle_type == OracleType::BinaryFloat {
-        value.get::<f32>().map(widen_f32)
-      } else {
-        value.get::<f64>()
+      // 不带精度的 NUMBER、FLOAT：服务端给什么位数就是什么位数
+      OracleType::Number(_, _) | OracleType::Float(_) => {
+        tagged_value("decimal", leading_zero(&text()?))
       }
-      .map_err(|error| query_error(&error, None))?;
-      // JSON 里没有无穷与 NaN；照 SQL*Plus 的拼法，`TO_BINARY_DOUBLE` 也认
-      match serde_json::Number::from_f64(number) {
-        Some(number) => JsonValue::Number(number),
-        None if number.is_nan() => JsonValue::from("Nan"),
-        None if number > 0.0 => JsonValue::from("Inf"),
-        None => JsonValue::from("-Inf"),
+      OracleType::BinaryFloat | OracleType::BinaryDouble => {
+        // 单精度按它自己的最短写法放宽，不然 0.1 成了 0.10000000149011612
+        let number = if *oracle_type == OracleType::BinaryFloat {
+          value.get::<f32>().map(widen_f32)
+        } else {
+          value.get::<f64>()
+        }
+        .map_err(|error| query_error(&error, None))?;
+        // JSON 里没有无穷与 NaN；照 SQL*Plus 的拼法，`TO_BINARY_DOUBLE` 也认
+        match serde_json::Number::from_f64(number) {
+          Some(number) => JsonValue::Number(number),
+          None if number.is_nan() => JsonValue::from("Nan"),
+          None if number > 0.0 => JsonValue::from("Inf"),
+          None => JsonValue::from("-Inf"),
+        }
       }
-    }
-    OracleType::Date => {
-      let stamp = value.get::<Timestamp>().map_err(|error| query_error(&error, None))?;
-      tagged_value("datetime", format_timestamp(&stamp, false))
-    }
-    OracleType::Timestamp(_) | OracleType::TimestampLTZ(_) => {
-      let stamp = value.get::<Timestamp>().map_err(|error| query_error(&error, None))?;
-      tagged_value("datetime", format_timestamp(&stamp, false))
-    }
-    OracleType::TimestampTZ(_) => {
-      let stamp = value.get::<Timestamp>().map_err(|error| query_error(&error, None))?;
-      tagged_value("datetime", format_timestamp(&stamp, true))
-    }
-    OracleType::Raw(_) | OracleType::LongRaw | OracleType::BLOB => {
-      let bytes = value.get::<Vec<u8>>().map_err(|error| query_error(&error, None))?;
-      binary_json(&bytes)
-    }
-    OracleType::Boolean => {
-      JsonValue::from(value.get::<bool>().map_err(|error| query_error(&error, None))?)
-    }
-    _ => JsonValue::from(text()?),
-  })
-}
-
-/// `NUMBER(10,2)` 的 10.50 驱动给的是 `10.5`：按列声明的标度补齐小数位，和
-/// 另外几家（以及 Oracle 自己的 SQL*Plus 按列格式）显示的一致
-fn with_scale(text: &str, scale: usize) -> String {
-  let text = leading_zero(text);
-  let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
-  if fraction.len() >= scale {
-    return text.clone();
+      OracleType::Date => {
+        let stamp = value.get::<Timestamp>().map_err(|error| query_error(&error, None))?;
+        tagged_value("datetime", format_timestamp(&stamp, false))
+      }
+      OracleType::Timestamp(_) | OracleType::TimestampLTZ(_) => {
+        let stamp = value.get::<Timestamp>().map_err(|error| query_error(&error, None))?;
+        tagged_value("datetime", format_timestamp(&stamp, false))
+      }
+      OracleType::TimestampTZ(_) => {
+        let stamp = value.get::<Timestamp>().map_err(|error| query_error(&error, None))?;
+        tagged_value("datetime", format_timestamp(&stamp, true))
+      }
+      OracleType::Raw(_) | OracleType::LongRaw | OracleType::BLOB => {
+        let bytes = value.get::<Vec<u8>>().map_err(|error| query_error(&error, None))?;
+        binary_json(&bytes)
+      }
+      OracleType::Boolean => {
+        JsonValue::from(value.get::<bool>().map_err(|error| query_error(&error, None))?)
+      }
+      _ => JsonValue::from(text()?),
+    })
   }
-  format!("{whole}.{fraction:0<scale$}")
-}
 
-/// Oracle 把 0.5 写成 `.5`，-0.5 写成 `-.5`
-fn leading_zero(text: &str) -> String {
-  if let Some(rest) = text.strip_prefix("-.") {
-    return format!("-0.{rest}");
-  }
-  if let Some(rest) = text.strip_prefix('.') {
-    return format!("0.{rest}");
-  }
-  text.to_string()
-}
-
-/// 照另外几家的写法：两位小时，小数秒只在非零时出现并去掉末尾的 0
-fn format_timestamp(stamp: &Timestamp, with_zone: bool) -> String {
-  let mut text = format!(
-    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-    stamp.year(),
-    stamp.month(),
-    stamp.day(),
-    stamp.hour(),
-    stamp.minute(),
-    stamp.second()
-  );
-  if stamp.nanosecond() > 0 {
-    let fraction = format!("{:09}", stamp.nanosecond());
-    text.push('.');
-    text.push_str(fraction.trim_end_matches('0'));
-  }
-  if with_zone {
-    let offset = stamp.tz_offset();
-    let sign = if offset < 0 { '-' } else { '+' };
-    let minutes = offset.unsigned_abs() / 60;
-    text.push_str(&format!(" {sign}{:02}:{:02}", minutes / 60, minutes % 60));
-  }
-  text
-}
-
-fn keeps_connection<T>(result: &Result<T, QueryError>) -> bool {
-  !matches!(result, Err(error) if error.code.as_deref() == Some(CONNECTION_LOST_CODE))
-}
-
-/// 这些错误说的是「连接没了」，不是「语句错了」
-const LOST_CONNECTION_CODES: [i32; 8] = [3113, 3114, 3135, 3156, 12170, 12514, 12541, 28547];
-
-/// 驱动的错误 → 应用的查询错误。
-///
-/// 服务端错误带 ORA 码与**出错位置**（从 0 起的字符偏移），错误面板按从 1 起的
-/// 字符位置标出错处。码写成 `ORA-00942`：那是每个 Oracle 用户认得的写法。
-fn query_error(error: &oracle::Error, sql: Option<&str>) -> QueryError {
-  let Some(db_error) = error.db_error() else {
-    // DPI-1080（连接被服务端关了）、DPI-1010（没连上）这一类
-    let text = error.to_string();
-    if text.contains("DPI-1080") || text.contains("DPI-1010") || text.contains("DPI-1067") {
-      return QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {text}"));
+  /// `NUMBER(10,2)` 的 10.50 驱动给的是 `10.5`：按列声明的标度补齐小数位，和
+  /// 另外几家（以及 Oracle 自己的 SQL*Plus 按列格式）显示的一致
+  fn with_scale(text: &str, scale: usize) -> String {
+    let text = leading_zero(text);
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    if fraction.len() >= scale {
+      return text.clone();
     }
-    return QueryError::message(text);
-  };
-  let code = db_error.code();
-  let message = db_error.message().to_string();
-  if LOST_CONNECTION_CODES.contains(&code) || message.contains("DPI-1080") {
-    return QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {message}"));
+    format!("{whole}.{fraction:0<scale$}")
   }
-  let position = sql
-    .filter(|sql| db_error.offset() > 0 && (db_error.offset() as usize) < sql.chars().count())
-    .map(|_| db_error.offset() + 1);
-  QueryError {
-    message,
-    code: (code != 0).then(|| format!("ORA-{code:05}")),
-    details: position.map(|position| {
-      Box::new(QueryErrorDetails { position: Some(position), ..Default::default() })
-    }),
+
+  /// Oracle 把 0.5 写成 `.5`，-0.5 写成 `-.5`
+  fn leading_zero(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix("-.") {
+      return format!("-0.{rest}");
+    }
+    if let Some(rest) = text.strip_prefix('.') {
+      return format!("0.{rest}");
+    }
+    text.to_string()
   }
-}
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::models::{ORACLE_CONNECT_BY_OPTION, ORACLE_SID};
+  /// 照另外几家的写法：两位小时，小数秒只在非零时出现并去掉末尾的 0
+  fn format_timestamp(stamp: &Timestamp, with_zone: bool) -> String {
+    let mut text = format!(
+      "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+      stamp.year(),
+      stamp.month(),
+      stamp.day(),
+      stamp.hour(),
+      stamp.minute(),
+      stamp.second()
+    );
+    if stamp.nanosecond() > 0 {
+      let fraction = format!("{:09}", stamp.nanosecond());
+      text.push('.');
+      text.push_str(fraction.trim_end_matches('0'));
+    }
+    if with_zone {
+      let offset = stamp.tz_offset();
+      let sign = if offset < 0 { '-' } else { '+' };
+      let minutes = offset.unsigned_abs() / 60;
+      text.push_str(&format!(" {sign}{:02}:{:02}", minutes / 60, minutes % 60));
+    }
+    text
+  }
 
-  #[test]
-  fn easy_connect_brackets_ipv6_hosts() {
-    let target = |host: &str| {
-      OracleTarget::from_profile(&ConnectionProfile {
-        host: host.to_string(),
-        port: 1521,
-        database: Some("FREEPDB1".to_string()),
-        ..ConnectionProfile::default()
-      })
-      .connect_string
+  fn keeps_connection<T>(result: &Result<T, QueryError>) -> bool {
+    !matches!(result, Err(error) if error.code.as_deref() == Some(CONNECTION_LOST_CODE))
+  }
+
+  /// 这些错误说的是「连接没了」，不是「语句错了」
+  const LOST_CONNECTION_CODES: [i32; 8] = [3113, 3114, 3135, 3156, 12170, 12514, 12541, 28547];
+
+  /// 驱动的错误 → 应用的查询错误。
+  ///
+  /// 服务端错误带 ORA 码与**出错位置**（从 0 起的字符偏移），错误面板按从 1 起的
+  /// 字符位置标出错处。码写成 `ORA-00942`：那是每个 Oracle 用户认得的写法。
+  fn query_error(error: &oracle::Error, sql: Option<&str>) -> QueryError {
+    let Some(db_error) = error.db_error() else {
+      // DPI-1080（连接被服务端关了）、DPI-1010（没连上）这一类
+      let text = error.to_string();
+      if text.contains("DPI-1080") || text.contains("DPI-1010") || text.contains("DPI-1067") {
+        return QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {text}"));
+      }
+      return QueryError::message(text);
     };
-    assert_eq!(target("::1"), "//[::1]:1521/FREEPDB1");
-    assert_eq!(target("[::1]"), "//[::1]:1521/FREEPDB1");
-    assert_eq!(target("db.example.com"), "//db.example.com:1521/FREEPDB1");
+    let code = db_error.code();
+    let message = db_error.message().to_string();
+    if LOST_CONNECTION_CODES.contains(&code) || message.contains("DPI-1080") {
+      return QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {message}"));
+    }
+    let position = sql
+      .filter(|sql| db_error.offset() > 0 && (db_error.offset() as usize) < sql.chars().count())
+      .map(|_| db_error.offset() + 1);
+    QueryError {
+      message,
+      code: (code != 0).then(|| format!("ORA-{code:05}")),
+      details: position.map(|position| {
+        Box::new(QueryErrorDetails { position: Some(position), ..Default::default() })
+      }),
+    }
   }
 
-  #[test]
-  fn a_sid_profile_connects_by_a_descriptor_naming_the_sid() {
-    let target = |host: &str| {
-      OracleTarget::from_profile(&ConnectionProfile {
-        host: host.to_string(),
-        port: 1521,
-        db_type: crate::models::DatabaseType::Oracle,
-        database: Some("ORCL".to_string()),
-        options: [(ORACLE_CONNECT_BY_OPTION.to_string(), ORACLE_SID.to_string())].into(),
-        ..ConnectionProfile::default()
-      })
-      .connect_string
-    };
-    let descriptor =
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+    use crate::models::{ORACLE_CONNECT_BY_OPTION, ORACLE_SID};
+
+    #[test]
+    fn easy_connect_brackets_ipv6_hosts() {
+      let target = |host: &str| {
+        OracleTarget::from_profile(&ConnectionProfile {
+          host: host.to_string(),
+          port: 1521,
+          database: Some("FREEPDB1".to_string()),
+          ..ConnectionProfile::default()
+        })
+        .connect_string
+      };
+      assert_eq!(target("::1"), "//[::1]:1521/FREEPDB1");
+      assert_eq!(target("[::1]"), "//[::1]:1521/FREEPDB1");
+      assert_eq!(target("db.example.com"), "//db.example.com:1521/FREEPDB1");
+    }
+
+    #[test]
+    fn a_sid_profile_connects_by_a_descriptor_naming_the_sid() {
+      let target = |host: &str| {
+        OracleTarget::from_profile(&ConnectionProfile {
+          host: host.to_string(),
+          port: 1521,
+          db_type: crate::models::DatabaseType::Oracle,
+          database: Some("ORCL".to_string()),
+          options: [(ORACLE_CONNECT_BY_OPTION.to_string(), ORACLE_SID.to_string())].into(),
+          ..ConnectionProfile::default()
+        })
+        .connect_string
+      };
+      let descriptor =
       "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))";
-    assert_eq!(target("db.example.com"), descriptor);
-    // 描述符里的 IPv6 地址不加方括号
-    assert_eq!(target("[::1]"), descriptor.replace("db.example.com", "::1"));
-    assert_eq!(target("::1"), descriptor.replace("db.example.com", "::1"));
-  }
+      assert_eq!(target("db.example.com"), descriptor);
+      // 描述符里的 IPv6 地址不加方括号
+      assert_eq!(target("[::1]"), descriptor.replace("db.example.com", "::1"));
+      assert_eq!(target("::1"), descriptor.replace("db.example.com", "::1"));
+    }
 
-  #[test]
-  fn a_sid_and_a_service_of_the_same_name_get_two_pools() {
-    let profile = |connect_by: Option<&str>| ConnectionProfile {
-      db_type: crate::models::DatabaseType::Oracle,
-      host: "db.example.com".to_string(),
-      port: 1521,
-      username: "scott".to_string(),
-      database: Some("ORCL".to_string()),
-      options: connect_by
-        .map(|value| (ORACLE_CONNECT_BY_OPTION.to_string(), value.to_string()))
-        .into_iter()
-        .collect(),
-      ..ConnectionProfile::default()
-    };
-    let key = |profile: ConnectionProfile| profile.db_type.to_connection_string(&profile);
-    assert_eq!(key(profile(None)), "oracle://scott@db.example.com:1521/ORCL");
-    assert_eq!(key(profile(Some(ORACLE_SID))), "oracle://scott@db.example.com:1521/ORCL?sid");
-  }
+    #[test]
+    fn a_sid_and_a_service_of_the_same_name_get_two_pools() {
+      let profile = |connect_by: Option<&str>| ConnectionProfile {
+        db_type: crate::models::DatabaseType::Oracle,
+        host: "db.example.com".to_string(),
+        port: 1521,
+        username: "scott".to_string(),
+        database: Some("ORCL".to_string()),
+        options: connect_by
+          .map(|value| (ORACLE_CONNECT_BY_OPTION.to_string(), value.to_string()))
+          .into_iter()
+          .collect(),
+        ..ConnectionProfile::default()
+      };
+      let key = |profile: ConnectionProfile| profile.db_type.to_connection_string(&profile);
+      assert_eq!(key(profile(None)), "oracle://scott@db.example.com:1521/ORCL");
+      assert_eq!(key(profile(Some(ORACLE_SID))), "oracle://scott@db.example.com:1521/ORCL?sid");
+    }
 
-  #[test]
-  fn numbers_keep_their_declared_scale_and_a_leading_zero() {
-    assert_eq!(with_scale("10.5", 2), "10.50");
-    assert_eq!(with_scale("10", 2), "10.00");
-    assert_eq!(with_scale(".5", 2), "0.50");
-    assert_eq!(with_scale("-.5", 1), "-0.5");
-    assert_eq!(with_scale("1.234", 2), "1.234", "多出来的位数照原样，不截");
-    assert_eq!(leading_zero("-.25"), "-0.25");
-  }
+    #[test]
+    fn numbers_keep_their_declared_scale_and_a_leading_zero() {
+      assert_eq!(with_scale("10.5", 2), "10.50");
+      assert_eq!(with_scale("10", 2), "10.00");
+      assert_eq!(with_scale(".5", 2), "0.50");
+      assert_eq!(with_scale("-.5", 1), "-0.5");
+      assert_eq!(with_scale("1.234", 2), "1.234", "多出来的位数照原样，不截");
+      assert_eq!(leading_zero("-.25"), "-0.25");
+    }
 
-  #[test]
-  fn sql_loses_its_trailing_semicolon_but_plsql_keeps_it() {
-    assert_eq!(statement_text("SELECT 1 FROM dual;"), "SELECT 1 FROM dual");
-    assert_eq!(statement_text("DELETE FROM t ;  "), "DELETE FROM t");
-    assert_eq!(statement_text("BEGIN NULL; END;"), "BEGIN NULL; END;");
-    assert_eq!(
-      statement_text("declare x number; begin null; end;"),
-      "declare x number; begin null; end;"
-    );
-    assert_eq!(
-      statement_text("CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"),
-      "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"
-    );
-    assert_eq!(statement_text("CREATE TABLE t (id NUMBER);"), "CREATE TABLE t (id NUMBER)");
+    #[test]
+    fn sql_loses_its_trailing_semicolon_but_plsql_keeps_it() {
+      assert_eq!(statement_text("SELECT 1 FROM dual;"), "SELECT 1 FROM dual");
+      assert_eq!(statement_text("DELETE FROM t ;  "), "DELETE FROM t");
+      assert_eq!(statement_text("BEGIN NULL; END;"), "BEGIN NULL; END;");
+      assert_eq!(
+        statement_text("declare x number; begin null; end;"),
+        "declare x number; begin null; end;"
+      );
+      assert_eq!(
+        statement_text("CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"),
+        "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"
+      );
+      assert_eq!(statement_text("CREATE TABLE t (id NUMBER);"), "CREATE TABLE t (id NUMBER)");
+    }
   }
 }
+
+#[cfg(feature = "oracle")]
+pub use imp::*;

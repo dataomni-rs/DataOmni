@@ -154,9 +154,11 @@ jobs:
       - name: Run Rust Clippy
         run: bun run rust:clippy
 
-      # 不带 AI 的构建（内网 / 信创）要一直编得过：没人用的那一套会悄悄坏掉。见 rfcs/editions-and-branching.md §5
-      - name: Rust clippy (no default features)
-        run: bun run rust:clippy:no-ai
+      # 不带默认可选特性（AI 与内置 Oracle 动态库驱动）的构建要一直编得过且过单测。见 rfcs/editions-and-branching.md §5
+      - name: Rust clippy and unit tests (no default features)
+        run: |
+          bun run rust:clippy:no-ai
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features
 
       - name: Test Rust
         run: bun run rust:test

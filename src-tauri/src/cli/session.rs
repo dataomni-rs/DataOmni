@@ -32,15 +32,16 @@ pub(super) enum Failure {
 
 /// 这一版命令行能连的类型。其余的在 §6 的后几批
 pub(super) fn supports(db_type: &DatabaseType) -> bool {
-  matches!(
-    db_type,
-    DatabaseType::PostgreSQL
-      | DatabaseType::MySQL
-      | DatabaseType::SQLite
-      | DatabaseType::DuckDB
-      | DatabaseType::ClickHouse
-      | DatabaseType::Oracle
-  )
+  db_type.has_driver()
+    && matches!(
+      db_type,
+      DatabaseType::PostgreSQL
+        | DatabaseType::MySQL
+        | DatabaseType::SQLite
+        | DatabaseType::DuckDB
+        | DatabaseType::ClickHouse
+        | DatabaseType::Oracle
+    )
 }
 
 /// 一次调用里打开的库。隧道随它一起活到这次调用结束
@@ -55,6 +56,7 @@ pub(super) struct Opened {
 enum Pool {
   Sqlx(DbPool),
   DuckDb(Arc<duckdb::DuckDbPool>),
+  #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
   Oracle(Arc<oracle::OraclePool>),
   ClickHouse(Arc<clickhouse::ClickHousePool>),
 }
@@ -116,6 +118,7 @@ async fn connect(
         .map_err(|error| Failure::Connect(format!("{}: {}", path.display(), error.message)))?;
       (Pool::DuckDb(pool), None)
     }
+    #[cfg(feature = "oracle")]
     DatabaseType::Oracle => {
       let reachable = match tunnel_port {
         Some(port) => profile.redirected_to("127.0.0.1", port),
@@ -530,6 +533,7 @@ mod tests {
   }
 
   /// Oracle：`SET TRANSACTION READ ONLY` 挡 DML（DDL 不挡，§3.1 E3，靠语句门）
+  #[cfg(feature = "oracle")]
   #[tokio::test]
   async fn oracle_sessions_refuse_dml() {
     let Some(profile) = profile_from_env("DATAOMNI_ORACLE_TEST_URL", "oracle") else {

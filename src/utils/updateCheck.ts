@@ -6,6 +6,10 @@
  * 当天不再问——不然每次启动都去撞一次
  */
 
+export type InstallChannel = 'standalone' | 'homebrew' | 'systemPackage';
+
+export const BREW_UPGRADE_COMMAND = 'brew upgrade --cask dataomni';
+
 export interface UpdateCheckState {
   enabled: boolean;
   /** 上次去问的时刻（毫秒）。没问成也记 */

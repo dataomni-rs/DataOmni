@@ -23,9 +23,12 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
+  getCachedCompiledDrivers,
   isDatabaseTypeSupported,
   hasGapsByDesign,
+  loadCompiledDrivers,
   PENDING_FEATURES,
+  SUPPORTED_DATABASE_TYPES,
   type PendingFeature
 } from '../contracts/databaseSupport';
 import type { ConnectionDiagnosis } from '../contracts/connectionDiagnosis';
@@ -233,6 +236,24 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
    * 什么也没变。每没过一次就把焦点交给第一个出错的输入框，浏览器会顺带把它滚进来
    */
   const [failedValidations, setFailedValidations] = useState(0);
+  const [compiledDrivers, setCompiledDrivers] = useState<ReadonlySet<DatabaseType>>(
+    () => getCachedCompiledDrivers() ?? SUPPORTED_DATABASE_TYPES,
+  );
+
+  useEffect(() => {
+    if (getCachedCompiledDrivers() !== null) {
+      return;
+    }
+    let cancelled = false;
+    void loadCompiledDrivers().then((drivers) => {
+      if (!cancelled && drivers !== SUPPORTED_DATABASE_TYPES) {
+        setCompiledDrivers(drivers);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const formBodyRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (failedValidations > 0) {
@@ -307,7 +328,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   const handleDatabaseTypeChange = (type: DatabaseType) => {
     // 按钮本身已 disabled，这里再挡一次：键盘或将来的调用方绕过按钮时，不会
     // 落进一个保存得下、却永远连不上的配置
-    if (!isDatabaseTypeSupported(type)) {
+    if (!isDatabaseTypeSupported(type) || !compiledDrivers.has(type)) {
       return;
     }
 
@@ -601,9 +622,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                     </h4>
                     <div className="grid grid-cols-3 gap-1.5">
                       {databaseTypes
-                        .filter((dbType) => dbType.categoryKey === categoryKey)
+                        .filter(
+                          (dbType) =>
+                            dbType.categoryKey === categoryKey
+                            && (compiledDrivers.has(dbType.type)
+                              || (mode === 'edit' && formData.db_type === dbType.type)),
+                        )
                         .map((dbType) => {
-                          const supported = isDatabaseTypeSupported(dbType.type);
+                          const supported =
+                            isDatabaseTypeSupported(dbType.type) && compiledDrivers.has(dbType.type);
                           // 经快捷入口建的 MySQL / PostgreSQL 连接，高亮的是那个入口
                           const selected = formData.db_type === dbType.type && selectedPreset === null;
 

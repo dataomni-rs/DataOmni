@@ -805,6 +805,8 @@ export const en: Translations = {
   'settings.about.checkUpdates': 'Check for new versions at startup',
   'settings.about.checkUpdatesNote': 'At most once a day, only contacts GitHub, sends no data. It only tells you; nothing is downloaded.',
   'update.available': 'DataOmni {version} is available.',
+  'update.copyBrewUpgrade': 'Copy brew upgrade command',
+  'update.copiedBrewUpgrade': 'Upgrade command copied',
   'update.view': 'Release notes',
   'error.backend.updateCheckFailed': 'Could not check for a new version: {detail}',
   'error.backend.externalLinkOpenFailed': 'Could not open link in browser: {detail}',
@@ -1114,7 +1116,7 @@ export const en: Translations = {
   'error.updateProfileFailed': 'Failed to update the connection',
   'error.deleteProfileFailed': 'Failed to delete the connection',
   'error.backend.unsupportedDatabase':
-    'There is no driver for {detail} in this version, so it cannot connect. MySQL, PostgreSQL and SQLite are supported.',
+    'This build does not include the {detail} database driver and cannot connect.',
   'error.backend.tlsClientPairRequired':
     'A TLS client certificate and a client private key have to be set together — one without the other will not connect. These are the TLS certificates for the database; an SSH key belongs under "Connect through an SSH tunnel".',
   'error.backend.tlsCertificatesUnsupported':
