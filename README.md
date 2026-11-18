@@ -595,6 +595,11 @@ bun install
 
 （暂无）
 
+### v1.2.1（2026-11-18）
+
+- macOS 签名公证与 Homebrew Cask：macOS 安装包（`.app` 与外层 `.dmg`）正式接入 Apple Developer ID 签名、Apple `notarytool` 公证与 `stapler` 离线票据钉合，下载拖入「应用程序」即可直接打开，无需手动清除隔离标记；支持通过官方 Tap 安装（`brew install --cask dataomni-rs/tap/dataomni`）并自动把 `dataomni` 命令行软链至 `$(brew --prefix)/bin/dataomni`。同团队证书后续升级不再触发系统钥匙串重复授权。
+- macOS 打包元数据：`Info.plist` 的 `LSMinimumSystemVersion` 从默认的 `10.13` 修正为 `12.0`（Monterey），与 Apple Silicon 支持基线及 Homebrew 审计规则对齐；发布流水线新增包内 Oracle Instant Client 逐字节 SHA-256 校验门。
+
 ### v1.2.0（2026-11-18）
 
 - 外部连接导入：首页「导入连接…」与命令面板新增对 Navicat `.ncx`（含 `InitialDatabase`、Oracle 服务名 / SID、MariaDB 预设、TLS CA、SSH 隧道）与 DBeaver `data-sources.json`（含 JDBC URL 解析、SSH 通道、`prod` 环境映射）的离线预览导入；前后端双重剥离加密口令与私钥密码，并将命令行与 Agent 访问重置为关闭，见 `rfcs/external-connection-import.md`。
