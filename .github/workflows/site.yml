@@ -9,9 +9,6 @@ on:
       - "images/**"
       - "src-tauri/icons/**"
       - ".github/workflows/site.yml"
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 permissions:
@@ -23,15 +20,10 @@ concurrency:
 
 jobs:
   build:
-    if: github.event_name != 'release' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # GitHub Pages 环境通常只允许从默认分支部署；Release 发布触发时也检出 main，
-          # 通过 DATAOMNI_SITE_RELEASE_VERSION 注入刚正式公开的稳定版 tag
-          ref: main
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -42,8 +34,6 @@ jobs:
         run: cargo test --manifest-path site/Cargo.toml
 
       - name: Build static site
-        env:
-          DATAOMNI_SITE_RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         run: cargo run --manifest-path site/Cargo.toml --release
 
       - name: Upload Pages artifact
