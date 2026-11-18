@@ -180,16 +180,19 @@ Download a package from [Releases](https://github.com/dataomni-rs/DataOmni/relea
 
 | Platform | Package |
 | --- | --- |
-| macOS (Apple Silicon) | `DataOmni_<version>_aarch64.dmg` |
+| macOS 12+ (Apple Silicon) | `brew install --cask dataomni-rs/tap/dataomni` or `DataOmni_<version>_aarch64.dmg` |
 | Windows (x64) | `DataOmni_<version>_x64-setup.exe` or `DataOmni_<version>_x64_en-US.msi` |
 | Linux (x64, glibc 2.34+) | `DataOmni_<version>_amd64.deb` or `DataOmni-<version>-1.x86_64.rpm` |
 
-The packages are **not signed** (there is no Apple Developer ID or Windows code-signing certificate
-yet), so the first launch needs one extra step:
+First-launch and platform notes:
 
-- **macOS**: the first open is blocked. Click "Open Anyway" at the bottom of System Settings →
-  Privacy & Security, or run `xattr -dr com.apple.quarantine /Applications/DataOmni.app`.
-- **Windows**: when SmartScreen says "Windows protected your PC", click "More info" → "Run anyway".
+- **macOS**: official releases (`v1.2.1`+) are signed with an Apple Developer ID and notarized by Apple, so
+  `DataOmni.app` opens directly without Gatekeeper quarantine workarounds. Installing via Homebrew Cask
+  (`brew install --cask dataomni-rs/tap/dataomni`) also links the `dataomni` CLI into `$(brew --prefix)/bin/dataomni`.
+  If upgrading once from an earlier ad-hoc signed build (`<= 1.2.0`), macOS Keychain will ask once per saved secret
+  to authorize the Developer ID team; future signed updates reuse that authorization.
+- **Windows**: there is no Windows code-signing certificate yet; when SmartScreen says "Windows protected your PC",
+  click "More info" → "Run anyway".
 - **Linux**: `sudo apt install ./DataOmni_*.deb` or `sudo dnf install ./DataOmni-*.rpm`. Saving
   passwords needs an unlocked Secret Service (gnome-keyring on GNOME).
 

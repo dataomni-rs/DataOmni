@@ -3,8 +3,9 @@ name: Release
 # 推 `v*` tag 时三个平台各打一份安装包，传到一个**草稿** Release，看过再手动发布。
 # 手动触发（Actions 页面的 Run workflow）只打包、挂在这次运行的 Artifacts 里，不建 Release。
 #
-# 都没有签名：没有 Apple Developer ID（macOS 首次打开要在「隐私与安全性」里放行），
-# Windows 也没有代码签名证书（SmartScreen 会拦一下）。
+# macOS：仓库配好 APPLE_CERTIFICATE 等 Secret 时走 Apple Developer ID 签名 + notarytool 公证 +
+# stapler 钉合票据（.app 与外层 .dmg 都钉合）；未配 Secret 的 fork 回退到 tauri.conf.json 的 ad-hoc（"-"）。
+# Windows 暂无代码签名证书（首次启动 SmartScreen 会提示一次）。
 on:
   push:
     tags:
@@ -79,11 +80,95 @@ jobs:
       - name: Fetch Oracle Instant Client
         run: bash scripts/fetch-oracle-client.sh ${{ matrix.platform }}
 
+      - name: Prepare macOS signing keychain and notarization key
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          for required in \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            KEYCHAIN_PASSWORD \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY \
+            APPLE_API_KEY_P8; do
+            if [[ -z "${!required:-}" ]]; then
+              echo "macOS 签名 Secret 不完整：缺少 $required" >&2
+              exit 1
+            fi
+          done
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          cert_p12="$RUNNER_TEMP/certificate.p12"
+          p8_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+
+          CERT_P12="$cert_p12" P8_PATH="$p8_path" python3 - <<'PY'
+          import base64
+          import os
+          import pathlib
+
+          cert_path = pathlib.Path(os.environ["CERT_P12"])
+          cert_path.write_bytes(base64.b64decode(os.environ["APPLE_CERTIFICATE"]))
+          cert_path.chmod(0o600)
+
+          raw_p8 = os.environ["APPLE_API_KEY_P8"].strip()
+          if "BEGIN PRIVATE KEY" in raw_p8:
+            p8_bytes = (raw_p8 + "\n").encode("utf-8")
+          else:
+            p8_bytes = base64.b64decode(raw_p8)
+          p8_file = pathlib.Path(os.environ["P8_PATH"])
+          p8_file.write_bytes(p8_bytes)
+          p8_file.chmod(0o600)
+          PY
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$cert_p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          rm -f "$cert_p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+
+          existing_keychains=()
+          while IFS= read -r line; do
+            trimmed="$(echo "$line" | xargs | tr -d '"')"
+            [[ -n "$trimmed" ]] && existing_keychains+=("$trimmed")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing_keychains[@]}"
+
+          if ! security find-identity -v -p codesigning "$keychain" | grep -Fq "$APPLE_SIGNING_IDENTITY"; then
+            echo "导入的钥匙串中未找到目标签名身份：$APPLE_SIGNING_IDENTITY" >&2
+            security find-identity -v -p codesigning "$keychain" >&2
+            exit 1
+          fi
+
+          {
+            echo "APPLE_API_KEY_PATH=$p8_path"
+            echo "MACOS_RELEASE_SIGNED=1"
+          } >> "$GITHUB_ENV"
+
       # tag 推上来时版本号跟 tag 走（v0.6.0 → 0.6.0），免得包名和 Release 对不上。
       # 预发布（v1.0.0-rc.1）另给 MSI 一个纯数字版本 1.0.0.1：tauri-bundler 的 convert_version 遇到
       # 不是纯数字的预发布标识直接报错。MSI 判升级只比前三段，正式版 1.0.0 装在 rc 上靠模板里的
       # AllowSameVersionUpgrades
       - name: Build
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
           version_config=()
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -98,14 +183,39 @@ jobs:
               version_config+=(--config "{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"${version%%-*}.$pre_number\"}}}}")
             fi
           fi
-          # macOS 签名与 hardened runtime 统一由 src-tauri/tauri.conf.json 控制：
-          # signingIdentity: "-"（给整个 .app 做 ad-hoc 签名，否则下载后报「已损坏」）、
+          # macOS 基准配置在 src-tauri/tauri.conf.json：
           # hardenedRuntime: true（挡住 DYLD_INSERT_LIBRARIES 冒用进程身份读钥匙串，见 rfcs/agent-cli.md §5.4 E7）、
-          # entitlements: Entitlements.plist（disable-library-validation，放行 Oracle 签名的 Instant Client）
+          # entitlements: Entitlements.plist（disable-library-validation，放行 Oracle 签名的 Instant Client）、
+          # signingIdentity 默认为 "-"（无证书构建回退为 ad-hoc）；配好证书时覆盖为 Developer ID Application，
+          # tauri-bundler 会给 .app 签名、公证并钉合票据。
+          if [[ "${MACOS_RELEASE_SIGNED:-0}" == "1" ]]; then
+            signing_json="$(python3 -c 'import json, os; print(json.dumps({"bundle": {"macOS": {"signingIdentity": os.environ["APPLE_SIGNING_IDENTITY"]}}}))')"
+            version_config+=(--config "$signing_json")
+          else
+            unset APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH
+          fi
           bun tauri build \
             --bundles ${{ matrix.bundles }} \
             --config src-tauri/tauri.oracle.conf.json \
             "${version_config[@]}"
+
+          # tauri-bundler 只给 .app 公证钉合，随后打出的外层 .dmg 仅带代码签名、没有公证票据；
+          # 这里再对外层 .dmg 提交一次 notarytool 并 staple，保证离线挂载 .dmg 与拖出 .app 两层都有票据。
+          if [[ "${MACOS_RELEASE_SIGNED:-0}" == "1" ]]; then
+            shopt -s nullglob
+            dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+            shopt -u nullglob
+            if [[ "${#dmgs[@]}" -ne 1 ]]; then
+              echo "期望产出 1 个 .dmg，实际找到 ${#dmgs[@]} 个" >&2
+              exit 1
+            fi
+            xcrun notarytool submit "${dmgs[0]}" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "${dmgs[0]}"
+          fi
 
       - name: Verify the macOS bundle signature
         if: runner.os == 'macOS'
@@ -120,6 +230,44 @@ jobs:
             echo "缺少 disable-library-validation entitlement，Oracle Instant Client 会加载失败" >&2
             exit 1
           fi
+
+          # Oracle Instant Client 的分发许可要求原样随包分发，不得重签或改动字节
+          for vendor_file in src-tauri/vendor/instantclient/*; do
+            name="$(basename "$vendor_file")"
+            bundled_file="$app/Contents/Resources/instantclient/$name"
+            expected_sha="$(shasum -a 256 "$vendor_file" | awk '{print $1}')"
+            actual_sha="$(shasum -a 256 "$bundled_file" | awk '{print $1}')"
+            if [[ "$expected_sha" != "$actual_sha" ]]; then
+              echo "Instant Client 文件被改动：$name（期望 $expected_sha，实际 $actual_sha）" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "${MACOS_RELEASE_SIGNED:-0}" == "1" ]]; then
+            info="$(codesign -dvv "$app" 2>&1)"
+            if ! grep -q '^Authority=Developer ID Application:' <<<"$info"; then
+              echo ".app 未使用 Developer ID Application 签名" >&2
+              echo "$info" >&2
+              exit 1
+            fi
+            if ! grep -q '^Timestamp=' <<<"$info"; then
+              echo ".app 缺少可信时间戳（Timestamp）" >&2
+              echo "$info" >&2
+              exit 1
+            fi
+            xcrun stapler validate "$app"
+            spctl -a -vvv -t exec "$app"
+
+            dmg="$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
+            xcrun stapler validate "$dmg"
+            spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          fi
+
+      - name: Clean up macOS signing credentials
+        if: always() && runner.os == 'macOS'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP"/AuthKey_*.p8
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
@@ -191,14 +339,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > notes.md <<'EOF'
-          安装包都没有签名。
+          - **macOS（Apple Silicon）**：已由 Apple Developer ID 签名并通过 Apple 公证（Notarized），下载 `.dmg` 拖入「应用程序」即可直接打开；也可通过 Homebrew 安装：`brew install --cask dataomni-rs/tap/dataomni`。
+          - **Windows（x64）**：暂无代码签名证书，SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」。
+          - **Linux（x86_64）**：`.deb`（Ubuntu / Debian）与 `.rpm`（Fedora / RHEL）。
 
-          - **macOS（Apple Silicon）**：第一次打开会被拦下，到「系统设置 → 隐私与安全性」底部点「仍要打开」；
-            或者装好后在终端执行 `xattr -dr com.apple.quarantine /Applications/DataOmni.app`。
-          - **Windows**：SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」。
-          - **Linux**：`.deb`（Ubuntu / Debian）与 `.rpm`（Fedora / RHEL），x86_64。
-
-          各版本的改动见 README「更新日志」。
+          各版本的改动见 README「更新日志」或 https://dataomni.dev/zh/changelog/ 。
           EOF
           # 产物按 dmg/、deb/… 分了子目录，传文件不传目录
           mapfile -t files < <(find packages -type f)

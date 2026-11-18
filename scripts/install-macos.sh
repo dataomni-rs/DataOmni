@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # 构建 DataOmni 并装进 /Applications（macOS）。
 #
-#   scripts/install-macos.sh               # 构建 → 装 → 启动
+#   scripts/install-macos.sh               # 构建 → 装 → 启动（钥匙串有 Developer ID 证书时自动用它签）
+#   scripts/install-macos.sh --adhoc       # 强制用 ad-hoc（"-"）签名构建
 #   scripts/install-macos.sh --skip-build  # 不构建，装上一次构建出来的 .app
 #   scripts/install-macos.sh --no-open     # 装完不启动
 #   scripts/install-macos.sh -y            # 装好的那份正开着时不问，直接结束它
 #
 # 构建与 `bun run package` 相同（带 Oracle Instant Client），只是只出 .app、不出 dmg：
-# 装到本机用不着 dmg，而 dmg 那一步会因为上次失败留下的挂载再失败（见 CLAUDE.md）。
+# 装到本机用不着 dmg，也不跑线上 notarytool 公证（省掉两分钟上传等待）；用同一张 Developer ID
+# 证书签好后，本机反复重装也不会让系统钥匙串把新包当成陌生应用重弹密码授权框。
 set -euo pipefail
 
 app_name=DataOmni
@@ -17,12 +19,14 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 build=1
 open_after=1
 assume_yes=0
+force_adhoc=0
 for argument in "$@"; do
   case "$argument" in
+    --adhoc) force_adhoc=1 ;;
     --skip-build) build=0 ;;
     --no-open) open_after=0 ;;
     -y|--yes) assume_yes=1 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "不认识的参数：${argument}（--help 看用法）" >&2; exit 2 ;;
   esac
 done
@@ -37,7 +41,40 @@ bundle="$target_dir/release/bundle/macos/$app_name.app"
 
 if [ "$build" = 1 ]; then
   bash scripts/fetch-oracle-client.sh
-  bun tauri build --bundles app --config src-tauri/tauri.oracle.conf.json
+  sign_args=()
+  signing_identity="-"
+  if [ "$force_adhoc" = 0 ]; then
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+      signing_identity="$APPLE_SIGNING_IDENTITY"
+    else
+      detected="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' \
+        | head -n 1)"
+      [ -n "$detected" ] && signing_identity="$detected"
+    fi
+  fi
+  if [ "$signing_identity" != "-" ]; then
+    echo "使用签名身份：$signing_identity"
+    signing_json="$(SIGNING_IDENTITY="$signing_identity" python3 -c \
+      'import json, os; print(json.dumps({"bundle": {"macOS": {"signingIdentity": os.environ["SIGNING_IDENTITY"]}}}))')"
+    sign_args=(--config "$signing_json")
+  else
+    echo "使用 ad-hoc（-）签名"
+  fi
+  # 本机安装不触发线上公证，清空可能残留的公证变量
+  env -u APPLE_API_ISSUER -u APPLE_API_KEY -u APPLE_API_KEY_PATH \
+    APPLE_SIGNING_IDENTITY="$signing_identity" \
+    bun tauri build --bundles app --config src-tauri/tauri.oracle.conf.json "${sign_args[@]}"
+
+  for vendor_file in src-tauri/vendor/instantclient/*; do
+    name="$(basename "$vendor_file")"
+    expected_sha="$(shasum -a 256 "$vendor_file" | awk '{print $1}')"
+    actual_sha="$(shasum -a 256 "$bundle/Contents/Resources/instantclient/$name" | awk '{print $1}')"
+    if [ "$expected_sha" != "$actual_sha" ]; then
+      echo "Instant Client 文件被改动：$name（期望 $expected_sha，实际 $actual_sha）" >&2
+      exit 1
+    fi
+  done
 fi
 [ -d "$bundle" ] || { echo "没找到构建产物：$bundle" >&2; exit 1; }
 

@@ -26,7 +26,7 @@
 | 加固 | 依赖与前端安全边界、持续真库回归、发布与文档一致性（2026-11-08 / 11-09 两轮评估） | [x] QS1–QS6、QT1–QT5、QR1–QR2、PA1–PA8 全部完成 |
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [-] U1、C1、D3、D2、C2、G1–G13 完成，`v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev`（`10d0872`）2026-11-17 上线；U2 winget（`#481999`）与搜索引擎收录外部推进中 |
-| v1.2 路线 | 扫清遗留、巩固稳定、官网文档与实用扩展（`rfcs/roadmap-1.2.md`） | [-] S0–S3、V2、V4、W1–W4、E1、E2 已完成并发布 `v1.2.0`（2026-11-18，macOS 打包版已验 Hardened Runtime、Instant Client、CLI 与桌面启动）；S4、V1、V3、E3、E4 按外部与实机条件持续跟进 |
+| v1.2 路线 | 扫清遗留、巩固稳定、官网文档与实用扩展（`rfcs/roadmap-1.2.md`） | [-] S0–S3、V2、V4、W1–W4、E1、E2 已完成并发布 `v1.2.0`；`S4` macOS Apple Developer ID 签名公证与 Homebrew Tap 已落地并准备 `v1.2.1`（2026-11-18）；WinGet（`#481999`）、V1、V3、E3、E4 按外部与实机条件持续跟进 |
 
 ---
 
@@ -47,9 +47,9 @@
 - [x] S3 补齐包元数据与应用内「官网 / 问题反馈」直达入口（`4bdc0db`，2026-11-17）
   - 已做：`src-tauri/Cargo.toml` 补齐 `license = "MIT"`、`homepage = "https://dataomni.dev"`、`repository = "https://github.com/dataomni-rs/DataOmni"`（`tauri.conf.json` 的 `bundle.publisher` 在 `microsoft/winget-pkgs#481999` 合入前保持不动）；新增受控枚举命令 `open_project_link`（仅允许 `website` / `websiteZh` / `issues` 三个固定 HTTPS 目标，不开放任意 URL）与 `DATAOMNI_EXTERNAL_LINK_OPEN_FAILED` 翻译映射；在 `AboutSection.tsx`（按界面语言直达 `/` 或 `/zh/`）与 macOS `Help` 菜单（`app_menu.rs`）补齐官网与反馈入口。
   - 验证：`AboutSection.test.tsx` 先写先红后绿；`catalog.test.ts`、`backendError.test.ts`、`shortcuts.test.ts`、`databaseHandle.test.ts`（前端仍保持 5 条权限）及 `app_commands` 单测全绿；无头 Chrome 实际渲染核对中英双语设置面板按钮单行排布正常。
-- [ ] S4 外部渠道落地后的仓内同步（事件触发即收口）
-  - WinGet：`microsoft/winget-pkgs#481999` 合入后，在 `site/` Windows 卡片、`README.md` 与 `README.en.md` 补上 `winget install DataOmni.DataOmni`，勾选 `U2`。
-  - macOS 签名公证与 Homebrew：视 Apple Developer ID 进展接入 `release.yml` 签名公证与 `Homebrew/homebrew-cask`（或启用 `dataomni-rs/homebrew-tap` 兜底），同步更新官网 macOS 安装提示。
+- [-] S4 外部渠道落地后的仓内同步（事件触发即收口）
+  - [ ] WinGet：`microsoft/winget-pkgs#481999` 合入后，在 `site/` Windows 卡片、`README.md` 与 `README.en.md` 补上 `winget install DataOmni.DataOmni`，勾选 `U2`。
+  - [x] macOS 签名公证与 Homebrew（`61658e2`，2026-11-18）：已在 `release.yml` 接入临时钥匙串导入 Apple Developer ID 证书（`PGX36YNATP`）、`tauri-bundler` `.app` 签名公证及外层 `.dmg` 补充 `notarytool` 公证与 `stapler` 票据钉合，新增 Instant Client 9 个文件逐字节 SHA-256 门禁并将 `LSMinimumSystemVersion` 对齐为 `12.0`；`scripts/install-macos.sh` 自动识别本机 Developer ID 证书；新增 `scripts/homebrew-cask.sh`（强制校验服务端摘要与公证票据，`brew style` 0 告警，未公证 `1.2.0` 反向变红退出码 1），经官方 `dataomni-rs/homebrew-tap` 发布（上游 `Homebrew/homebrew-cask` 要求仓库星标 ≥75/自提 ≥225 且域名满 30 天，满足后原样直提）。本机 `.app` 与 `.dmg` 实测通过 Apple 公证、`stapler validate`、`spctl` 与 `gktool scan`。
 
 ### 第二阶段（V）：巩固稳定已有功能（跨平台与真库闭环）
 
@@ -96,7 +96,7 @@
 
 - [-] U2 winget（已提 PR：`microsoft/winget-pkgs#481999`，CLA 已签、11/11 自动校验通过，等上游维护者合入）
   - 脚本 `scripts/winget-manifest.sh <版本>` 生成 `packaging/winget/manifests/d/DataOmni/DataOmni/<版本>/`（1.10.0 格式，自动提取 MSI `ProductCode`、`UpgradeCode`、NSIS `ProductCode` 与 ARP `Publisher`）。
-  - Homebrew Cask 视 Apple Developer ID 申请进展再定（见 `S4`）。
+  - Homebrew Cask：已由 `S4`（`61658e2`）提供 `scripts/homebrew-cask.sh <版本>` 与官方 Tap `dataomni-rs/homebrew-tap`（`brew install --cask dataomni-rs/tap/dataomni`）；待仓库星标与域名注册天数达标后原样提 `Homebrew/homebrew-cask`。
 - 社区发帖与搜索引擎后台提交由用户自行推进。
 
 ---
