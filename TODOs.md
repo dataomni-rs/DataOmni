@@ -25,7 +25,7 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证与 Homebrew Tap（`rfcs/roadmap-1.2.md`） | [x] `v1.2.0`（2026-11-17）与 `v1.2.1`（2026-11-18）正式发布，`dataomni-rs/homebrew-tap` 已上线；未结验证与渠道项并入 `v1.3` |
-| v1.3 路线 | 流水线提效、跨平台闭环、平滑更新与合规分发（`rfcs/roadmap-1.3.md`） | [-] `P0–P3`、`U1`、`U2`、`M1` 已完成并准备发布 `v1.2.2`（2026-11-19）；`P4`、`V1`、`V2`、`U3`、`M2`、`M3` 按实机与外部条件持续推进 |
+| v1.3 路线 | 流水线提效、跨平台闭环、平滑更新与合规分发（`rfcs/roadmap-1.3.md`） | [-] `P0–P3`、`U1`、`U2`、`M1` 已完成并正式发布 `v1.2.2`（2026-11-19，带 `latest.json` 与 `dataomni-rs/homebrew-tap` 同步）；`P4`、`V1`、`V2`、`U3`、`M2`、`M3` 按实机与外部条件持续推进 |
 
 ---
 
@@ -60,7 +60,7 @@
 
 - [x] U1 应用内签名校验平滑更新（承接 `v1.2` `E3` / `roadmap-1.0` `R3`，前置签名公证已解锁）（`f9678bf`、`edf7e96`）
   - [x] 设计说明与安装渠道识别引导（`f9678bf`）：已撰写 [`rfcs/auto-update.md`](rfcs/auto-update.md)，落地后端 `install_channel`（区分 `homebrew`、`systemPackage`、`standalone`，排除源码开发构建误判）与前端 `UpdateNotice` Homebrew Cask 一键复制 `brew upgrade --cask dataomni`，`UpdateNotice.test.tsx` 先红后绿。
-  - [x] 独立安装包 `tauri-plugin-updater` 签名替换（`edf7e96`）：已接入生产 Minisign Ed25519 公钥（`52232E86440485D4`）与 `latest.json` HTTPS 端点，落地后端受控三命令（`check_app_update` / `download_app_update` / `install_app_update`，拦截包管理器与开发构建自覆盖）、`UpdateNotice` 三步显式确认与 `App` 事务/任务/快照退出守卫，以及 `scripts/build-latest-json.py` 与 `release.yml` 公证解包门禁；包体/签名 1 字节篡改反向验证单测、中英深浅色真实渲染与全量门禁通过，GitHub Secrets `TAURI_SIGNING_PRIVATE_KEY`（及口令）已写入并纳入 `v1.2.2` 发版。
+  - [x] 独立安装包 `tauri-plugin-updater` 签名替换（`edf7e96`、`v1.2.2` 运行 `44445610282`）：已接入生产 Minisign Ed25519 公钥（`52232E86440485D4`）与 `latest.json` HTTPS 端点，落地后端受控三命令（`check_app_update` / `download_app_update` / `install_app_update`，拦截包管理器与开发构建自覆盖）、`UpdateNotice` 三步显式确认与 `App` 事务/任务/快照退出守卫，以及 `scripts/build-latest-json.py` 与 `release.yml` 公证解包门禁；`v1.2.2` 正式版全套 10 项签名产物、`latest.json` 5 个平台目标 Key ID 验签、Windows `1.2.1 → 1.2.2` 覆盖升级及 `dataomni-rs/homebrew-tap`（`a44970b`）全部验收通过。
 - [x] U2 官网双语隐私与安全合规声明页（`/privacy/` 与 `/zh/privacy/`，独立官网 PR `#51` / `1642fc0` 已上线）
   - 已在 `site/` 新增中英双语隐私政策与数据安全声明页（零遥测、无云账号、凭据只进系统钥匙串、三类出网请求完整披露、只读 Agent `PROD` 物理不可见、`--no-default-features` 编译剔除），补齐页脚、侧边栏与 `sitemap.xml` 并修复窄屏 `.docs-sidebar` 横向溢出；`site:check`、桌面深浅色与真实 375px 视口（`scrollWidth=375`）及线上 `https://dataomni.dev/privacy/`、`https://dataomni.dev/zh/privacy/`（HTTP 200）全部核验通过。
 - [-] U3 在途外部渠道收口、Windows 签名评估与生态目录推广
