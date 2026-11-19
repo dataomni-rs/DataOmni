@@ -1,17 +1,34 @@
-# Ecosystem Directory Submission Metadata
+# Ecosystem Directory Submission Guidelines & Metadata
 
-Canonical English metadata, security-boundary descriptions, and copy-paste listing snippets for submitting DataOmni to MCP server registries and community `awesome-*` lists. Keep every claim synchronized with `rfcs/mcp-server.md`, `rfcs/agent-cli.md`, and `https://dataomni.dev/docs/mcp/`.
+Canonical English metadata, audited upstream submission rules (2026-11), hard eligibility gates, and copy-paste snippets for DataOmni. Keep every capability claim synchronized with `rfcs/mcp-server.md`, `rfcs/agent-cli.md`, `https://dataomni.dev/docs/mcp/`, and `https://dataomni.dev/privacy/`.
 
 ---
 
-## 1. MCP Server Directories (`modelcontextprotocol/servers`, Smithery, Glama)
+## 0. Pre-Submission Checklist (Before Opening Directory PRs)
+
+1. **Glama Organization Ownership File (`glama.json`)**: Because the repository lives under the `dataomni-rs` GitHub organization rather than a personal account, add a root `glama.json` listing the maintainer's personal GitHub username (`{"$schema": "https://glama.ai/mcp/schemas/server.json", "maintainers": ["<github-username>"]}`) and exempt `glama.json` in `.github/workflows/ci.yml` before claiming the server on Glama.
+2. **Submission Sequence & Star Gates**:
+   - **Zero-star channels (ready anytime)**: Search Console / IndexNow -> Glama.ai -> `punkpeye/awesome-mcp-servers` -> Official MCP Registry (`registry.modelcontextprotocol.io`) / Smithery -> `chrysler-stone/awesome-tauri-apps` & Tauri Discord `#showcase`.
+   - **Gated channels (wait until threshold is met to avoid automated closure)**:
+     - `microsoft/winget-pkgs`: Wait until initial package PR `#481999` merges before opening a `1.2.2+` update PR via `scripts/winget-manifest.sh`.
+     - `rust-unofficial/awesome-rust`: Requires **`> 50` GitHub stars** (or `> 2,000` crates.io downloads).
+     - `Homebrew/homebrew-cask`: Requires `dataomni.dev` domain age **`>= 30` days** AND GitHub stars **`>= 75`** (`>= 225` when self-submitted by a maintainer).
+
+---
+
+## 1. MCP Server Directories & Registries
+
+> **Upstream Rule Note**: `modelcontextprotocol/servers` only houses official reference implementations and **no longer accepts community PRs to its `README.md`**. Community discovery now goes through **Glama -> `punkpeye/awesome-mcp-servers`** and the **Official MCP Registry (`registry.modelcontextprotocol.io`)**.
 
 ### Basic Metadata
 
 - **Name**: DataOmni
+- **Reverse-DNS Identifier (`server.json`)**: `io.github.dataomni-rs/dataomni`
 - **Short Summary (<= 120 chars)**: Local stdio MCP server for read-only access to SQL, MongoDB, Redis, Neo4j, and Elasticsearch with OS keychain auth.
 - **Website / Documentation**: `https://dataomni.dev/docs/mcp/`
+- **Privacy & Security Policy**: `https://dataomni.dev/privacy/`
 - **Source Repository**: `https://github.com/dataomni-rs/DataOmni`
+- **Homebrew Tap (macOS Notarized)**: `brew install --cask dataomni-rs/tap/dataomni`
 - **License**: `MIT`
 - **Transport**: `stdio` (`JSON-RPC 2.0`, protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`)
 - **Runtime**: Native Rust binary (`dataomni mcp`), zero Node.js / Python / Docker wrapper required
@@ -45,7 +62,20 @@ DataOmni is an MIT-licensed native desktop database client (Tauri 2 + Rust) with
 
 ### Standard `mcpServers` Configuration
 
-macOS:
+macOS (Homebrew Cask `brew install --cask dataomni-rs/tap/dataomni`, Apple Silicon):
+
+```json
+{
+  "mcpServers": {
+    "dataomni": {
+      "command": "/opt/homebrew/bin/dataomni",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+macOS (Standalone `.dmg` in `/Applications`):
 
 ```json
 {
@@ -84,24 +114,30 @@ Windows (NSIS per-user install):
 }
 ```
 
-One-line registration for `modelcontextprotocol/servers` README (Community Servers):
+### `punkpeye/awesome-mcp-servers` Entry (`🗄️ Databases`, Alphabetical Order)
+
+> **Gate**: Submit and claim `https://github.com/dataomni-rs/DataOmni` on `https://glama.ai/mcp/servers` first so `check-glama.yml` passes. Legend icons: `🦀` Rust, `🏠` Local service, `🍎` macOS, `🪟` Windows, `🐧` Linux.
 
 ```markdown
-- **[DataOmni](https://github.com/dataomni-rs/DataOmni)** - Native desktop database client with a built-in read-only stdio MCP server across PostgreSQL, MySQL, Oracle, SQLite, DuckDB, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch, backed by OS keychain secrets and physical production profile isolation.
+- [dataomni-rs/DataOmni](https://github.com/dataomni-rs/DataOmni) 🦀 🏠 🍎 🪟 🐧 - Native desktop database client with a built-in read-only stdio MCP server across PostgreSQL, MySQL, Oracle, SQLite, DuckDB, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch, backed by OS keychain secrets and physical production isolation.
 ```
 
 ---
 
-## 2. `awesome-tauri` (`tauri-apps/awesome-tauri` -> Applications -> Developer Tools)
+## 2. Tauri Showcase (`chrysler-stone/awesome-tauri-apps` & Tauri Discord `#showcase`)
+
+> **Upstream Rule Note**: Official `tauri-apps/awesome-tauri` removed its `Applications` showcase section (now restricted to plugins, templates, integrations, and guides). Strict Tauri awesome-list linter rules still worth keeping: alphabetical order, **under 24 words**, **no leading `A`/`An`**, and **no parentheses or nested links** in the description.
 
 ```markdown
-- [DataOmni](https://github.com/dataomni-rs/DataOmni) - Native cross-platform client for PostgreSQL, MySQL, SQLite, SQL Server, Oracle, DuckDB, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch with OS keychain storage, previewed SQL transactions, schema diff, and a built-in read-only MCP server. ([Website](https://dataomni.dev))
+- [DataOmni](https://github.com/dataomni-rs/DataOmni) - Native client for SQL, MongoDB, Redis, Neo4j, and Elasticsearch with keychain credentials, previewed transactions, and read-only MCP.
 ```
 
 ---
 
-## 3. `awesome-rust` (`rust-unofficial/awesome-rust` -> Applications -> Database)
+## 3. `rust-unofficial/awesome-rust` (`Applications -> Database`)
+
+> **Hard Gate**: Requires **`> 50` GitHub stars** (or `> 2,000` crates.io downloads). Entry title **must** use `[ACCOUNT/REPO](https://github.com/ACCOUNT/REPO)` in strict alphabetical order (`dataomni-rs/DataOmni`).
 
 ```markdown
-- [DataOmni](https://github.com/dataomni-rs/DataOmni) - Cross-platform desktop database client (Tauri 2 + Rust) supporting 7 relational drivers and dedicated MongoDB, Redis, Neo4j, and Elasticsearch workspaces, with OS keychain credentials and read-only CLI/MCP interfaces. ([Website](https://dataomni.dev))
+- [dataomni-rs/DataOmni](https://github.com/dataomni-rs/DataOmni) - Cross-platform desktop database client supporting 7 relational drivers and dedicated MongoDB, Redis, Neo4j, and Elasticsearch workspaces, with OS keychain credentials and read-only CLI/MCP interfaces.
 ```

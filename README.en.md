@@ -21,8 +21,9 @@ available in English and Chinese (the language switch is at the bottom of the si
   refused port, a port that accepts and drops the connection, or credentials.
 - **Credentials stay in the system keychain** (macOS Keychain, Windows Credential Manager, Linux
   Secret Service). The configuration file only stores references.
-- **Read-only access for AI agents.** `dataomni cli` lets Claude Code and similar agents query the
-  connections you configured, read-only, without ever seeing a password.
+- **Read-only access for AI agents.** `dataomni cli` and `dataomni mcp` let Claude Code, Claude
+  Desktop, Cursor, Codex and similar agents query the non-production connections you explicitly
+  opened, read-only, without ever seeing a password.
 
 ## Compatibility
 
@@ -225,10 +226,15 @@ bun run check      # lint, typecheck, frontend tests, cargo fmt / clippy / tests
 
 ## Documentation
 
-- [User manual](docs/user-manual.md) (Chinese): connections, the editor, transactions, plans,
-  editing data and structure, import and export, ER diagrams, history, settings and shortcuts.
-- [Command-line interface design](rfcs/agent-cli.md) (Chinese).
-- Changelog: see the "更新日志" section of the [Chinese README](README.md#-更新日志).
+- **English Guides ([dataomni.dev](https://dataomni.dev))**:
+  [Quickstart](https://dataomni.dev/docs/quickstart/),
+  [Read-Only MCP Server](https://dataomni.dev/docs/mcp/),
+  [Agent CLI](https://dataomni.dev/docs/cli/),
+  [Database Guides](https://dataomni.dev/docs/databases/),
+  [Changelog](https://dataomni.dev/changelog/), and
+  [Privacy & Security](https://dataomni.dev/privacy/).
+- **Design & Chinese Manual**: [User manual](docs/user-manual.md) and
+  [CLI / MCP design RFCs](rfcs/mcp-server.md) (Chinese).
 
 ## Contributing
 

@@ -63,11 +63,14 @@
   - [x] 独立安装包 `tauri-plugin-updater` 签名替换（`edf7e96`、`v1.2.2` 运行 `44445610282`）：已接入生产 Minisign Ed25519 公钥（`52232E86440485D4`）与 `latest.json` HTTPS 端点，落地后端受控三命令（`check_app_update` / `download_app_update` / `install_app_update`，拦截包管理器与开发构建自覆盖）、`UpdateNotice` 三步显式确认与 `App` 事务/任务/快照退出守卫，以及 `scripts/build-latest-json.py` 与 `release.yml` 公证解包门禁；`v1.2.2` 正式版全套 10 项签名产物、`latest.json` 5 个平台目标 Key ID 验签、Windows `1.2.1 → 1.2.2` 覆盖升级及 `dataomni-rs/homebrew-tap`（`a44970b`）全部验收通过。
 - [x] U2 官网双语隐私与安全合规声明页（`/privacy/` 与 `/zh/privacy/`，独立官网 PR `#51` / `1642fc0` 已上线）
   - 已在 `site/` 新增中英双语隐私政策与数据安全声明页（零遥测、无云账号、凭据只进系统钥匙串、三类出网请求完整披露、只读 Agent `PROD` 物理不可见、`--no-default-features` 编译剔除），补齐页脚、侧边栏与 `sitemap.xml` 并修复窄屏 `.docs-sidebar` 横向溢出；`site:check`、桌面深浅色与真实 375px 视口（`scrollWidth=375`）及线上 `https://dataomni.dev/privacy/`、`https://dataomni.dev/zh/privacy/`（HTTP 200）全部核验通过。
-- [-] U3 在途外部渠道收口、Windows 签名评估与生态目录推广
-  - [ ] WinGet（已提 PR：`microsoft/winget-pkgs#481999` 等待上游人工合入）：合入后运行 `scripts/winget-manifest.sh` 提交最新稳定版，分别在 `README.md` / `README.en.md` 与 `site/`（独立 PR）补上 `winget install DataOmni.DataOmni`，并在下次发版时对齐 `src-tauri/tauri.conf.json` 的 `bundle.publisher`。
-  - [ ] 上游 `Homebrew/homebrew-cask`：待主仓星标（≥75 / 自提 ≥225）且 `dataomni.dev` 域名注册满 30 天后，将 `packaging/homebrew/Casks/dataomni.rb` 原样提交至官方核心库。
+- [-] U3 在途外部渠道收口、官网 SEO/GEO 与生态目录推广
+  - [x] `HOMEBREW_TAP_TOKEN` 跨仓自动同步闭环（2026-11-19，运行 `44457288934` 实测幂等通过；本机脚本已归档 `~/.private_keys/`）。
+  - [ ] WinGet（已提首单 PR：`microsoft/winget-pkgs#481999` 等待上游人工合入）：首单未合入前不重复开第二单；合入后运行 `scripts/winget-manifest.sh` 提交最新稳定版，分别在 `README.md` / `README.en.md` 与 `site/`（独立 PR）补上 `winget install DataOmni.DataOmni`，并在下次发版时对齐 `src-tauri/tauri.conf.json` 的 `bundle.publisher`。
+  - [ ] 上游 `Homebrew/homebrew-cask`：待 `dataomni.dev` 域名注册满 30 天且主仓星标达标（他人提 ≥75 / 维护者自提 ≥225）后，将 `packaging/homebrew/Casks/dataomni.rb` 原样提交至官方核心库。
   - [ ] Windows 代码签名评估：结合 Windows 用户反馈评估接入 Azure Trusted Signing 云端签名消除 SmartScreen 首次运行提示。
-  - [ ] 生态目录投稿：按 `packaging/directories/README.md` 推进 `modelcontextprotocol/servers`、Smithery、Glama、`awesome-tauri`、`awesome-rust` 及搜索引擎收录。
+  - [ ] 生态目录按准入门槛分批投稿（规范与合规文案已归档 `packaging/directories/README.md`，暂缓对外提交）：
+    - 零星标渠道（准备投递前先补根目录 `glama.json` 认领 `dataomni-rs` 组织仓库）：`Glama.ai` → `punkpeye/awesome-mcp-servers`（替代已停收社区 README PR 的 `modelcontextprotocol/servers`）、官方 MCP Registry（`registry.modelcontextprotocol.io`）/ Smithery、`chrysler-stone/awesome-tauri-apps`（替代已移除应用区的 `tauri-apps/awesome-tauri`）；
+    - 星标门禁渠道：待主仓 `> 50 stars` 后按 `[dataomni-rs/DataOmni]` 规范提交 `rust-unofficial/awesome-rust`。
 
 ### 第四阶段（M）：可选驱动解耦、国产库扩展与商店沙盒变体（按条件触发）
 
