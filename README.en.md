@@ -199,8 +199,10 @@ First-launch and platform notes:
 The Oracle Instant Client (Basic Light) is bundled, so Oracle works without installing anything.
 macOS on Intel is not built yet. On Windows on ARM, the x64 package runs under emulation.
 
-The app checks for new versions and tells you when one is out; it does not install updates by
-itself.
+The app checks for new versions at most once a day and never downloads or installs updates silently:
+standalone macOS (`.dmg`) and Windows (`.msi` / `-setup.exe`) installs (`v1.2.2`+) offer user-confirmed
+Ed25519-signed in-app upgrades, while Homebrew Cask installs provide a one-click
+`brew upgrade --cask dataomni` copy button.
 
 ## Build from source
 

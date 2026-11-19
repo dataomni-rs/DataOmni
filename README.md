@@ -444,10 +444,10 @@ Windows 暂无代码签名证书。Linux 包要求 glibc 2.34 以上（Ubuntu 22
 安装包在 [Releases](https://github.com/dataomni-rs/DataOmni/releases)。
 
 - **macOS（Apple Silicon，macOS 12+）**：
-  - Homebrew：`brew install --cask dataomni-rs/tap/dataomni`（同时把内置命令行软链到 `$(brew --prefix)/bin/dataomni`）
-  - 手动安装：下载 `DataOmni_<版本>_aarch64.dmg` 拖入「应用程序」即可直接打开（已签名公证，无需手动清除隔离标记）。
+  - Homebrew：`brew install --cask dataomni-rs/tap/dataomni`（同时把内置命令行软链到 `$(brew --prefix)/bin/dataomni`；有新版本时应用内横幅提供一键复制 `brew upgrade --cask dataomni`）
+  - 手动安装：下载 `DataOmni_<版本>_aarch64.dmg` 拖入「应用程序」即可直接打开（已签名公证，无需手动清除隔离标记；`1.2.2` 起支持经 Ed25519 签名校验的应用内确认升级）。
   - 从 `1.2.0` 及更早的未签名版本首次升上来时，由于代码身份从无签名切换为固定团队签名，第一次读取旧版存过的钥匙串密码会询问一次授权（输入开机密码点「始终允许」）；此后同团队签名的后续升级不再重复询问
-- **Windows**：暂无代码签名证书，SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」
+- **Windows**：暂无代码签名证书，SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」；已安装版本（`1.2.2` 起）支持经 Ed25519 签名校验的应用内确认升级
 - **Linux**：`sudo apt install ./DataOmni_*.deb` 或 `sudo dnf install ./DataOmni-*.rpm`，依赖（含 Oracle 要的 libaio）自动带上
 
 #### 从源码构建
@@ -594,6 +594,12 @@ bun install
 ### 未发布
 
 （暂无）
+
+### v1.2.2（2026-11-19）
+
+- 应用内签名平滑更新与安装渠道防冲突：独立安装包（macOS `.dmg`、Windows `.msi` / `-setup.exe`）接入 `tauri-plugin-updater` 与 Minisign Ed25519 签名校验（`latest.json`），采用「横幅点升级 → 弹窗查看说明并下载验签 → 人工确认立即重启安装」三步显式交互，绝不后台静默下载或强制重启，重启前自动串联未提交事务确认、活跃导入导出提醒与草稿落盘；自动识别 Homebrew Cask 安装副本并提供一键复制 `brew upgrade --cask dataomni`，拦截包管理器副本（Homebrew / `.deb` / `.rpm`）自覆盖，见 `rfcs/auto-update.md`。
+- 可选驱动编译期解耦：将 Oracle（ODPI-C 动态库驱动）拆分为默认开启的 `oracle` Cargo feature（`default = ["ai", "oracle"]`），支持 `--no-default-features` 构建不依赖外部动态库的精简二进制，并在新建连接表单按编译期实际编入的驱动动态展示。
+- 发布流水线与隐私合规：GitHub Actions 全量升级至原生 Node 24 主版本（清零弃用告警），新增正式版公开后自动复核公证票据与 `brew style` 并同步 `dataomni-rs/homebrew-tap` 的工作流；官网上线中英双语隐私与数据安全声明页（`/privacy/`、`/zh/privacy/`）。
 
 ### v1.2.1（2026-11-18）
 
