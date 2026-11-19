@@ -5,7 +5,9 @@ mod render;
 use content::{Locale, EN_COPY, ZH_COPY};
 use docs::{doc_page, ALL_DOC_SLUGS};
 use render::{
-  render_doc_page, render_not_found, render_page, render_robots_txt, render_sitemap_xml,
+  render_doc_page, render_docs_hub_redirect, render_llms_full_txt, render_llms_txt,
+  render_not_found, render_page, render_robots_txt, render_sitemap_xml, INDEXNOW_KEY,
+  ROBOTS_INDEX_DIRECTIVE,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,23 +15,38 @@ use std::process::ExitCode;
 
 const CUSTOM_DOMAIN: &str = "dataomni.dev\n";
 const RELEASE_VERSION_ENV: &str = "DATAOMNI_SITE_RELEASE_VERSION";
+const RELEASED_AT_ENV: &str = "DATAOMNI_SITE_RELEASED_AT";
 
-fn extract_release_version(config_text: &str) -> Result<String, String> {
+fn extract_json_string_field<'a>(config_text: &'a str, field_name: &str) -> Option<&'a str> {
+  let quoted_key = format!("\"{field_name}\"");
   for line in config_text.lines() {
     let trimmed = line.trim();
-    let Some(rest) = trimmed.strip_prefix("\"version\"") else {
+    let Some(rest) = trimmed.strip_prefix(&quoted_key) else {
       continue;
     };
     let Some(after_colon) = rest.trim_start().strip_prefix(':') else {
       continue;
     };
     let candidate = after_colon.trim().trim_end_matches(',').trim();
-    let Some(unquoted) = candidate.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
-      continue;
-    };
-    return parse_stable_version(unquoted);
+    if let Some(unquoted) = candidate.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+      return Some(unquoted);
+    }
   }
-  Err("missing \"version\" field in site/release.json".to_string())
+  None
+}
+
+fn extract_release_version(config_text: &str) -> Result<String, String> {
+  let Some(unquoted) = extract_json_string_field(config_text, "version") else {
+    return Err("missing \"version\" field in site/release.json".to_string());
+  };
+  parse_stable_version(unquoted)
+}
+
+fn extract_released_at(config_text: &str) -> Result<String, String> {
+  let Some(unquoted) = extract_json_string_field(config_text, "released_at") else {
+    return Err("missing \"released_at\" field in site/release.json".to_string());
+  };
+  parse_iso_date(unquoted)
 }
 
 fn parse_stable_version(raw: &str) -> Result<String, String> {
@@ -39,6 +56,37 @@ fn parse_stable_version(raw: &str) -> Result<String, String> {
   } else {
     Err(format!("invalid stable release version (prereleases not allowed on site): {raw}"))
   }
+}
+
+fn parse_iso_date(raw: &str) -> Result<String, String> {
+  let date = raw.trim();
+  if is_iso_date(date) {
+    Ok(date.to_string())
+  } else {
+    Err(format!("invalid ISO release date (expected YYYY-MM-DD): {raw}"))
+  }
+}
+
+fn is_iso_date(date: &str) -> bool {
+  let mut parts = date.split('-');
+  let (Some(year), Some(month), Some(day), None) =
+    (parts.next(), parts.next(), parts.next(), parts.next())
+  else {
+    return false;
+  };
+  if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+    return false;
+  }
+  let Ok(y) = year.parse::<u16>() else {
+    return false;
+  };
+  let Ok(m) = month.parse::<u8>() else {
+    return false;
+  };
+  let Ok(d) = day.parse::<u8>() else {
+    return false;
+  };
+  (2025..=2099).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d)
 }
 
 fn is_stable_semver(version: &str) -> bool {
@@ -60,6 +108,16 @@ fn resolve_release_version(repo_root: &Path, env_override: Option<&str>) -> Resu
   let release_json = fs::read_to_string(&release_path)
     .map_err(|err| format!("failed to read {}: {err}", release_path.display()))?;
   extract_release_version(&release_json)
+}
+
+fn resolve_released_at(repo_root: &Path, env_override: Option<&str>) -> Result<String, String> {
+  if let Some(raw) = env_override.map(str::trim).filter(|value| !value.is_empty()) {
+    return parse_iso_date(raw);
+  }
+  let release_path = repo_root.join("site/release.json");
+  let release_json = fs::read_to_string(&release_path)
+    .map_err(|err| format!("failed to read {}: {err}", release_path.display()))?;
+  extract_released_at(&release_json)
 }
 
 fn copy_checked(src: &Path, dst: &Path) -> Result<(), String> {
@@ -142,7 +200,23 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     anchor_scan = &after[end + 1..];
   }
 
-  if page_name != "404.html" {
+  let is_utility_page = matches!(page_name, "404.html" | "docs/index.html" | "zh/docs/index.html");
+  if is_utility_page {
+    if !html.contains("<meta name=\"robots\" content=\"noindex") {
+      return Err(format!("{page_name}: utility/redirect page must declare robots noindex"));
+    }
+    if html.contains("max-image-preview:large") {
+      return Err(format!("{page_name}: noindex utility page must not declare max-image-preview"));
+    }
+  } else {
+    let expected_robots = format!("<meta name=\"robots\" content=\"{ROBOTS_INDEX_DIRECTIVE}\">");
+    if !html.contains(&expected_robots) {
+      return Err(format!("{page_name}: missing canonical robots directive `{expected_robots}`"));
+    }
+    if html.contains("noindex") {
+      return Err(format!("{page_name}: indexed page must not contain `noindex`"));
+    }
+
     let Some(title_start) = html.find("<title>") else {
       return Err(format!("{page_name}: missing <title>"));
     };
@@ -179,6 +253,8 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     "data-deferred-src=\"/",
     "data-deferred-srcset=\"/",
     "href=\"/favicon.ico",
+    "href=\"/llms.txt",
+    "href=\"/llms-full.txt",
     "href=\"/assets/",
     "href=\"/images/",
   ] {
@@ -231,6 +307,8 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     };
     let raw_href = &after[..end];
     if !raw_href.starts_with("/favicon.ico")
+      && !raw_href.starts_with("/llms.txt")
+      && !raw_href.starts_with("/llms-full.txt")
       && !raw_href.starts_with("/assets/")
       && !raw_href.starts_with("/images/")
     {
@@ -274,7 +352,9 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
 
 pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
   let env_override = std::env::var(RELEASE_VERSION_ENV).ok();
+  let env_date_override = std::env::var(RELEASED_AT_ENV).ok();
   let version = resolve_release_version(repo_root, env_override.as_deref())?;
+  let released_at = resolve_released_at(repo_root, env_date_override.as_deref())?;
 
   if out_dir.exists() {
     fs::remove_dir_all(out_dir)
@@ -308,17 +388,23 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
     copy_checked(&site_dir.join(webp_rel), &out_dir.join(webp_rel))?;
   }
 
-  let en_html =
-    render_page(&EN_COPY, &version).map_err(|err| format!("render EN failed: {err}"))?;
-  let zh_html =
-    render_page(&ZH_COPY, &version).map_err(|err| format!("render ZH failed: {err}"))?;
+  let en_html = render_page(&EN_COPY, &version, &released_at)
+    .map_err(|err| format!("render EN failed: {err}"))?;
+  let zh_html = render_page(&ZH_COPY, &version, &released_at)
+    .map_err(|err| format!("render ZH failed: {err}"))?;
   let not_found_html = render_not_found();
+  let en_docs_hub_html = render_docs_hub_redirect(Locale::En);
+  let zh_docs_hub_html = render_docs_hub_redirect(Locale::Zh);
+  let llms_txt = render_llms_txt(&version, &released_at)
+    .map_err(|err| format!("render llms.txt failed: {err}"))?;
+  let llms_full_txt = render_llms_full_txt(&version, &released_at)
+    .map_err(|err| format!("render llms-full.txt failed: {err}"))?;
 
   let mut generated_docs: Vec<(&'static str, String)> = Vec::with_capacity(ALL_DOC_SLUGS.len() * 2);
   for slug in ALL_DOC_SLUGS {
     for locale in [Locale::En, Locale::Zh] {
       let rel = slug.output_rel_html(locale);
-      let html = render_doc_page(doc_page(*slug, locale), &version)
+      let html = render_doc_page(doc_page(*slug, locale), &version, &released_at)
         .map_err(|err| format!("render {rel} failed: {err}"))?;
       write_checked(&out_dir.join(rel), &html)?;
       generated_docs.push((rel, html));
@@ -327,14 +413,21 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
 
   write_checked(&out_dir.join("index.html"), &en_html)?;
   write_checked(&out_dir.join("zh/index.html"), &zh_html)?;
+  write_checked(&out_dir.join("docs/index.html"), &en_docs_hub_html)?;
+  write_checked(&out_dir.join("zh/docs/index.html"), &zh_docs_hub_html)?;
   write_checked(&out_dir.join("404.html"), not_found_html)?;
   write_checked(&out_dir.join("CNAME"), CUSTOM_DOMAIN)?;
   write_checked(&out_dir.join(".nojekyll"), "")?;
   write_checked(&out_dir.join("robots.txt"), &render_robots_txt())?;
-  write_checked(&out_dir.join("sitemap.xml"), &render_sitemap_xml())?;
+  write_checked(&out_dir.join("sitemap.xml"), &render_sitemap_xml(&released_at))?;
+  write_checked(&out_dir.join("llms.txt"), &llms_txt)?;
+  write_checked(&out_dir.join("llms-full.txt"), &llms_full_txt)?;
+  write_checked(&out_dir.join(format!("{INDEXNOW_KEY}.txt")), INDEXNOW_KEY)?;
 
   verify_html_invariants("index.html", &en_html, out_dir)?;
   verify_html_invariants("zh/index.html", &zh_html, out_dir)?;
+  verify_html_invariants("docs/index.html", &en_docs_hub_html, out_dir)?;
+  verify_html_invariants("zh/docs/index.html", &zh_docs_hub_html, out_dir)?;
   verify_html_invariants("404.html", not_found_html, out_dir)?;
   for (rel, html) in &generated_docs {
     verify_html_invariants(rel, html, out_dir)?;
@@ -415,15 +508,32 @@ mod tests {
   }
 
   #[test]
+  fn parses_iso_release_date_and_rejects_malformed_or_missing_values() {
+    let valid = "{\n  \"version\": \"1.2.2\",\n  \"released_at\": \"2026-11-19\"\n}\n";
+    assert_eq!(extract_released_at(valid).unwrap(), "2026-11-19");
+    assert!(extract_released_at("{\n  \"version\": \"1.2.2\"\n}\n").is_err());
+    assert!(parse_iso_date("2026/11/19").is_err());
+    assert!(parse_iso_date("2026-13-01").is_err());
+    assert!(parse_iso_date("2026-11-00").is_err());
+    assert!(parse_iso_date("2024-12-31").is_err());
+  }
+
+  #[test]
   fn builds_complete_site_and_verifies_every_asset_and_cname() {
     let repo_root = repo_root_from_manifest().unwrap();
     let temp_dir = std::env::temp_dir().join(format!("dataomni-site-test-{}", std::process::id()));
     let version = build_site(&repo_root, &temp_dir).unwrap();
+    let released_at = resolve_released_at(&repo_root, None).unwrap();
 
     assert_eq!(fs::read_to_string(temp_dir.join("CNAME")).unwrap(), "dataomni.dev\n");
     assert!(temp_dir.join(".nojekyll").is_file());
     assert!(temp_dir.join("robots.txt").is_file());
     assert!(temp_dir.join("sitemap.xml").is_file());
+    assert!(temp_dir.join("llms.txt").is_file());
+    assert!(temp_dir.join("llms-full.txt").is_file());
+    assert!(temp_dir.join(format!("{INDEXNOW_KEY}.txt")).is_file());
+    assert!(temp_dir.join("docs/index.html").is_file());
+    assert!(temp_dir.join("zh/docs/index.html").is_file());
     assert!(temp_dir.join("favicon.ico").is_file());
     assert!(temp_dir.join("assets/favicon-96.png").is_file());
     assert!(temp_dir.join("assets/og-en.png").is_file());
@@ -432,11 +542,25 @@ mod tests {
     let en = fs::read_to_string(temp_dir.join("index.html")).unwrap();
     let zh = fs::read_to_string(temp_dir.join("zh/index.html")).unwrap();
     let not_found = fs::read_to_string(temp_dir.join("404.html")).unwrap();
+    let docs_hub_en = fs::read_to_string(temp_dir.join("docs/index.html")).unwrap();
+    let docs_hub_zh = fs::read_to_string(temp_dir.join("zh/docs/index.html")).unwrap();
     let sitemap = fs::read_to_string(temp_dir.join("sitemap.xml")).unwrap();
+    let llms = fs::read_to_string(temp_dir.join("llms.txt")).unwrap();
+    let llms_full = fs::read_to_string(temp_dir.join("llms-full.txt")).unwrap();
+    let indexnow = fs::read_to_string(temp_dir.join(format!("{INDEXNOW_KEY}.txt"))).unwrap();
 
+    assert_eq!(indexnow, INDEXNOW_KEY);
     assert!(not_found.contains("<meta name=\"robots\" content=\"noindex\">"));
+    assert!(docs_hub_en.contains("href=\"https://dataomni.dev/docs/quickstart/\""));
+    assert!(docs_hub_zh.contains("href=\"https://dataomni.dev/zh/docs/quickstart/\""));
     assert!(sitemap.contains("xmlns:xhtml=\"http://www.w3.org/1999/xhtml\""));
     assert!(sitemap.contains("xmlns:image=\"http://www.google.com/schemas/sitemap-image/1.1\""));
+    assert!(sitemap.contains(&format!("<lastmod>{released_at}</lastmod>")));
+    assert!(!sitemap.contains("<lastmod>2026-11-17</lastmod>"));
+    assert!(llms.contains(&format!("`v{version}` ({released_at})")));
+    assert!(llms.contains("https://dataomni.dev/llms-full.txt"));
+    assert!(llms_full.contains("# Read-only MCP server (`https://dataomni.dev/docs/mcp/`)"));
+    assert!(llms_full.contains("brew install --cask dataomni-rs/tap/dataomni"));
     assert!(
       sitemap.contains("<image:loc>https://dataomni.dev/assets/shots/en/mongodb.webp</image:loc>")
     );
@@ -455,10 +579,13 @@ mod tests {
     // Multi-tool MCP presets, static syntax tokens, structured data, and upgraded cards/tables
     for html in [&en, &zh] {
       assert!(html.contains("sizes=\"96x96\" href=\"/assets/favicon-96.png\""));
+      assert!(html.contains("\"@type\":\"Organization\""));
       assert!(html.contains("\"@type\":\"WebSite\""));
       assert!(html.contains("\"@type\":\"SoftwareApplication\""));
       assert!(html.contains("\"@type\":\"FAQPage\""));
       assert!(html.contains("\"@type\":\"ImageObject\""));
+      assert!(html.contains("max-image-preview:large"));
+      assert!(html.contains("href=\"/llms.txt\""));
       assert!(html.contains("og:image:width\" content=\"1200\""));
       assert!(html.contains("og:image:height\" content=\"630\""));
       assert!(html.contains("<noscript><img class=\"workbench-shot\""));
@@ -470,6 +597,15 @@ mod tests {
       assert!(html.contains("gemini mcp add dataomni"));
       assert!(html.contains("mcpServers"));
     }
+
+    // Reverse check: stripping max-image-preview:large or adding noindex to indexed page must fail
+    let missing_robots =
+      en.replace(&format!("<meta name=\"robots\" content=\"{ROBOTS_INDEX_DIRECTIVE}\">"), "");
+    assert!(verify_html_invariants("index.html", &missing_robots, &temp_dir).is_err());
+    let accidental_noindex = en.replace(ROBOTS_INDEX_DIRECTIVE, "noindex, follow");
+    assert!(verify_html_invariants("index.html", &accidental_noindex, &temp_dir).is_err());
+    let broken_llms_ref = en.replace("href=\"/llms.txt\"", "href=\"/llms-missing.txt\"");
+    assert!(verify_html_invariants("index.html", &broken_llms_ref, &temp_dir).is_err());
 
     // Reverse check: referencing a missing image, WebP source, or OG card must fail verify_html_invariants
     let broken = en.replace("/images/en/overview.png", "/images/en/missing.png");
@@ -534,8 +670,17 @@ mod tests {
       let path = temp_dir.join(rel_html);
       assert!(path.is_file(), "missing generated page {rel_html}");
       let html = fs::read_to_string(&path).unwrap();
+      assert!(html.contains("\"@type\":\"Organization\""), "{rel_html}: missing Organization");
+      assert!(
+        html.contains("\"@type\":\"SoftwareApplication\""),
+        "{rel_html}: missing SoftwareApplication anchor"
+      );
       assert!(html.contains("\"@type\":\"BreadcrumbList\""), "{rel_html}: missing BreadcrumbList");
-      assert!(html.contains("\"@type\":\"TechArticle\""), "{rel_html}: missing TechArticle");
+      if rel_html.contains("privacy/") {
+        assert!(html.contains("\"@type\":\"WebPage\""), "{rel_html}: privacy should use WebPage");
+      } else {
+        assert!(html.contains("\"@type\":\"TechArticle\""), "{rel_html}: missing TechArticle");
+      }
       assert!(html.contains("aria-current=\"page\""), "{rel_html}: missing aria-current");
       assert!(
         html.contains(&format!("href=\"{alternate_href}\"")),
