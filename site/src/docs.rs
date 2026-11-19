@@ -1163,6 +1163,21 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-2-2",
+    toc_label: "v1.2.2 (2026-11-19)",
+    heading: "v1.2.2 — 2026-11-19",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Delivers Ed25519-signed in-app upgrades with install-channel awareness, optional compile-time driver decoupling, and bilingual privacy & compliance documentation.",
+      ),
+      DocBlock::Bullets(&[
+        "Ed25519-signed in-app upgrades & channel guardrails: standalone macOS (.dmg) and Windows (.msi / -setup.exe) installs now support user-confirmed in-app upgrades via tauri-plugin-updater and latest.json (three explicit steps: banner Upgrade -> review notes & verify Ed25519 signature -> Restart & install now, never silent background download or forced restart), automatically guarding open transactions, active imports/exports, and SQL drafts; Homebrew Cask installs expose a one-click brew upgrade --cask dataomni copy button while blocking package-managed self-overwrite.",
+        "Compile-time Oracle driver feature split: decoupled the ODPI-C Oracle driver behind a default-enabled oracle Cargo feature (default = [\"ai\", \"oracle\"]), enabling zero-dynamic-library minimal builds with --no-default-features while preserving full cross-version connections.json compatibility.",
+        "Release automation & privacy transparency: upgraded all GitHub Actions workflows to native Node 24 majors (zero deprecation warnings), added automated notarized Homebrew Tap verification on release publish, and launched bilingual Privacy Policy & Security Architecture pages (/privacy/ and /zh/privacy/).",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-2-1",
     toc_label: "v1.2.1 (2026-11-18)",
     heading: "v1.2.1 — 2026-11-18",
@@ -1245,7 +1260,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade compatibility notes for DataOmni v1.2.0, v1.1.0, and v1.0.0 on macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade compatibility notes for DataOmni v1.2.2, v1.2.1, v1.1.0, and v1.0.0 on macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1254,6 +1269,21 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-2-2",
+    toc_label: "v1.2.2（2026-11-19）",
+    heading: "v1.2.2 — 2026-11-19",
+    blocks: &[
+      DocBlock::Paragraph(
+        "正式补齐经 Ed25519 签名校验的应用内平滑升级与安装渠道防冲突引导、可选驱动编译期解耦，以及双语隐私安全合规声明页。",
+      ),
+      DocBlock::Bullets(&[
+        "应用内签名平滑升级与渠道识别：macOS（.dmg 独立安装）与 Windows（.msi / -setup.exe）接入 tauri-plugin-updater 与 Minisign Ed25519 签名校验（latest.json），采用「横幅点升级 → 查看说明并下载验签 → 人工确认立即重启安装」三步显式交互，绝不后台静默下载或强制重启，并在重启前自动串联未提交事务确认、活跃导入导出提醒与草稿落盘；Homebrew Cask 副本自动提供一键复制 brew upgrade --cask dataomni，拦截包管理器副本自覆盖。",
+        "Oracle 驱动 Cargo feature 解耦：将 ODPI-C 动态库驱动拆分为默认开启的 oracle 特性（default = [\"ai\", \"oracle\"]），支持 --no-default-features 构建不依赖外部动态库的精简二进制，同时保持跨版本 connections.json 无损读写兼容。",
+        "发布流水线提效与隐私合规：GitHub Actions 全量升至原生 Node 24 主版本（0 弃用告警），新增正式版公开后自动复核公证票据与 brew style 的 Tap 同步工作流，并上线双语隐私政策与数据安全声明页（/privacy/ 与 /zh/privacy/）。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-2-1",
     toc_label: "v1.2.1（2026-11-18）",
@@ -1337,7 +1367,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.2.0、v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖三平台。",
+  meta_description: "DataOmni v1.2.2、v1.2.1、v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖三平台。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
@@ -1419,9 +1449,9 @@ const EN_PRIVACY_SECTIONS: &[DocSection] = &[
             "Initiated strictly when you test, open, or query a connection.",
           ],
           &[
-            "New-version check",
-            "GET https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest (at most once per 24 hours).",
-            "Sends only standard HTTP headers and User-Agent (DataOmni/<version>), zero device IDs. Toggle off anytime in Settings -> About & Diagnostics.",
+            "New-version check & user-confirmed upgrade",
+            "GET https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest (at most once per 24 hours), plus latest.json and signed installer download from github.com/dataomni-rs/DataOmni/releases only when you click Upgrade.",
+            "Sends only standard HTTP headers and User-Agent (DataOmni/<version>), zero device IDs; verifies Ed25519 signature before staging. Toggle off anytime in Settings -> About & Diagnostics.",
           ],
           &[
             "Optional AI schema design",
@@ -1472,7 +1502,7 @@ static EN_PRIVACY: DocPage = DocPage {
   meta_description: "DataOmni collects zero telemetry, requires no account, stores passwords only in your OS keychain, isolates PROD from AI agents, and connects directly to databases.",
   breadcrumb_group: "Privacy & Security",
   title: "Privacy Policy & Security Architecture",
-  lead: "Last updated: November 18, 2026. DataOmni is built so your credentials, queries, and query results stay strictly between your workstation and your databases.",
+  lead: "Last updated: November 19, 2026. DataOmni is built so your credentials, queries, and query results stay strictly between your workstation and your databases.",
   toc_heading: "On this page",
   sections: EN_PRIVACY_SECTIONS,
 };
@@ -1547,9 +1577,9 @@ const ZH_PRIVACY_SECTIONS: &[DocSection] = &[
             "仅在您主动测试连接、打开工作区或执行查询时建立。",
           ],
           &[
-            "新版本更新检查",
-            "GET https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest（最多每 24 小时一次）。",
-            "仅发送标准请求头与版本号（DataOmni/<version>），不含任何设备标识；可在「设置 → 关于与诊断」随时关闭。",
+            "新版本检查与确认升级",
+            "GET https://api.github.com/repos/dataomni-rs/DataOmni/releases/latest（最多每 24 小时一次）；仅当您主动点击「升级」时拉取同仓库 Releases 下的 latest.json 与签名安装包。",
+            "仅发送标准请求头与版本号（DataOmni/<version>），不含任何设备标识，且强制校验 Ed25519 签名；可在「设置 → 关于与诊断」随时关闭。",
           ],
           &[
             "可选 AI 辅助建表设计",
@@ -1600,7 +1630,7 @@ static ZH_PRIVACY: DocPage = DocPage {
   meta_description: "DataOmni 坚持零遥测、无云端账号与数据库直连架构：口令与密钥仅存操作系统钥匙串，生产环境对 AI Agent 物理不可见，可选版本检查与 AI 模块均可关闭或编译期物理剔除。",
   breadcrumb_group: "隐私与安全",
   title: "隐私政策与数据安全声明",
-  lead: "最后更新：2026 年 11 月 18 日。DataOmni 从架构层确保数据库凭据、SQL 脚本与查询结果始终只留在您的工作站与目标数据库之间。",
+  lead: "最后更新：2026 年 11 月 19 日。DataOmni 从架构层确保数据库凭据、SQL 脚本与查询结果始终只留在您的工作站与目标数据库之间。",
   toc_heading: "本页目录",
   sections: ZH_PRIVACY_SECTIONS,
 };
