@@ -36,6 +36,9 @@ required-features = ["oracle"]
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# 关掉默认的 `zip`（Tauri v1 `.msi.zip` 遗留兼容）：Tauri v2 直接验签 `.app.tar.gz` / `.msi` / `-setup.exe`，
+# 不引入带解压漏洞告警的 `zip 4.x`（RUSTSEC-2026-0367 等）
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 indexmap = { version = "2", features = ["serde"] }
@@ -115,6 +118,8 @@ tauri-plugin-log = "2"
 log = "0.4"
 
 [dev-dependencies]
+# `tauri-plugin-updater` 使用同一版本的 `minisign-verify` 校验 Ed25519 签名；直接引用供篡改反向验证单测断言
+minisign-verify = "0.2"
 # 只为在测试里**造**一把带口令的私钥：russh 依赖的 ssh-key 默认不开
 # `rand_core`，没有它就没法生成密钥，于是「有口令的私钥」这条门要么依赖
 # 仓库里的密钥文件（扫描器会报），要么依赖外部的 ssh-keygen（装没装不一定）。

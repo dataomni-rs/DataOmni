@@ -387,51 +387,63 @@ function App() {
   }, [sessionManager, mayLeaveTransaction]);
 
   const { ask: askToClose, prompt: closePrompt } = useConfirmPrompt();
+  const exitingRef = useRef(false);
+
+  const prepareForAppExit = useCallback(async (): Promise<boolean> => {
+    if (exitingRef.current) {
+      return false;
+    }
+
+    // 退出或重启升级前先问事务：进程一退，数据库会把没提交的整个回滚掉
+    if (!(await mayLeaveTransaction())) {
+      return false;
+    }
+
+    // 后台任务跑在这个进程里，退出就停在半路：分批导入前面的批次已经提交，
+    // 下次打开任务中心是空的，看不出表里只进了一半
+    const interrupted = closeInterruption(useTaskStore.getState().tasks, translateNow);
+    if (interrupted) {
+      const confirmed = await askToClose({
+        title: translateNow('app.closeWithTasks.title'),
+        message: translateNow(
+          interrupted.hasImport ? 'app.closeWithTasks.import' : 'app.closeWithTasks.other',
+          { count: interrupted.count, tasks: interrupted.titles.join(translateNow('common.listSeparator')) }
+        ),
+        confirmLabel: translateNow('app.closeWithTasks.confirm'),
+        destructive: true
+      });
+      if (!confirmed) {
+        return false;
+      }
+    }
+
+    exitingRef.current = true;
+    snapshotWatcher.current?.flush();
+
+    try {
+      await sessionManager.shutdown();
+      return true;
+    } catch (error) {
+      exitingRef.current = false;
+      console.error('关闭数据库会话失败，应用退出已取消:', error);
+      return false;
+    }
+  }, [sessionManager, mayLeaveTransaction, askToClose]);
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
-    let closing = false;
     let unlisten: (() => void) | undefined;
 
     void appWindow.onCloseRequested(async (event) => {
       event.preventDefault();
-
-      if (closing) {
+      if (!(await prepareForAppExit())) {
         return;
       }
-
-      // 退出前先问事务：窗口一关，数据库会把没提交的整个回滚掉
-      if (!(await mayLeaveTransaction())) {
-        return;
-      }
-
-      // 后台任务跑在这个进程里，窗口一关就停在半路：分批导入前面的批次已经提交，
-      // 下次打开任务中心是空的，看不出表里只进了一半
-      const interrupted = closeInterruption(useTaskStore.getState().tasks, translateNow);
-      if (interrupted) {
-        const confirmed = await askToClose({
-          title: translateNow('app.closeWithTasks.title'),
-          message: translateNow(
-            interrupted.hasImport ? 'app.closeWithTasks.import' : 'app.closeWithTasks.other',
-            { count: interrupted.count, tasks: interrupted.titles.join(translateNow('common.listSeparator')) }
-          ),
-          confirmLabel: translateNow('app.closeWithTasks.confirm'),
-          destructive: true
-        });
-        if (!confirmed) {
-          return;
-        }
-      }
-
-      closing = true;
-      snapshotWatcher.current?.flush();
-
       try {
-        await sessionManager.shutdown();
         await appWindow.destroy();
       } catch (error) {
-        closing = false;
-        console.error('关闭数据库会话失败，应用退出已取消:', error);
+        exitingRef.current = false;
+        console.error('销毁应用窗口失败:', error);
       }
     }).then((cleanup) => {
       unlisten = cleanup;
@@ -440,7 +452,7 @@ function App() {
     return () => {
       unlisten?.();
     };
-  }, [sessionManager, mayLeaveTransaction, askToClose]);
+  }, [prepareForAppExit]);
 
   useEffect(() => {
     const handleOffline = () => {
@@ -1128,7 +1140,7 @@ function App() {
             closedTabCount={closedTabs.length}
           />
         )}
-        <UpdateNotice />
+        <UpdateNotice onBeforeRestart={prepareForAppExit} />
         {/* 打开文件失败、从命令面板连接失败都报在标签栏底下：动作不是从某个标签里发起的，
             提示不该挤进某个标签的内容里。命令面板那一路此前没人渲染它的错误，失败时什么也不说 */}
         {(fileError ?? connectError) && (

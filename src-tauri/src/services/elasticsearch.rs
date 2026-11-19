@@ -336,7 +336,11 @@ mod tests {
   use super::*;
 
   fn pool(base: &str) -> EsPool {
-    EsPool { client: Client::new(), base: Url::parse(base).unwrap(), auth: EsAuth::Anonymous }
+    EsPool {
+      client: Client::builder().no_proxy().build().unwrap(),
+      base: Url::parse(base).unwrap(),
+      auth: EsAuth::Anonymous,
+    }
   }
 
   /// 本机起一个 HTTP 服务，回答比上限多一截：读到上限就停、报错，不是整份读完再说

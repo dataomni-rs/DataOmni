@@ -1,14 +1,31 @@
 /**
- * 新版本提示：启动时最多每天问一次 GitHub 的 latest release，有更新的就在标签栏下面提一句。
- *
- * 只提示、不下载：应用内替换要长期保管一把更新签名私钥（见 `rfcs/roadmap-1.0.md` R3）。
- * 联网这件事用户能关（设置 → 关于与诊断）。查不到（离线、被墙、限流）也算查过，
- * 当天不再问——不然每次启动都去撞一次
+ * 新版本检查与渠道分流状态（见 `rfcs/auto-update.md`）：
+ * - 启动时最多每 24 小时查询一次最新版本（可在「设置 → 关于与诊断」关闭，关闭时零联网请求）；
+ * - Homebrew Cask 引导 `brew upgrade --cask dataomni`，Linux 系统包跳转发布页，
+ *   独立安装包经用户三步显式确认与 Ed25519 验签后执行应用内更新（绝不后台静默下载或强制重启）。
+ * - 查不到（离线、被墙、限流）也记下检查时刻，当天不再重复请求
  */
 
 export type InstallChannel = 'standalone' | 'homebrew' | 'systemPackage';
 
 export const BREW_UPGRADE_COMMAND = 'brew upgrade --cask dataomni';
+
+export interface AvailableAppUpdate {
+  version: string;
+  currentVersion: string;
+  notes: string | null;
+  pubDate: string | null;
+}
+
+export interface UpdateDownloadProgress {
+  downloadedBytes: number;
+  totalBytes: number | null;
+}
+
+export interface VerifiedAppUpdate {
+  version: string;
+  bytesLen: number;
+}
 
 export interface UpdateCheckState {
   enabled: boolean;

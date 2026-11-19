@@ -22,6 +22,8 @@ pub fn run() {
     default_hook(info);
   }));
 
+  services::sqlx_pool::ensure_tls_provider();
+
   let builder = tauri::Builder::default();
   #[cfg(target_os = "macos")]
   let builder = builder
@@ -47,6 +49,9 @@ pub fn run() {
     // 记住窗口大小与位置；默认在退出时保存、启动时恢复
     .plugin(tauri_plugin_window_state::Builder::default().build())
     .plugin(tauri_plugin_dialog::init())
+    // 应用内签名更新（只由后端窄命令按渠道受控调用，不在 capabilities 向前端暴露 `updater:*`）
+    .plugin(tauri_plugin_updater::Builder::new().build())
+    .manage(commands::app_commands::AppUpdateState::default())
     .manage(ConnectionServiceState::default())
     .manage(QueryCancellationState::default())
     .manage(ImportPauseState::default())
@@ -81,6 +86,9 @@ pub fn run() {
       diagnostics,
       compiled_drivers,
       install_channel,
+      check_app_update,
+      download_app_update,
+      install_app_update,
       reveal_log_file,
       latest_release,
       open_release_page,

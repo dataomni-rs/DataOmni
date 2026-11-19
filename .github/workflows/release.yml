@@ -169,6 +169,8 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           version_config=()
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -182,6 +184,12 @@ jobs:
               fi
               version_config+=(--config "{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"${version%%-*}.$pre_number\"}}}}")
             fi
+          fi
+          # 配好更新签名私钥时在 macOS 与 Windows 上生成 Ed25519 签名更新产物（Linux 只发 .deb/.rpm，不进 latest.json）
+          if [[ "$RUNNER_OS" != "Linux" && -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            version_config+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
+          else
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
           fi
           # macOS 基准配置在 src-tauri/tauri.conf.json：
           # hardenedRuntime: true（挡住 DYLD_INSERT_LIBRARIES 冒用进程身份读钥匙串，见 rfcs/agent-cli.md §5.4 E7）、
@@ -261,6 +269,18 @@ jobs:
             dmg="$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
             xcrun stapler validate "$dmg"
             spctl -a -vvv -t open --context context:primary-signature "$dmg"
+
+            # 若同时产出了应用内更新压缩包，解包核验其中的 .app 同样带有公证钉合票据，且 .sig 签名文件齐全
+            if [[ -f src-tauri/target/release/bundle/macos/DataOmni.app.tar.gz ]]; then
+              test -s src-tauri/target/release/bundle/macos/DataOmni.app.tar.gz.sig
+              unpack_dir="$RUNNER_TEMP/updater-app-verify"
+              rm -rf "$unpack_dir"
+              mkdir -p "$unpack_dir"
+              tar -xzf src-tauri/target/release/bundle/macos/DataOmni.app.tar.gz -C "$unpack_dir"
+              xcrun stapler validate "$unpack_dir/DataOmni.app"
+              spctl -a -vvv -t exec "$unpack_dir/DataOmni.app"
+              rm -rf "$unpack_dir"
+            fi
           fi
 
       - name: Clean up macOS signing credentials
@@ -276,10 +296,14 @@ jobs:
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.msi.sig
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
 
   # 新打的 Windows 包装一遍、启动、卸载；版本比已发布的新时先装已发布的再升级。
   # 过不了就不建草稿。脚本与要人看的部分见 scripts/windows-install-smoke.ps1、docs/windows-checklist.md
@@ -328,6 +352,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Download packages
         uses: actions/download-artifact@v8
         with:
@@ -339,12 +366,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > notes.md <<'EOF'
-          - **macOS（Apple Silicon）**：已由 Apple Developer ID 签名并通过 Apple 公证（Notarized），下载 `.dmg` 拖入「应用程序」即可直接打开；也可通过 Homebrew 安装：`brew install --cask dataomni-rs/tap/dataomni`。
-          - **Windows（x64）**：暂无代码签名证书，SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」。
+          - **macOS（Apple Silicon）**：已由 Apple Developer ID 签名并通过 Apple 公证（Notarized），下载 `.dmg` 拖入「应用程序」即可直接打开（支持应用内签名平滑升级）；也可通过 Homebrew 安装：`brew install --cask dataomni-rs/tap/dataomni`。
+          - **Windows（x64）**：暂无代码签名证书，SmartScreen 提示「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」；已安装版本支持经 Ed25519 签名校验的应用内升级。
           - **Linux（x86_64）**：`.deb`（Ubuntu / Debian）与 `.rpm`（Fedora / RHEL）。
 
           各版本的改动见 README「更新日志」或 https://dataomni.dev/zh/changelog/ 。
           EOF
+          # 正式版且存在 Ed25519 签名产物时，汇总生成 latest.json 随草稿一并挂入（公开 Release 后原子生效）
+          if [[ "$GITHUB_REF_NAME" != *-* ]] && find packages -name '*.sig' | grep -q .; then
+            python3 scripts/build-latest-json.py \
+              --tag "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --packages-dir packages \
+              --notes-file notes.md \
+              --output packages/latest.json
+          fi
           # 产物按 dmg/、deb/… 分了子目录，传文件不传目录
           mapfile -t files < <(find packages -type f)
           # 预发布标成 prerelease：GitHub 的 releases/latest 不返回它，装着正式版的人不会被「新版本」横幅叫去装 rc
