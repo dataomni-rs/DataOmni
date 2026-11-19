@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -153,5 +154,112 @@ describe.skipIf(process.platform === 'win32')('CI 变更范围过滤与工作流
     expect(tapWorkflow).toContain('brew style packaging/homebrew/Casks/dataomni.rb');
     // Release published 事件的 GITHUB_REF 是 refs/tags/v*，绑定受保护 environment 会被分支白名单拒绝（见 11cb62e）
     expect(tapWorkflow).not.toMatch(/^\s*environment:/m);
+  });
+
+  it('build-latest-json.py 为正式版组装 macOS/Windows 签名清单并拒绝预发布、缺签名与 Linux 包混入', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dataomni-latest-json-'));
+    try {
+      const sampleSig = Buffer.from(
+        'untrusted comment: signature from tauri secret key\nRUTestSig\ntrusted comment: timestamp:1\tfile:pkg\nGlobalSig\n',
+        'utf8',
+      ).toString('base64');
+
+      mkdirSync(join(dir, 'macos'), { recursive: true });
+      mkdirSync(join(dir, 'nsis'), { recursive: true });
+      mkdirSync(join(dir, 'msi'), { recursive: true });
+      mkdirSync(join(dir, 'deb'), { recursive: true });
+
+      writeFileSync(join(dir, 'macos', 'DataOmni.app.tar.gz'), 'mac-tar');
+      writeFileSync(join(dir, 'macos', 'DataOmni.app.tar.gz.sig'), sampleSig);
+      writeFileSync(join(dir, 'nsis', 'DataOmni_1.3.0_x64-setup.exe'), 'win-nsis');
+      writeFileSync(join(dir, 'nsis', 'DataOmni_1.3.0_x64-setup.exe.sig'), sampleSig);
+      writeFileSync(join(dir, 'msi', 'DataOmni_1.3.0_x64_en-US.msi'), 'win-msi');
+      writeFileSync(join(dir, 'msi', 'DataOmni_1.3.0_x64_en-US.msi.sig'), sampleSig);
+      writeFileSync(join(dir, 'deb', 'DataOmni_1.3.0_amd64.deb'), 'linux-deb');
+
+      const notesPath = join(dir, 'notes.md');
+      writeFileSync(notesPath, 'Release 1.3.0 notes\n');
+      const outPath = join(dir, 'latest.json');
+
+      execFileSync(
+        'python3',
+        [
+          'scripts/build-latest-json.py',
+          '--tag',
+          'v1.3.0',
+          '--repo',
+          'dataomni-rs/DataOmni',
+          '--packages-dir',
+          dir,
+          '--notes-file',
+          notesPath,
+          '--pub-date',
+          '2026-11-19T08:00:00Z',
+          '--output',
+          outPath,
+        ],
+        { encoding: 'utf8' },
+      );
+
+      const manifest = JSON.parse(readFileSync(outPath, 'utf8')) as {
+        version: string;
+        pub_date: string;
+        notes: string;
+        platforms: Record<string, { url: string; signature: string }>;
+      };
+
+      expect(manifest.version).toBe('1.3.0');
+      expect(manifest.pub_date).toBe('2026-11-19T08:00:00Z');
+      expect(manifest.notes).toBe('Release 1.3.0 notes');
+      expect(Object.keys(manifest.platforms).sort()).toEqual([
+        'darwin-aarch64',
+        'darwin-aarch64-app',
+        'windows-x86_64',
+        'windows-x86_64-msi',
+        'windows-x86_64-nsis',
+      ]);
+      expect(manifest.platforms['darwin-aarch64'].url).toBe(
+        'https://github.com/dataomni-rs/DataOmni/releases/download/v1.3.0/DataOmni.app.tar.gz',
+      );
+      expect(manifest.platforms['windows-x86_64-msi'].url).toBe(
+        'https://github.com/dataomni-rs/DataOmni/releases/download/v1.3.0/DataOmni_1.3.0_x64_en-US.msi',
+      );
+      expect(manifest.platforms['windows-x86_64'].url).toBe(
+        'https://github.com/dataomni-rs/DataOmni/releases/download/v1.3.0/DataOmni_1.3.0_x64-setup.exe',
+      );
+
+      // 反向验证 1：预发布 tag 绝不能生成正式通道的 latest.json
+      expect(() =>
+        execFileSync('python3', [
+          'scripts/build-latest-json.py',
+          '--tag',
+          'v1.3.0-rc.1',
+          '--repo',
+          'dataomni-rs/DataOmni',
+          '--packages-dir',
+          dir,
+          '--output',
+          join(dir, 'rc.json'),
+        ]),
+      ).toThrow();
+
+      // 反向验证 2：损坏的 .sig 签名文件必须报错中断
+      writeFileSync(join(dir, 'macos', 'DataOmni.app.tar.gz.sig'), 'not-a-valid-minisign-sig');
+      expect(() =>
+        execFileSync('python3', [
+          'scripts/build-latest-json.py',
+          '--tag',
+          'v1.3.0',
+          '--repo',
+          'dataomni-rs/DataOmni',
+          '--packages-dir',
+          dir,
+          '--output',
+          join(dir, 'bad.json'),
+        ]),
+      ).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

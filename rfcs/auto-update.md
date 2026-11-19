@@ -1,6 +1,6 @@
 # 应用内签名校验平滑更新设计（U1）
 
-> 状态：2026-11-19 定稿；安装渠道识别（`install_channel`）与 Homebrew Cask 升级引导已落地，`tauri-plugin-updater` 独立安装包替换待生成生产 Ed25519 密钥对并写入 GitHub Actions Secret 后合入。
+> 状态：2026-11-19 已实现（跟代码走：`install_channel`、`tauri-plugin-updater` Ed25519 签名验签、三步显式升级确认与 `scripts/build-latest-json.py` 发布清单汇总均已落地）。
 
 ## 1. 背景与目标
 
