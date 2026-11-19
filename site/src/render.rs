@@ -1,11 +1,15 @@
 use crate::content::{
   Locale, PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory, EN_COPY, ZH_COPY,
 };
-use crate::docs::{CalloutTone, DocBlock, DocPage, DocSlug, ALL_DOC_SLUGS};
+use crate::docs::{doc_page, CalloutTone, DocBlock, DocPage, DocSlug, ALL_DOC_SLUGS};
 use std::fmt::Write;
 
 pub const SITE_ORIGIN: &str = "https://dataomni.dev";
 pub const REPO_URL: &str = "https://github.com/dataomni-rs/DataOmni";
+pub const TAP_REPO_URL: &str = "https://github.com/dataomni-rs/homebrew-tap";
+pub const INDEXNOW_KEY: &str = "da7a0f91c8e24f5bb3109a6e7d2c84f1";
+pub const ROBOTS_INDEX_DIRECTIVE: &str =
+  "index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1";
 
 pub fn escape_html(input: &str) -> String {
   let mut out = String::with_capacity(input.len());
@@ -165,27 +169,40 @@ fn render_smoke_counts(html: &mut String, counts: &str) -> Result<(), std::fmt::
   }
 }
 
+fn render_organization_node(json: &mut String) -> Result<(), std::fmt::Error> {
+  write!(
+    json,
+    "{{\"@type\":\"Organization\",\"@id\":\"{SITE_ORIGIN}/#organization\",\"name\":\"DataOmni\",\"url\":\"{SITE_ORIGIN}/\",\"logo\":{{\"@type\":\"ImageObject\",\"url\":\"{SITE_ORIGIN}/assets/icon-256.png\",\"width\":256,\"height\":256}},\"sameAs\":[\"{REPO_URL}\",\"{TAP_REPO_URL}\"]}}"
+  )
+}
+
 fn render_structured_data(
   copy: &PageCopy,
   version: &str,
+  released_at: &str,
   canonical_url: &str,
   og_image_url: &str,
   release_tag_url: &str,
 ) -> Result<String, std::fmt::Error> {
-  let mut json = String::with_capacity(4096);
+  let mut json = String::with_capacity(4608);
   write!(json, "{{\"@context\":\"https://schema.org\",\"@graph\":[")?;
+
+  // 0. Brand Organization entity with logo and verified repositories
+  render_organization_node(&mut json)?;
+  json.push(',');
 
   // 1. WebSite entity (Google SERP Site Name signal)
   write!(
     json,
-    "{{\"@type\":\"WebSite\",\"@id\":\"{SITE_ORIGIN}/#website\",\"name\":\"DataOmni\",\"alternateName\":\"DataOmni Database Client\",\"url\":\"{SITE_ORIGIN}/\",\"inLanguage\":[\"en\",\"zh-CN\"]}},"
+    "{{\"@type\":\"WebSite\",\"@id\":\"{SITE_ORIGIN}/#website\",\"name\":\"DataOmni\",\"alternateName\":\"DataOmni Database Client\",\"url\":\"{SITE_ORIGIN}/\",\"publisher\":{{\"@id\":\"{SITE_ORIGIN}/#organization\"}},\"inLanguage\":[\"en\",\"zh-CN\"]}},"
   )?;
 
   // 2. SoftwareApplication entity with screenshots, repository, and free MIT offer
   write!(
     json,
-    "{{\"@type\":\"SoftwareApplication\",\"@id\":\"{SITE_ORIGIN}/#software\",\"name\":\"DataOmni\",\"softwareVersion\":\"{}\",\"applicationCategory\":\"DeveloperApplication\",\"applicationSubCategory\":\"Database Management\",\"operatingSystem\":\"macOS 12+, Windows 10/11, Linux (x86_64)\",\"license\":\"https://opensource.org/licenses/MIT\",\"isAccessibleForFree\":true,\"inLanguage\":\"{}\",\"url\":\"{}\",\"downloadUrl\":\"{}\",\"releaseNotes\":\"{}\",\"sameAs\":[\"{REPO_URL}\"],\"image\":\"{}\",\"screenshot\":[",
+    "{{\"@type\":\"SoftwareApplication\",\"@id\":\"{SITE_ORIGIN}/#software\",\"name\":\"DataOmni\",\"softwareVersion\":\"{}\",\"datePublished\":\"2026-11-17\",\"dateModified\":\"{}\",\"applicationCategory\":\"DeveloperApplication\",\"applicationSubCategory\":\"Database Management\",\"operatingSystem\":\"macOS 12+, Windows 10/11, Linux (x86_64)\",\"license\":\"https://opensource.org/licenses/MIT\",\"isAccessibleForFree\":true,\"inLanguage\":\"{}\",\"url\":\"{}\",\"downloadUrl\":\"{}\",\"releaseNotes\":\"{}\",\"sameAs\":[\"{REPO_URL}\",\"{TAP_REPO_URL}\"],\"image\":\"{}\",\"screenshot\":[",
     escape_json_str(version),
+    escape_json_str(released_at),
     escape_json_str(copy.locale.html_lang()),
     escape_json_str(canonical_url),
     escape_json_str(release_tag_url),
@@ -208,7 +225,7 @@ fn render_structured_data(
   }
   write!(
     json,
-    "],\"description\":\"{}\",\"author\":{{\"@type\":\"Organization\",\"name\":\"DataOmni\",\"url\":\"{REPO_URL}\"}},\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}}}},",
+    "],\"description\":\"{}\",\"author\":{{\"@id\":\"{SITE_ORIGIN}/#organization\"}},\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}}}},",
     escape_json_str(copy.meta_description),
   )?;
 
@@ -235,12 +252,22 @@ fn render_structured_data(
   Ok(json)
 }
 
-pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::Error> {
+pub fn render_page(
+  copy: &PageCopy,
+  version: &str,
+  released_at: &str,
+) -> Result<String, std::fmt::Error> {
   let assets = ReleaseAssets::for_version(version);
   let canonical_url = format!("{SITE_ORIGIN}{}", copy.locale.canonical_path());
   let og_image_url = format!("{SITE_ORIGIN}{}", copy.locale.og_image_path());
-  let structured_data =
-    render_structured_data(copy, version, &canonical_url, &og_image_url, &assets.release_tag_url)?;
+  let structured_data = render_structured_data(
+    copy,
+    version,
+    released_at,
+    &canonical_url,
+    &og_image_url,
+    &assets.release_tag_url,
+  )?;
   let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
   let macos_brew_cmd = "brew install --cask dataomni-rs/tap/dataomni";
   let linux_install_cmd = format!("sudo apt install ./DataOmni_{version}_amd64.deb");
@@ -258,10 +285,15 @@ pub fn render_page(copy: &PageCopy, version: &str) -> Result<String, std::fmt::E
     "  <meta name=\"description\" content=\"{}\">",
     escape_html(copy.meta_description)
   )?;
+  writeln!(html, "  <meta name=\"robots\" content=\"{ROBOTS_INDEX_DIRECTIVE}\">")?;
   writeln!(html, "  <link rel=\"canonical\" href=\"{}\">", escape_html(&canonical_url))?;
   writeln!(html, "  <link rel=\"alternate\" hreflang=\"en\" href=\"{SITE_ORIGIN}/\">")?;
   writeln!(html, "  <link rel=\"alternate\" hreflang=\"zh-CN\" href=\"{SITE_ORIGIN}/zh/\">")?;
   writeln!(html, "  <link rel=\"alternate\" hreflang=\"x-default\" href=\"{SITE_ORIGIN}/\">")?;
+  writeln!(
+    html,
+    "  <link rel=\"alternate\" type=\"text/plain\" href=\"/llms.txt\" title=\"DataOmni LLM Documentation\">"
+  )?;
   writeln!(html, "  <meta property=\"og:type\" content=\"website\">")?;
   writeln!(html, "  <meta property=\"og:site_name\" content=\"DataOmni\">")?;
   writeln!(html, "  <meta property=\"og:locale\" content=\"{}\">", copy.locale.og_locale())?;
@@ -1144,6 +1176,8 @@ fn highlight_doc_code(raw: &str) -> String {
 
 fn render_doc_structured_data(
   page: &DocPage,
+  version: &str,
+  released_at: &str,
   canonical_url: &str,
   og_image_url: &str,
 ) -> Result<String, std::fmt::Error> {
@@ -1154,11 +1188,17 @@ fn render_doc_structured_data(
   };
   let docs_url = format!("{SITE_ORIGIN}{}", DocSlug::Quickstart.path(page.locale));
 
-  let mut json = String::with_capacity(2048);
+  let mut json = String::with_capacity(3072);
   write!(json, "{{\"@context\":\"https://schema.org\",\"@graph\":[")?;
+  render_organization_node(&mut json)?;
   write!(
     json,
-    "{{\"@type\":\"WebSite\",\"@id\":\"{SITE_ORIGIN}/#website\",\"name\":\"DataOmni\",\"alternateName\":\"DataOmni Database Client\",\"url\":\"{SITE_ORIGIN}/\",\"inLanguage\":[\"en\",\"zh-CN\"]}},"
+    ",{{\"@type\":\"WebSite\",\"@id\":\"{SITE_ORIGIN}/#website\",\"name\":\"DataOmni\",\"alternateName\":\"DataOmni Database Client\",\"url\":\"{SITE_ORIGIN}/\",\"publisher\":{{\"@id\":\"{SITE_ORIGIN}/#organization\"}},\"inLanguage\":[\"en\",\"zh-CN\"]}},"
+  )?;
+  write!(
+    json,
+    "{{\"@type\":\"SoftwareApplication\",\"@id\":\"{SITE_ORIGIN}/#software\",\"name\":\"DataOmni\",\"softwareVersion\":\"{}\",\"applicationCategory\":\"DeveloperApplication\",\"operatingSystem\":\"macOS 12+, Windows 10/11, Linux (x86_64)\",\"license\":\"https://opensource.org/licenses/MIT\",\"isAccessibleForFree\":true,\"url\":\"{SITE_ORIGIN}/\",\"author\":{{\"@id\":\"{SITE_ORIGIN}/#organization\"}},\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}}}},",
+    escape_json_str(version),
   )?;
   write!(json, "{{\"@type\":\"BreadcrumbList\",\"itemListElement\":[")?;
   write!(
@@ -1185,20 +1225,27 @@ fn render_doc_structured_data(
     )?;
   }
   write!(json, "]}},")?;
+  let schema_type = if page.slug == DocSlug::Privacy { "WebPage" } else { "TechArticle" };
+  let title_prop = if page.slug == DocSlug::Privacy { "name" } else { "headline" };
   write!(
     json,
-    "{{\"@type\":\"TechArticle\",\"headline\":\"{}\",\"description\":\"{}\",\"url\":\"{}\",\"inLanguage\":\"{}\",\"image\":\"{}\",\"dateModified\":\"2026-11-17\",\"author\":{{\"@type\":\"Organization\",\"name\":\"DataOmni\",\"url\":\"{REPO_URL}\"}},\"about\":{{\"@id\":\"{SITE_ORIGIN}/#software\"}}}}",
+    "{{\"@type\":\"{schema_type}\",\"{title_prop}\":\"{}\",\"description\":\"{}\",\"url\":\"{}\",\"inLanguage\":\"{}\",\"image\":\"{}\",\"datePublished\":\"2026-11-17\",\"dateModified\":\"{}\",\"author\":{{\"@id\":\"{SITE_ORIGIN}/#organization\"}},\"publisher\":{{\"@id\":\"{SITE_ORIGIN}/#organization\"}},\"isPartOf\":{{\"@id\":\"{SITE_ORIGIN}/#website\"}},\"about\":{{\"@id\":\"{SITE_ORIGIN}/#software\"}}}}",
     escape_json_str(page.title),
     escape_json_str(page.meta_description),
     escape_json_str(canonical_url),
     escape_json_str(page.locale.html_lang()),
     escape_json_str(og_image_url),
+    escape_json_str(released_at),
   )?;
   write!(json, "]}}")?;
   Ok(json)
 }
 
-pub fn render_doc_page(page: &DocPage, version: &str) -> Result<String, std::fmt::Error> {
+pub fn render_doc_page(
+  page: &DocPage,
+  version: &str,
+  released_at: &str,
+) -> Result<String, std::fmt::Error> {
   let copy = match page.locale {
     Locale::En => &EN_COPY,
     Locale::Zh => &ZH_COPY,
@@ -1210,7 +1257,8 @@ pub fn render_doc_page(page: &DocPage, version: &str) -> Result<String, std::fmt
   let alternate_path = page.slug.path(alt_locale);
   let canonical_url = format!("{SITE_ORIGIN}{canonical_path}");
   let og_image_url = format!("{SITE_ORIGIN}{}", page.locale.og_image_path());
-  let structured_data = render_doc_structured_data(page, &canonical_url, &og_image_url)?;
+  let structured_data =
+    render_doc_structured_data(page, version, released_at, &canonical_url, &og_image_url)?;
   let install_href = format!("{}#install", page.locale.canonical_path());
   let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
 
@@ -1226,12 +1274,17 @@ pub fn render_doc_page(page: &DocPage, version: &str) -> Result<String, std::fmt
     "  <meta name=\"description\" content=\"{}\">",
     escape_html(page.meta_description)
   )?;
+  writeln!(html, "  <meta name=\"robots\" content=\"{ROBOTS_INDEX_DIRECTIVE}\">")?;
   writeln!(html, "  <link rel=\"canonical\" href=\"{}\">", escape_html(&canonical_url))?;
   writeln!(html, "  <link rel=\"alternate\" hreflang=\"en\" href=\"{SITE_ORIGIN}{en_path}\">")?;
   writeln!(html, "  <link rel=\"alternate\" hreflang=\"zh-CN\" href=\"{SITE_ORIGIN}{zh_path}\">")?;
   writeln!(
     html,
     "  <link rel=\"alternate\" hreflang=\"x-default\" href=\"{SITE_ORIGIN}{en_path}\">"
+  )?;
+  writeln!(
+    html,
+    "  <link rel=\"alternate\" type=\"text/plain\" href=\"/llms.txt\" title=\"DataOmni LLM Documentation\">"
   )?;
   writeln!(html, "  <meta property=\"og:type\" content=\"article\">")?;
   writeln!(html, "  <meta property=\"og:site_name\" content=\"DataOmni\">")?;
@@ -1758,11 +1811,50 @@ pub fn render_not_found() -> &'static str {
 </html>\n"
 }
 
-pub fn render_robots_txt() -> String {
-  format!("User-agent: *\nAllow: /\nSitemap: {SITE_ORIGIN}/sitemap.xml\n")
+pub fn render_docs_hub_redirect(locale: Locale) -> String {
+  let target_path = DocSlug::Quickstart.path(locale);
+  let canonical_url = format!("{SITE_ORIGIN}{target_path}");
+  let (title, heading, cta) = match locale {
+    Locale::En => ("Documentation — DataOmni", "DataOmni Documentation", "Continue to Quickstart"),
+    Locale::Zh => ("使用文档 — DataOmni", "DataOmni 使用文档", "前往快速上手"),
+  };
+  format!(
+    "<!DOCTYPE html>\n\
+<html lang=\"{lang}\">\n\
+<head>\n\
+  <meta charset=\"utf-8\">\n\
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+  <meta name=\"robots\" content=\"noindex, follow\">\n\
+  <link rel=\"canonical\" href=\"{canonical_url}\">\n\
+  <meta http-equiv=\"refresh\" content=\"0; url={target_path}\">\n\
+  <title>{title}</title>\n\
+  <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\">\n\
+  <link rel=\"icon\" type=\"image/png\" sizes=\"96x96\" href=\"/assets/favicon-96.png\">\n\
+  <link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/assets/favicon-32.png\">\n\
+  <link rel=\"stylesheet\" href=\"/assets/style.css\">\n\
+  <script>window.location.replace(\"{target_path}\");</script>\n\
+</head>\n\
+<body>\n\
+  <main class=\"shell hero\">\n\
+    <h1 class=\"hero-title\">{heading}</h1>\n\
+    <p><a class=\"btn-primary\" href=\"{target_path}\">{cta}</a></p>\n\
+  </main>\n\
+</body>\n\
+</html>\n",
+    lang = locale.html_lang(),
+    canonical_url = escape_html(&canonical_url),
+    target_path = target_path,
+    title = escape_html(title),
+    heading = escape_html(heading),
+    cta = escape_html(cta),
+  )
 }
 
-pub fn render_sitemap_xml() -> String {
+pub fn render_robots_txt() -> String {
+  format!("User-agent: *\nAllow: /\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n")
+}
+
+pub fn render_sitemap_xml(released_at: &str) -> String {
   let mut xml = String::with_capacity(6144);
   let _ = writeln!(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
   let _ = writeln!(
@@ -1773,7 +1865,7 @@ pub fn render_sitemap_xml() -> String {
     let loc = format!("{SITE_ORIGIN}{}", copy.locale.canonical_path());
     let _ = writeln!(xml, "  <url>");
     let _ = writeln!(xml, "    <loc>{}</loc>", escape_html(&loc));
-    let _ = writeln!(xml, "    <lastmod>2026-11-17</lastmod>");
+    let _ = writeln!(xml, "    <lastmod>{}</lastmod>", escape_html(released_at));
     let _ =
       writeln!(xml, "    <xhtml:link rel=\"alternate\" hreflang=\"en\" href=\"{SITE_ORIGIN}/\"/>");
     let _ = writeln!(
@@ -1800,7 +1892,7 @@ pub fn render_sitemap_xml() -> String {
     for loc in [&en_url, &zh_url] {
       let _ = writeln!(xml, "  <url>");
       let _ = writeln!(xml, "    <loc>{}</loc>", escape_html(loc));
-      let _ = writeln!(xml, "    <lastmod>2026-11-17</lastmod>");
+      let _ = writeln!(xml, "    <lastmod>{}</lastmod>", escape_html(released_at));
       let _ = writeln!(
         xml,
         "    <xhtml:link rel=\"alternate\" hreflang=\"en\" href=\"{}\"/>",
@@ -1822,4 +1914,166 @@ pub fn render_sitemap_xml() -> String {
 
   let _ = writeln!(xml, "</urlset>");
   xml
+}
+
+pub fn render_llms_txt(version: &str, released_at: &str) -> Result<String, std::fmt::Error> {
+  let assets = ReleaseAssets::for_version(version);
+  let mut md = String::with_capacity(4096);
+  writeln!(md, "# DataOmni")?;
+  writeln!(md)?;
+  writeln!(
+    md,
+    "> Native Rust + Tauri 2 desktop database client for PostgreSQL, MySQL, SQLite, SQL Server, Oracle, DuckDB, ClickHouse, MongoDB, Redis, Neo4j, and Elasticsearch — with previewed SQL transactions, OS keychain credentials, schema diff, deterministic codegen, and a built-in read-only stdio MCP server (`dataomni mcp`)."
+  )?;
+  writeln!(md)?;
+  writeln!(md, "- Latest stable version: `v{version}` ({released_at})")?;
+  writeln!(md, "- License: MIT (`{REPO_URL}`)")?;
+  writeln!(md, "- Platforms: macOS 12+ (Apple Silicon, Developer ID signed & notarized), Windows 10/11 (x64 MSI & NSIS), Linux (x86_64 `.deb` & `.rpm`)")?;
+  writeln!(md, "- macOS Homebrew Tap: `brew install --cask dataomni-rs/tap/dataomni`")?;
+  writeln!(
+    md,
+    "- Zero telemetry, no cloud account, credentials stored exclusively in OS keychains"
+  )?;
+  writeln!(md)?;
+  writeln!(md, "## Documentation")?;
+  writeln!(md)?;
+  for slug in ALL_DOC_SLUGS {
+    let page = doc_page(*slug, Locale::En);
+    writeln!(
+      md,
+      "- [{}]({SITE_ORIGIN}{}): {}",
+      page.title,
+      slug.path(Locale::En),
+      page.meta_description
+    )?;
+  }
+  writeln!(
+    md,
+    "- [Full LLM Reference (Single-File Markdown)]({SITE_ORIGIN}/llms-full.txt): Complete documentation, compatibility matrix, MCP tools, CLI exit codes, and security invariants."
+  )?;
+  writeln!(md)?;
+  writeln!(md, "## Direct Release Packages (`v{version}`)")?;
+  writeln!(md)?;
+  writeln!(md, "- [Release Notes (`v{version}`)]({})", assets.release_tag_url)?;
+  writeln!(md, "- [macOS Apple Silicon (`.dmg`)]({})", assets.dmg_url)?;
+  writeln!(md, "- [Windows Installer (`-setup.exe`)]({})", assets.exe_url)?;
+  writeln!(md, "- [Windows Enterprise (`.msi`)]({})", assets.msi_url)?;
+  writeln!(md, "- [Linux Debian/Ubuntu (`.deb`)]({})", assets.deb_url)?;
+  writeln!(md, "- [Linux Fedora/RHEL (`.rpm`)]({})", assets.rpm_url)?;
+  writeln!(md)?;
+  writeln!(md, "## Chinese Documentation (中文文档)")?;
+  writeln!(md)?;
+  writeln!(md, "- [中文首页]({SITE_ORIGIN}/zh/): {}", ZH_COPY.meta_description)?;
+  for slug in ALL_DOC_SLUGS {
+    let page = doc_page(*slug, Locale::Zh);
+    writeln!(
+      md,
+      "- [{}]({SITE_ORIGIN}{}): {}",
+      page.title,
+      slug.path(Locale::Zh),
+      page.meta_description
+    )?;
+  }
+  Ok(md)
+}
+
+pub fn render_llms_full_txt(version: &str, released_at: &str) -> Result<String, std::fmt::Error> {
+  let mut md = render_llms_txt(version, released_at)?;
+  writeln!(md)?;
+  writeln!(md, "---")?;
+  writeln!(md)?;
+  writeln!(md, "## Frequently Asked Questions")?;
+  writeln!(md)?;
+  for item in EN_COPY.faq_items {
+    writeln!(md, "### {}", item.question)?;
+    writeln!(md)?;
+    writeln!(md, "{}", item.answer)?;
+    writeln!(md)?;
+  }
+
+  for slug in ALL_DOC_SLUGS {
+    let page = doc_page(*slug, Locale::En);
+    writeln!(md, "---")?;
+    writeln!(md)?;
+    writeln!(md, "# {} (`{SITE_ORIGIN}{}`)", page.title, slug.path(Locale::En))?;
+    writeln!(md)?;
+    writeln!(md, "{}", page.lead)?;
+    writeln!(md)?;
+
+    for section in page.sections {
+      writeln!(md, "## {}", section.heading)?;
+      writeln!(md)?;
+      for block in section.blocks {
+        match block {
+          DocBlock::Paragraph(text) => {
+            writeln!(md, "{text}")?;
+            writeln!(md)?;
+          }
+          DocBlock::Bullets(items) => {
+            for item in *items {
+              writeln!(md, "- {item}")?;
+            }
+            writeln!(md)?;
+          }
+          DocBlock::Steps(steps) => {
+            for (idx, (title, body)) in steps.iter().enumerate() {
+              writeln!(md, "{}. **{}** — {}", idx + 1, title, body)?;
+            }
+            writeln!(md)?;
+          }
+          DocBlock::Callout { title, body, .. } => {
+            writeln!(md, "> **{title}**: {body}")?;
+            writeln!(md)?;
+          }
+          DocBlock::Code { label, raw_code, .. } => {
+            writeln!(md, "*{label}*:")?;
+            writeln!(md, "```")?;
+            writeln!(md, "{raw_code}")?;
+            writeln!(md, "```")?;
+            writeln!(md)?;
+          }
+          DocBlock::Table { headers, rows, .. } => {
+            writeln!(md, "| {} |", headers.join(" | "))?;
+            let sep: Vec<&str> = headers.iter().map(|_| "---").collect();
+            writeln!(md, "| {} |", sep.join(" | "))?;
+            for row in *rows {
+              writeln!(md, "| {} |", row.join(" | "))?;
+            }
+            writeln!(md)?;
+          }
+          DocBlock::McpPresets => {
+            for preset in EN_COPY.mcp_presets {
+              writeln!(md, "- **{}**: `{}`", preset.label, preset.command)?;
+            }
+            writeln!(md)?;
+          }
+          DocBlock::CompatibilityMatrix => {
+            writeln!(
+              md,
+              "| Server | Tested Version | Driver | Status | Smoke (pass/skip/gap) | Notes |"
+            )?;
+            writeln!(md, "| --- | --- | --- | --- | --- | --- |")?;
+            for row in EN_COPY.servers {
+              let status = match row.level {
+                SupportLevel::Supported => EN_COPY.status_supported,
+                SupportLevel::UsableWithGaps => EN_COPY.status_gaps,
+              };
+              writeln!(
+                md,
+                "| {} | {} | {} | {} | {} | {} |",
+                row.server,
+                row.tested_version,
+                row.connection_type,
+                status,
+                row.smoke_counts,
+                row.notes
+              )?;
+            }
+            writeln!(md)?;
+          }
+        }
+      }
+    }
+  }
+  Ok(md)
 }
