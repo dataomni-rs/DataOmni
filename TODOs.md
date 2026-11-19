@@ -58,9 +58,9 @@
 
 ### 第三阶段（U）：应用内签名平滑更新与全渠道分发合规
 
-- [-] U1 应用内签名校验平滑更新（承接 `v1.2` `E3` / `roadmap-1.0` `R3`，前置签名公证已解锁）
+- [x] U1 应用内签名校验平滑更新（承接 `v1.2` `E3` / `roadmap-1.0` `R3`，前置签名公证已解锁）（`f9678bf`、`edf7e96`）
   - [x] 设计说明与安装渠道识别引导（`f9678bf`）：已撰写 [`rfcs/auto-update.md`](rfcs/auto-update.md)，落地后端 `install_channel`（区分 `homebrew`、`systemPackage`、`standalone`，排除源码开发构建误判）与前端 `UpdateNotice` Homebrew Cask 一键复制 `brew upgrade --cask dataomni`，`UpdateNotice.test.tsx` 先红后绿。
-  - [ ] 独立安装包 `tauri-plugin-updater` 签名替换：待在本机 `~/.private_keys/dataomni-updater.key` 生成生产 Ed25519 密钥对并写入 `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions Secret 后，接入 `tauri.conf.json` 公钥、`release.yml` `latest.json` 生成及用户显式确认升级交互（绝不后台静默重启）。
+  - [x] 独立安装包 `tauri-plugin-updater` 签名替换（`edf7e96`）：已接入生产 Minisign Ed25519 公钥（`52232E86440485D4`）与 `latest.json` HTTPS 端点，落地后端受控三命令（`check_app_update` / `download_app_update` / `install_app_update`，拦截包管理器与开发构建自覆盖）、`UpdateNotice` 三步显式确认与 `App` 事务/任务/快照退出守卫，以及 `scripts/build-latest-json.py` 与 `release.yml` 公证解包门禁；包体/签名 1 字节篡改反向验证单测、中英深浅色真实渲染与全量门禁通过（发版前将本机私钥写入 `TAURI_SIGNING_PRIVATE_KEY` GitHub Secret 即可自动签出更新产物）。
 - [x] U2 官网双语隐私与安全合规声明页（`/privacy/` 与 `/zh/privacy/`，独立官网 PR `#51` / `1642fc0` 已上线）
   - 已在 `site/` 新增中英双语隐私政策与数据安全声明页（零遥测、无云账号、凭据只进系统钥匙串、三类出网请求完整披露、只读 Agent `PROD` 物理不可见、`--no-default-features` 编译剔除），补齐页脚、侧边栏与 `sitemap.xml` 并修复窄屏 `.docs-sidebar` 横向溢出；`site:check`、桌面深浅色与真实 375px 视口（`scrollWidth=375`）及线上 `https://dataomni.dev/privacy/`、`https://dataomni.dev/zh/privacy/`（HTTP 200）全部核验通过。
 - [-] U3 在途外部渠道收口、Windows 签名评估与生态目录推广
