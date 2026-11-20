@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { ColumnProfile } from '../contracts/analytics';
 import {
   buildProfileFilterSql,
+  buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  columnCardinalityHint,
   extractEsJsonDocs,
   filterAndSortProfiles,
   formatProfileNumber,
@@ -87,6 +89,16 @@ describe('analyticsProfile', () => {
     expect(buildProfileNullFilterSql('email')).toBe(
       `SELECT * FROM result_set WHERE "email" IS NULL`
     );
+    expect(buildProfileGroupBySql('user_id')).toContain('GROUP BY "user_id"');
+    expect(buildProfileGroupBySql('user_id')).toContain('COUNT(*) AS row_count');
+  });
+
+  it('detects all-null, constant, and unique-key column cardinality hints', () => {
+    expect(columnCardinalityHint(makeColumn({ name: 'x', totalCount: 6, nullCount: 6, distinctCount: 0 }))).toBe('all-null');
+    expect(columnCardinalityHint(makeColumn({ name: 'x', totalCount: 6, nullCount: 0, distinctCount: 1 }))).toBe('constant');
+    expect(columnCardinalityHint(makeColumn({ name: 'x', totalCount: 6, nullCount: 0, distinctCount: 6 }))).toBe('unique-key');
+    expect(columnCardinalityHint(makeColumn({ name: 'x', totalCount: 6, nullCount: 1, distinctCount: 5 }))).toBeNull();
+    expect(columnCardinalityHint(makeColumn({ name: 'x', totalCount: 1, nullCount: 0, distinctCount: 1 }))).toBeNull();
   });
 
   it('converts MongoDB rows preserving missing keys vs explicit nulls', () => {

@@ -152,4 +152,76 @@ describe('ResultChartDialog', () => {
     expect(container.textContent).toContain('SUM(amount) BY region');
     expect(container.querySelector('svg')).toBeTruthy();
   });
+
+  it('offers COUNT DuckDB aggregation when result has no numeric columns', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'analytics_load_result') {
+        return {
+          analyticsId: 'chart-count-1',
+          sourceKind: 'resultSet',
+          rowCount: 3,
+          columnCount: 2,
+          truncated: false,
+          columns: []
+        };
+      }
+      if (cmd === 'analytics_query') {
+        return {
+          columns: ['global_skill_id', 'row_count'],
+          columnMetadata: [],
+          rows: [
+            ['skill-a', 2],
+            ['skill-b', 1]
+          ],
+          rowCount: 2,
+          truncated: false,
+          truncationReason: null,
+          elapsedMs: 2
+        };
+      }
+      return true;
+    });
+
+    await act(async () => {
+      root.render(
+        <ResultChartDialog
+          columns={['global_skill_id', 'updated_at']}
+          rows={[
+            ['skill-a', '2026-10-26 14:15:35'],
+            ['skill-a', '2026-10-26 14:15:45'],
+            ['skill-b', '2026-11-03 15:36:33']
+          ]}
+          onClose={vi.fn()}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain('使用内置内存 DuckDB 显式聚合');
+    const selects = Array.from(container.querySelectorAll('select'));
+    const fnSelect = selects[1];
+    expect(fnSelect?.value).toBe('COUNT');
+    expect(Array.from(fnSelect?.options ?? []).map((o) => o.value)).toEqual(['COUNT']);
+
+    const aggBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('聚合画图')
+    );
+    expect(aggBtn).toBeTruthy();
+    expect(aggBtn?.disabled).toBe(false);
+
+    await act(async () => {
+      aggBtn?.click();
+    });
+    await flush();
+
+    expect(invoke).toHaveBeenCalledWith(
+      'analytics_query',
+      expect.objectContaining({
+        analyticsId: 'chart-count-1',
+        sql: expect.stringContaining('COUNT(*)')
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith('analytics_close', { analyticsId: 'chart-count-1' });
+    expect(container.textContent).toContain('COUNT(*) BY global_skill_id');
+    expect(container.querySelector('svg')).toBeTruthy();
+  });
 });

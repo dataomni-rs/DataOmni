@@ -128,13 +128,13 @@ Commands:
                      pipelines are mongosh syntax; documents come back as relaxed
                      Extended JSON. Pipelines with $out or $merge are refused.
                      explain runs the query (executionStats) but returns no
-                     documents. `dataomni cli mongo` alone shows its usage.
+                     documents. `dataomni mongo --help` shows its operations.
   redis <connection> <operation> ...
                      Redis, read only: keyspaces; scan [<pattern>]; get <key>;
                      command <name> [<argument>...], which runs only commands the
                      server itself flags readonly (asked with COMMAND INFO).
-                     --db N picks the logical database. `dataomni cli redis` alone
-                     shows its usage.
+                     --db N picks the logical database. `dataomni redis --help`
+                     shows its operations.
   neo4j <connection> labels | run <cypher> [--limit N]
                      Neo4j, read only: the labels and relationship types; or one
                      Cypher query, run only if the server classifies it as a read
@@ -418,6 +418,47 @@ enum Output {
   Text(String),
 }
 
+const USAGE_QUERY: &str =
+  "usage: dataomni query <connection> <sql> [--limit N] [--timeout SECONDS] [--param K=V ...] [--param-null K ...] [--params-json JSON]";
+const USAGE_DIFF: &str =
+  "usage: dataomni diff <source-connection> <target-connection> [--format json|markdown] [--timeout SECONDS]";
+const USAGE_SCHEMA: &str = "usage: dataomni schema <connection> [<table> [--schema S]]";
+const USAGE_DDL: &str = "usage: dataomni ddl <connection> <table> [--schema S]";
+const USAGE_EXPLAIN: &str = "usage: dataomni explain <connection> <sql> [--timeout SECONDS]";
+const USAGE_TEST: &str = "usage: dataomni test <connection>";
+const USAGE_DICTIONARY: &str = "usage: dataomni dictionary <connection>";
+const USAGE_EXPORT: &str =
+  "usage: dataomni export <connection> <sql> --out FILE [--format csv|json|parquet] \
+  [--delimiter C] [--no-header] [--null TEXT] [--bom] [--timeout SECONDS]";
+const USAGE_PROFILE: &str =
+  "usage: dataomni profile <connection> <sql> [--limit N] [--timeout SECONDS] | dataomni profile --file <path> [--limit N]";
+const USAGE_CSV_PREVIEW: &str =
+  "usage: dataomni csv-preview <file> [--delimiter C] [--no-header] [--rows N]";
+const USAGE_BACKUP: &str = "usage: dataomni backup <connection> --out PATH [--database D]";
+
+fn subcommand_help(command: &str) -> Option<String> {
+  let usage = match command {
+    "query" => USAGE_QUERY,
+    "diff" => USAGE_DIFF,
+    "schema" => USAGE_SCHEMA,
+    "ddl" => USAGE_DDL,
+    "explain" => USAGE_EXPLAIN,
+    "test" => USAGE_TEST,
+    "dictionary" => USAGE_DICTIONARY,
+    "export" => USAGE_EXPORT,
+    "profile" => USAGE_PROFILE,
+    "csv-preview" => USAGE_CSV_PREVIEW,
+    "backup" => USAGE_BACKUP,
+    "mongo" => mongo::USAGE,
+    "redis" => redis::USAGE,
+    "neo4j" => neo4j::USAGE,
+    "es" => elasticsearch::USAGE,
+    "connections" | "guide" | "version" | "--version" | "-V" => return Some(HELP.to_string()),
+    _ => return None,
+  };
+  Some(format!("{usage}\n"))
+}
+
 fn is_subcommand_help(rest: &[String]) -> bool {
   matches!(rest, [flag] if matches!(flag.as_str(), "--help" | "-h"))
 }
@@ -427,31 +468,10 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
   let Some((command, rest)) = args.split_first() else {
     return Ok(Output::Text(HELP.to_string()));
   };
-  let known_command = matches!(
-    command.as_str(),
-    "guide"
-      | "version"
-      | "--version"
-      | "-V"
-      | "connections"
-      | "query"
-      | "diff"
-      | "schema"
-      | "explain"
-      | "test"
-      | "dictionary"
-      | "mongo"
-      | "redis"
-      | "neo4j"
-      | "es"
-      | "csv-preview"
-      | "export"
-      | "profile"
-      | "ddl"
-      | "backup"
-  );
-  if known_command && is_subcommand_help(rest) {
-    return Ok(Output::Text(HELP.to_string()));
+  if is_subcommand_help(rest) {
+    if let Some(help) = subcommand_help(command) {
+      return Ok(Output::Text(help));
+    }
   }
   match command.as_str() {
     "help" | "--help" | "-h" => Ok(Output::Text(HELP.to_string())),
@@ -592,8 +612,7 @@ fn query(
   config_dir: Option<&Path>,
   log_dir: Option<&Path>,
 ) -> Result<Value, CliError> {
-  let usage = "usage: dataomni cli query <connection> <sql> [--limit N] [--timeout SECONDS] [--param K=V ...] [--param-null K ...] [--params-json JSON]";
-  let arguments = parse_statement_arguments(rest, usage, true, true)?;
+  let arguments = parse_statement_arguments(rest, USAGE_QUERY, true, true)?;
   let service = open_service(config_dir)?;
   let profile = find_open(&service, &arguments.connection)?;
   let started = Instant::now();
@@ -638,8 +657,7 @@ fn explain(
   config_dir: Option<&Path>,
   log_dir: Option<&Path>,
 ) -> Result<Value, CliError> {
-  let usage = "usage: dataomni cli explain <connection> <sql> [--timeout SECONDS]";
-  let arguments = parse_statement_arguments(rest, usage, false, false)?;
+  let arguments = parse_statement_arguments(rest, USAGE_EXPLAIN, false, false)?;
   let service = open_service(config_dir)?;
   let profile = find_open(&service, &arguments.connection)?;
   let started = Instant::now();
@@ -682,7 +700,7 @@ fn test(
   log_dir: Option<&Path>,
 ) -> Result<Value, CliError> {
   let [connection] = rest else {
-    return Err(CliError::usage("usage: dataomni cli test <connection>"));
+    return Err(CliError::usage(USAGE_TEST));
   };
   let service = open_service(config_dir)?;
   let profile = find_open(&service, connection)?;
@@ -735,7 +753,7 @@ fn dictionary(
   log_dir: Option<&Path>,
 ) -> Result<String, CliError> {
   let [connection] = rest else {
-    return Err(CliError::usage("usage: dataomni cli dictionary <connection>"));
+    return Err(CliError::usage(USAGE_DICTIONARY));
   };
   let service = open_service(config_dir)?;
   let profile = find_open(&service, connection)?;
@@ -961,9 +979,7 @@ struct CliExportResult {
 
 fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> {
   use crate::services::export_writer::{ExportFormat, ExportOptions};
-  let usage =
-    "usage: dataomni cli export <connection> <sql> --out FILE [--format csv|json|parquet] \
-    [--delimiter C] [--no-header] [--null TEXT] [--bom] [--timeout SECONDS]";
+  let usage = USAGE_EXPORT;
   let mut positional = Vec::new();
   let mut out = None;
   let mut format = CliExportFormat::Csv;
@@ -1165,7 +1181,7 @@ struct ProfileArguments {
 
 fn parse_profile_arguments(rest: &[String]) -> Result<ProfileArguments, CliError> {
   use crate::services::local_analytics::MAX_ANALYTICS_ROWS;
-  let usage = "usage: dataomni cli profile <connection> <sql> [--limit N] [--timeout SECONDS] | dataomni cli profile --file <path> [--limit N]";
+  let usage = USAGE_PROFILE;
   let mut positional = Vec::new();
   let mut file: Option<PathBuf> = None;
   let mut row_limit = DEFAULT_PROFILE_ROW_LIMIT;
@@ -1294,7 +1310,7 @@ fn profile_command(
 /// 本机的 CSV 文件：嗅探分隔符与编码（UTF-8，否则 gb18030），给表头、开头几行和字段数对不上的行。
 /// 不碰连接，也就不留痕
 fn csv_preview(rest: &[String]) -> Result<Value, CliError> {
-  let usage = "usage: dataomni cli csv-preview <file> [--delimiter C] [--no-header] [--rows N]";
+  let usage = USAGE_CSV_PREVIEW;
   let mut path = None;
   let mut delimiter = None;
   let mut has_header = true;
@@ -1403,7 +1419,7 @@ fn backup(
   config_dir: Option<&Path>,
   log_dir: Option<&Path>,
 ) -> Result<Value, CliError> {
-  let usage = "usage: dataomni cli backup <connection> --out PATH [--database D]";
+  let usage = USAGE_BACKUP;
   let mut positional = Vec::new();
   let mut out = None;
   let mut database = None;
@@ -1504,7 +1520,7 @@ fn parse_schema_arguments(rest: &[String]) -> Result<SchemaArguments, CliError> 
       _ => positional.push(argument.clone()),
     }
   }
-  let usage = || CliError::usage("usage: dataomni cli schema <connection> [<table> [--schema S]]");
+  let usage = || CliError::usage(USAGE_SCHEMA);
   let mut positional = positional.into_iter();
   let connection = positional.next().ok_or_else(usage)?;
   let table = positional.next();
@@ -1523,7 +1539,7 @@ fn ddl(
 ) -> Result<Value, CliError> {
   let arguments = parse_schema_arguments(rest)?;
   let Some(table) = arguments.table.clone() else {
-    return Err(CliError::usage("usage: dataomni cli ddl <connection> <table> [--schema S]"));
+    return Err(CliError::usage(USAGE_DDL));
   };
   let service = open_service(config_dir)?;
   let profile = find_open(&service, &arguments.connection)?;
@@ -1639,8 +1655,7 @@ struct DiffArguments {
 }
 
 fn parse_diff_arguments(rest: &[String]) -> Result<DiffArguments, CliError> {
-  let usage =
-    "usage: dataomni cli diff <source-connection> <target-connection> [--format json|markdown] [--timeout SECONDS]";
+  let usage = USAGE_DIFF;
   let mut positional = Vec::new();
   let mut format = DiffFormat::Json;
   let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
@@ -1961,16 +1976,16 @@ fn session_error(failure: session::Failure) -> CliError {
 fn unsupported(db_type: &crate::models::DatabaseType) -> CliError {
   match db_type {
     DatabaseType::MongoDB => {
-      return CliError::refused("MongoDB connections take `dataomni cli mongo`, not SQL")
+      return CliError::refused("MongoDB connections take `dataomni mongo`, not SQL")
     }
     DatabaseType::Redis => {
-      return CliError::refused("Redis connections take `dataomni cli redis`, not SQL")
+      return CliError::refused("Redis connections take `dataomni redis`, not SQL")
     }
     DatabaseType::Neo4j => {
-      return CliError::refused("Neo4j connections take `dataomni cli neo4j`, not SQL")
+      return CliError::refused("Neo4j connections take `dataomni neo4j`, not SQL")
     }
     DatabaseType::Elasticsearch => {
-      return CliError::refused("Elasticsearch connections take `dataomni cli es`, not SQL")
+      return CliError::refused("Elasticsearch connections take `dataomni es`, not SQL")
     }
     _ => {}
   }
@@ -2286,10 +2301,26 @@ mod tests {
     assert!(stdout.contains("dataomni cli <command>"));
     assert!(stdout.contains("dataomni mcp"));
 
-    for cmd in ["connections", "query", "profile", "diff"] {
+    let (code, stdout, stderr) = run_in(&dir, &["connections", "--help"]);
+    assert_eq!(code, 0, "connections --help stderr={stderr}");
+    assert!(stdout.contains("Commands:"));
+
+    for (cmd, expected) in [
+      ("query", "usage: dataomni query <connection> <sql>"),
+      ("profile", "usage: dataomni profile <connection> <sql>"),
+      ("diff", "usage: dataomni diff <source-connection> <target-connection>"),
+      ("mongo", "find <database>.<collection>"),
+      ("redis", "scan [<pattern>]"),
+      ("neo4j", "run <cypher>"),
+      ("es", "request <METHOD> <path>"),
+    ] {
       let (code, stdout, stderr) = run_in(&dir, &[cmd, "--help"]);
       assert_eq!(code, 0, "{cmd} --help stderr={stderr}");
-      assert!(stdout.contains("Commands:"));
+      assert!(stdout.contains(expected), "{cmd} --help stdout={stdout}");
+      assert!(
+        !stdout.contains("dataomni cli "),
+        "{cmd} --help still shows legacy prefix: {stdout}"
+      );
     }
   }
 
@@ -2765,7 +2796,7 @@ mod tests {
 
     let (code, _, stderr) = run_in(&dir, &["query", "docs", "SELECT 1"]);
     assert_eq!(code, Exit::Refused as i32, "{stderr}");
-    assert!(stderr.contains("dataomni cli mongo"), "{stderr}");
+    assert!(stderr.contains("dataomni mongo"), "{stderr}");
     let (code, _, stderr) = run_in(&dir, &["mongo", "sql", "collections"]);
     assert_eq!(code, Exit::Usage as i32, "{stderr}");
     let (code, _, stderr) =

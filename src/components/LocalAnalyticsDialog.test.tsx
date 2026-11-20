@@ -103,6 +103,17 @@ describe('LocalAnalyticsDialog', () => {
 
     expect(container.textContent).toContain('orders.parquet');
     expect(container.textContent).toContain('North');
+    // CodeMirror SQL 编辑器已挂载且支持列 chip 光标插入
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+    const regionChip = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'region'
+    );
+    expect(regionChip).toBeTruthy();
+    await act(async () => {
+      regionChip?.click();
+    });
+    expect(container.querySelector('.cm-content')?.textContent).toContain('"region"');
 
     // 点击 GROUP BY 快捷模板
     const groupBtn = Array.from(container.querySelectorAll('button')).find(

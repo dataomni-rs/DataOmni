@@ -32,7 +32,8 @@ import {
   Lock,
   Filter,
   Columns3,
-  Undo2
+  Undo2,
+  ArrowUpRight
 } from 'lucide-react';
 import clsx from 'clsx';
 import type { ConnectionProfile, TableSchema } from '../contracts';
@@ -128,6 +129,14 @@ import {
 import { useSettingsStore } from '../stores/settingsStore';
 import { useTableEditStore, tableEditKey } from '../stores/tableEditStore';
 import { selectTableStructure, useAppStore } from '../stores/appStore';
+import { useWorkspaceStore } from '../stores/workspaceStore';
+import { workspaceTabId } from '../contracts/workspace';
+import {
+  buildCellJump,
+  resolveTableColumnJumps,
+  type ResolvedCellJump
+} from '../utils/foreignKeyJump';
+import { commandModifierLabel, hasCommandModifier } from '../utils/shortcuts';
 import { buildFilterClause, isCompleteFilter, type ColumnFilter } from '../utils/tableFilters';
 import { serverLabel } from '../utils/serverPresets';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
@@ -206,9 +215,10 @@ export default function TableDataViewer({
   const setDensity = useSettingsStore((state) => state.setGridDensity);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [contextTarget, setContextTarget] = useState<GridContextTarget | null>(null);
-  // 与 sortRef 同理：loadTableData 的闭包里读不到刚 set 进去的新值
+  // 与 sortRef 同理：loadTableData 的闭包里读不到刚 set 进去的新值。
+  // 不在渲染体里用 appliedFilters 覆盖它——外部 store（如跳转消费）先触发一次渲染时，
+  // 旧的 appliedFilters 会把刚写进 ref 的筛选条件冲回空数组。所有改动都在 setAppliedFilters 旁同步更新。
   const appliedFiltersRef = useRef<ColumnFilter[]>([]);
-  appliedFiltersRef.current = appliedFilters;
   const [showExport, setShowExport] = useState(false);
   const [showChart, setShowChart] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -259,6 +269,14 @@ export default function TableDataViewer({
   // 待提交的改动放在 store 里，不放在组件里：这个组件切走就卸载，放在
   // useState 里的话切一下标签改动就没了。见 tableEditStore
   const cacheTableStructure = useAppStore((state) => state.cacheTableStructure);
+  const completionRelations = useAppStore((state) => state.completionCatalogs[connection.id]?.relations);
+  const currentDataTabId = workspaceTabId(connection.id, 'table-data', {
+    schema: schema ?? null,
+    table: tableName
+  });
+  const pendingJump = useWorkspaceStore((state) => state.pendingTableJumps[currentDataTabId]);
+  const jumpToTableData = useWorkspaceStore((state) => state.jumpToTableData);
+  const consumePendingTableJump = useWorkspaceStore((state) => state.consumePendingTableJump);
   const changes = useTableEditStore((state) => state.changes[currentTableKey] ?? EMPTY_CHANGES);
   const setChanges = React.useCallback(
     (next: PendingChange[] | ((current: PendingChange[]) => PendingChange[])) => {
@@ -569,6 +587,55 @@ export default function TableDataViewer({
     }
   };
 
+  const prevTableKeyRef = useRef(currentTableKey);
+  // 换表时草稿必须清掉：旧条件指着另一张表的列，buildFilterClause 会把它们丢掉，
+  // 于是筛选栏上明明列着条件而结果却没有被筛过。声明在 pendingJump 之前，避免挂载时把跳转筛选冲掉。
+  useEffect(() => {
+    if (prevTableKeyRef.current === currentTableKey) {
+      return;
+    }
+    prevTableKeyRef.current = currentTableKey;
+    setFilters([]);
+    setAppliedFilters([]);
+    appliedFiltersRef.current = [];
+    // 列偏好同理：隐藏集里存的是列名，换表后指的是另一张表的列
+    setHiddenColumns(new Set());
+    setFrozenCount(0);
+    // 待提交的变更**不**在这里清：它们现在按表存在 store 里，换表就是换一个键，
+    // 「键指着另一张表的行」这种状态已经不存在了。
+    setCommitFailure(null);
+    setCommitNotice(null);
+  }, [currentTableKey]);
+
+  // 消费来自外键 / 查询结果跳转的预填筛选条件：必须在 initializeViewer 之前声明，
+  // 这样首次打开目标表时 appliedFiltersRef 已就绪，首条 SELECT 直接带 WHERE 而不做全表扫描。
+  useEffect(() => {
+    if (!pendingJump) {
+      return;
+    }
+    const consumed = consumePendingTableJump(currentDataTabId);
+    if (!consumed || consumed.filters.length === 0) {
+      return;
+    }
+    const nextFilters: ColumnFilter[] = consumed.filters.map((item, idx) => ({
+      id: `jump-${consumed.token}-${idx}`,
+      column: item.column,
+      operator: 'eq',
+      value: item.value
+    }));
+    setFilters(nextFilters);
+    setAppliedFilters(nextFilters);
+    appliedFiltersRef.current = nextFilters;
+    setShowFilters(true);
+    setCurrentPage(1);
+    setActiveTab('data');
+    if (tableSchema && tableSchemaKey === currentTableKey) {
+      rowCountCacheRef.current = null;
+      void loadTableData(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在 pendingJump 令牌变化时消费并刷新
+  }, [pendingJump?.token, currentDataTabId]);
+
   // 组件挂载时加载数据
   useEffect(() => {
     const initializeViewer = async () => {
@@ -617,22 +684,6 @@ export default function TableDataViewer({
     setCurrentPage(1);
     void loadTableData(1);
   };
-
-  // 换表时草稿必须清掉：旧条件指着另一张表的列，buildFilterClause 会把它们丢掉，
-  // 于是筛选栏上明明列着条件而结果却没有被筛过
-  useEffect(() => {
-    setFilters([]);
-    setAppliedFilters([]);
-    appliedFiltersRef.current = [];
-    // 列偏好同理：隐藏集里存的是列名，换表后指的是另一张表的列
-    setHiddenColumns(new Set());
-    setFrozenCount(0);
-    // 待提交的变更**不**在这里清：它们现在按表存在 store 里，换表就是换一个键，
-    // 「键指着另一张表的行」这种状态已经不存在了。留在这里清反而会把改动删掉——
-    // 这个 effect 挂载时也跑一次，而挂载正是从别的标签切回来的那一刻
-    setCommitFailure(null);
-    setCommitNotice(null);
-  }, [currentTableKey]);
 
   // 计算总页数
   const totalPages = Math.ceil(totalRows / pageSize);
@@ -796,6 +847,44 @@ export default function TableDataViewer({
     () => visibleIndexes.map((index) => columnNames[index] ?? ''),
     [visibleIndexes, columnNames]
   );
+  const columnJumpMap = useMemo(
+    () =>
+      resolveTableColumnJumps({
+        columns: columnNames,
+        foreignKeys: schemaObjects?.foreignKeys,
+        relations: completionRelations,
+        currentTable: tableName,
+        currentSchema: schema ?? null,
+        dbType: connection.db_type,
+        currentDatabase: connection.database
+      }),
+    [
+      columnNames,
+      schemaObjects?.foreignKeys,
+      completionRelations,
+      tableName,
+      schema,
+      connection.db_type,
+      connection.database
+    ]
+  );
+  const handleJump = (jump: ResolvedCellJump) => {
+    jumpToTableData(connection.id, { schema: jump.schema, table: jump.table }, jump.filters);
+  };
+  const resolveRowCellJumps = (row: Record<string, unknown>, columnName: string): ResolvedCellJump[] => {
+    const targets = columnJumpMap.get(columnName.toLowerCase());
+    if (!targets || targets.length === 0) {
+      return [];
+    }
+    const resolved: ResolvedCellJump[] = [];
+    for (const target of targets) {
+      const built = buildCellJump(target, (col) => (row[col] ?? null) as SerializedResultValue);
+      if (built) {
+        resolved.push(built);
+      }
+    }
+    return resolved;
+  };
   // 刷新是「同一份数据再取一遍」，选区要留着；翻页 / 改排序 / 改筛选 / 换表
   // 是换了一份数据，同一个坐标指的是另一行。两者的区别只有这里知道
   const datasetKey = [
@@ -1120,7 +1209,9 @@ export default function TableDataViewer({
     selected = false,
     focused = false,
     onSelect,
-    onContextMenu
+    onContextMenu,
+    inlineJump = null,
+    onJump
   }: {
     value: any;
     /** 这一行排着的改动：改了的列画新值，悬停看原值 */
@@ -1146,6 +1237,8 @@ export default function TableDataViewer({
     focused?: boolean;
     onSelect?: (extend: boolean) => void;
     onContextMenu?: (event: React.MouseEvent) => void;
+    inlineJump?: ResolvedCellJump | null;
+    onJump?: (jump: ResolvedCellJump) => void;
   }) => {
     if (!isEditing || readOnly) {
       // 非编辑状态或改不了的列，显示只读
@@ -1153,13 +1246,21 @@ export default function TableDataViewer({
       // 显示时统一交给 formatResultValue 还原成人能读的形式
       return (
         <td
-          onClick={(event) => onSelect?.(event.shiftKey)}
+          onClick={(event) => {
+            if (hasCommandModifier(event) && inlineJump && onJump) {
+              event.preventDefault();
+              onJump(inlineJump);
+              return;
+            }
+            onSelect?.(event.shiftKey);
+          }}
           onContextMenu={onContextMenu}
           style={frozenLeft === null ? undefined : { left: `${frozenLeft}px` }}
           className={clsx(
             'border-r border-line font-mono text-[13px] text-fg',
             densityClass,
             align === 'right' && 'text-right',
+            inlineJump && 'group/cell',
             // 冻结列必须自带不透明底色，否则滚过来的内容会从它下面透出来。
             // 选中时让选区色盖过它——那才是此刻要表达的状态
             frozenLeft !== null && 'sticky z-10',
@@ -1171,7 +1272,27 @@ export default function TableDataViewer({
         >
           {/* 单行形态、NULL / 空串 / 空白 / 二进制的区分都在 GridCellValue 里，
               与 SQL 结果表共用同一套约定 */}
-          <StagedCellValue value={(value ?? null) as SerializedResultValue} pending={pending} column={field} />
+          {inlineJump && onJump ? (
+            <div className={clsx('flex min-w-0 items-center gap-1', align === 'right' && 'justify-end')}>
+              <div className="min-w-0 flex-1 truncate">
+                <StagedCellValue value={(value ?? null) as SerializedResultValue} pending={pending} column={field} />
+              </div>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onJump(inlineJump);
+                }}
+                title={t('grid.jumpToTableTitle', { target: inlineJump.targetLabel, mod: commandModifierLabel() })}
+                aria-label={t('grid.jumpToTable', { target: inlineJump.targetLabel })}
+                className="shrink-0 rounded p-0.5 text-accent opacity-0 transition-opacity hover:bg-accent-soft focus:opacity-100 group-hover/cell:opacity-100"
+              >
+                <ArrowUpRight size={12} />
+              </button>
+            </div>
+          ) : (
+            <StagedCellValue value={(value ?? null) as SerializedResultValue} pending={pending} column={field} />
+          )}
         </td>
       );
     }
@@ -1776,6 +1897,15 @@ export default function TableDataViewer({
                                 if (!column) {
                                   return null;
                                 }
+                                const inlineTarget = columnJumpMap
+                                  .get(column.name.toLowerCase())
+                                  ?.find((item) => item.inline);
+                                const inlineJump = inlineTarget
+                                  ? buildCellJump(
+                                      inlineTarget,
+                                      (col) => (row[col] ?? null) as SerializedResultValue
+                                    )
+                                  : null;
                                 return (
                                 <React.Fragment key={colIndex}>
                                 {renderEditableCell({
@@ -1793,6 +1923,8 @@ export default function TableDataViewer({
                                   selected: cells.isSelected(rowIndex, visiblePosition),
                                   focused: cells.isFocused(rowIndex, visiblePosition),
                                   onSelect: (extend) => cells.selectCell(rowIndex, visiblePosition, extend),
+                                  inlineJump,
+                                  onJump: handleJump,
                                   onContextMenu: (event) => {
                                     event.preventDefault();
                                     // 右击一个不在选区里的格子先把它选上：菜单里那几条
@@ -1953,6 +2085,12 @@ export default function TableDataViewer({
               ? startEditRow
               : undefined
           }
+          jumpTargets={(() => {
+            const colName = visibleColumnNames[contextTarget.column];
+            const row = tableData[contextTarget.row];
+            return colName && row ? resolveRowCellJumps(row, colName) : [];
+          })()}
+          onJump={handleJump}
           onClose={() => setContextTarget(null)}
         />
       )}

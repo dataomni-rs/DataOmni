@@ -6,6 +6,7 @@ import {
   BarChart2,
   Check,
   Copy,
+  Filter,
   Loader2,
   RotateCcw,
   Search,
@@ -21,7 +22,9 @@ import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
 import {
   buildProfileFilterSql,
+  buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  columnCardinalityHint,
   filterAndSortProfiles,
   formatProfileNumber,
   formatProfileRatio,
@@ -360,8 +363,10 @@ export function ColumnProfileCard({
   const t = useLanguageStore((state) => state.t);
   const severity = nullSeverity(column.nullRatio);
   const drift = hasSchemaDrift(column);
+  const cardinalityHint = columnCardinalityHint(column);
   const heights = useMemo(() => histogramHeights(column.bins), [column.bins]);
   const nullCopyId = `null:${column.name}`;
+  const groupCopyId = `group:${column.name}`;
 
   const nullBadgeClass =
     severity === 'high'
@@ -387,6 +392,21 @@ export function ColumnProfileCard({
             <span className="rounded bg-surface-sunken px-1.5 py-0.5 font-mono text-[10px] text-fg-muted">
               {column.duckdbType}
             </span>
+            {cardinalityHint === 'all-null' && (
+              <span className="rounded bg-danger-soft px-1.5 py-0.5 text-[10px] text-danger">
+                {t('profile.hint.allNull')}
+              </span>
+            )}
+            {cardinalityHint === 'constant' && (
+              <span className="rounded bg-surface-sunken px-1.5 py-0.5 text-[10px] text-fg-subtle">
+                {t('profile.hint.constant')}
+              </span>
+            )}
+            {cardinalityHint === 'unique-key' && (
+              <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent">
+                {t('profile.hint.uniqueKey')}
+              </span>
+            )}
             {drift && (
               <span className="rounded bg-warning-soft px-1.5 py-0.5 text-[10px] text-warning">
                 {t('profile.schemaDrift')}
@@ -402,24 +422,52 @@ export function ColumnProfileCard({
             )}
           </div>
         </div>
-        {column.nullCount > 0 && (
+        <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
             onClick={() => {
-              const sql = buildProfileNullFilterSql(column.name);
+              const sql = buildProfileGroupBySql(column.name);
               if (onRunFilterSql) {
                 onRunFilterSql(sql);
               } else {
-                onCopySql(nullCopyId, sql);
+                onCopySql(groupCopyId, sql);
               }
             }}
-            title={onRunFilterSql ? t('analytics.applyNullSql') : t('profile.copyNullSql')}
-            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg"
+            title={onRunFilterSql ? t('analytics.applyGroupBySql') : t('profile.copyGroupBySql')}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg"
           >
-            {copiedKey === nullCopyId ? <Check size={11} className="text-success" /> : <Copy size={11} />}
-            <span>{copiedKey === nullCopyId ? t('profile.copiedSql') : 'IS NULL'}</span>
+            {copiedKey === groupCopyId ? (
+              <Check size={11} className="text-success" />
+            ) : (
+              <BarChart2 size={11} />
+            )}
+            <span>{copiedKey === groupCopyId ? t('profile.copiedSql') : t('profile.groupByAction')}</span>
           </button>
-        )}
+          {column.nullCount > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const sql = buildProfileNullFilterSql(column.name);
+                if (onRunFilterSql) {
+                  onRunFilterSql(sql);
+                } else {
+                  onCopySql(nullCopyId, sql);
+                }
+              }}
+              title={onRunFilterSql ? t('analytics.applyNullSql') : t('profile.copyNullSql')}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg"
+            >
+              {copiedKey === nullCopyId ? (
+                <Check size={11} className="text-success" />
+              ) : onRunFilterSql ? (
+                <Filter size={11} />
+              ) : (
+                <Copy size={11} />
+              )}
+              <span>{copiedKey === nullCopyId ? t('profile.copiedSql') : 'IS NULL'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Key metrics row: Null rate & Distinct */}
@@ -560,7 +608,10 @@ export function ColumnProfileCard({
       {/* Top 5 values */}
       {column.topValues.length > 0 && (
         <div className="space-y-1">
-          <p className="text-[10px] text-fg-subtle">{t('profile.topValues')}</p>
+          <div className="flex items-center justify-between text-[10px] text-fg-subtle">
+            <span>{t('profile.topValues')}</span>
+            <span>{onRunFilterSql ? t('analytics.clickValueToFilter') : t('profile.clickValueToCopy')}</span>
+          </div>
           <ul className="space-y-1">
             {column.topValues.map((entry, idx) => {
               const copyId = `top:${column.name}:${idx}`;
@@ -578,7 +629,7 @@ export function ColumnProfileCard({
                       }
                     }}
                     title={onRunFilterSql ? t('analytics.applyFilterSql') : t('profile.copyFilterSql')}
-                    className="relative flex min-w-0 flex-1 items-center justify-between overflow-hidden rounded bg-surface-sunken px-2 py-0.5 text-left transition-colors hover:bg-surface-hover"
+                    className="relative flex min-w-0 flex-1 items-center justify-between overflow-hidden rounded border border-transparent bg-surface-sunken px-2 py-0.5 text-left transition-colors hover:border-accent/40 hover:bg-surface-hover"
                   >
                     <span
                       aria-hidden
@@ -588,10 +639,22 @@ export function ColumnProfileCard({
                     <span className="relative truncate font-mono text-fg" title={display}>
                       {display}
                     </span>
-                    <span className="relative ml-2 shrink-0 font-mono text-[10px] text-fg-muted">
-                      {copiedKey === copyId
-                        ? t('profile.copiedSql')
-                        : `${entry.count.toLocaleString()} (${formatProfileRatio(entry.ratio)})`}
+                    <span className="relative ml-2 flex shrink-0 items-center gap-1 font-mono text-[10px] text-fg-muted">
+                      {copiedKey === copyId ? (
+                        <>
+                          <Check size={10} className="text-success" />
+                          <span>{t('profile.copiedSql')}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>{`${entry.count.toLocaleString()} (${formatProfileRatio(entry.ratio)})`}</span>
+                          {onRunFilterSql ? (
+                            <Filter size={10} className="opacity-0 transition-opacity group-hover:opacity-80" />
+                          ) : (
+                            <Copy size={10} className="opacity-0 transition-opacity group-hover:opacity-80" />
+                          )}
+                        </>
+                      )}
                     </span>
                   </button>
                 </li>

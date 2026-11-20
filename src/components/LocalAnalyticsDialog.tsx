@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
+import CodeMirror from '@uiw/react-codemirror';
+import type { Completion } from '@codemirror/autocomplete';
+import { EditorState } from '@codemirror/state';
+import { PostgreSQL, sql as sqlLanguage, type SQLNamespace } from '@codemirror/lang-sql';
+import { oneDark } from '@codemirror/theme-one-dark';
+import type { EditorView } from '@codemirror/view';
 import { clsx } from 'clsx';
 import {
   AlertTriangle,
@@ -26,6 +32,7 @@ import type {
 } from '../contracts/analytics';
 import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
+import { useThemeStore } from '../stores/themeStore';
 import {
   ANALYTICS_QUERY_LIMIT_OPTIONS,
   buildDuplicateCheckTemplate,
@@ -37,9 +44,12 @@ import {
 } from '../utils/analyticsQuery';
 import { filterAndSortProfiles, type ProfileSortMode } from '../utils/analyticsProfile';
 import { describeError } from '../utils/describeError';
+import { editorPhrases } from '../utils/editorPhrases';
+import { appEditorTheme } from '../utils/editorTheme';
 import { GRID_PAGE_SIZE_OPTIONS } from '../utils/gridPagination';
 import { formatResultValueOneLine } from '../utils/resultValues';
-import { isImeKeyEvent, matchesShortcut, SHORTCUTS } from '../utils/shortcuts';
+import { runShortcutKeymap, type RunShortcutHandlers } from '../utils/runShortcutKeymap';
+import { isImeKeyEvent } from '../utils/shortcuts';
 import { ColumnProfileCard } from './DataProfileDialog';
 import { ExportResultDialog } from './ExportResultDialog';
 import { PLAIN_TEXT_INPUT } from './FormControls';
@@ -109,12 +119,45 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
   const [showChart, setShowChart] = useState(false);
   const [showExport, setShowExport] = useState(false);
 
+  const resolvedTheme = useThemeStore((state) => state.resolved);
   const sessionIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
-  const sqlInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const runShortcutsRef = useRef<RunShortcutHandlers>({ runCurrent: () => {}, runAll: () => {} });
 
   const titleLabel =
     source.kind === 'localFile' ? localFileBasename(source.filePath) : source.title;
+
+  const editorExtensions = useMemo(() => {
+    const columns: Completion[] = (summary?.columns ?? []).map((col, index) => {
+      const quoted = quoteDuckIdentifier(col.name);
+      const needsQuote = !/^[a-z_][a-z0-9_]*$/.test(col.name);
+      return {
+        label: col.name,
+        ...(needsQuote ? { apply: quoted } : {}),
+        type: 'property',
+        detail: col.duckdbType,
+        boost: Math.max(99 - index, -99)
+      };
+    });
+    const schema: SQLNamespace = {
+      result_set: {
+        self: { label: 'result_set', type: 'type', detail: 'DuckDB' },
+        children: columns
+      }
+    };
+    return [
+      runShortcutKeymap(runShortcutsRef),
+      sqlLanguage({
+        dialect: PostgreSQL,
+        schema,
+        defaultTable: 'result_set',
+        upperCaseKeywords: true
+      }),
+      EditorState.phrases.of(editorPhrases(t)),
+      appEditorTheme
+    ];
+  }, [summary?.columns, t]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -130,6 +173,9 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
       if (event.key === 'Escape' && !isImeKeyEvent(event) && !showChart && !showExport) {
         event.preventDefault();
         onClose();
@@ -264,6 +310,11 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     void runSql(id, sql, rowLimit);
   };
 
+  runShortcutsRef.current = {
+    runCurrent: handleRunCurrentSql,
+    runAll: handleRunCurrentSql
+  };
+
   const handleCancel = () => {
     const id = sessionIdRef.current;
     if (id) {
@@ -281,19 +332,17 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
 
   const handleInsertColumn = (columnName: string) => {
     const quoted = quoteDuckIdentifier(columnName);
-    const el = sqlInputRef.current;
-    if (!el) {
+    const view = editorViewRef.current;
+    if (!view) {
       setSql((prev) => `${prev} ${quoted}`);
       return;
     }
-    const start = el.selectionStart ?? sql.length;
-    const end = el.selectionEnd ?? sql.length;
-    const next = `${sql.slice(0, start)}${quoted}${sql.slice(end)}`;
-    setSql(next);
-    window.requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(start + quoted.length, start + quoted.length);
+    const { from, to } = view.state.selection.main;
+    view.dispatch({
+      changes: { from, to, insert: quoted },
+      selection: { anchor: from + quoted.length }
     });
+    view.focus();
   };
 
   const handleRunFromProfile = (filterSql: string) => {
@@ -514,20 +563,32 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                 </div>
               )}
 
-              <textarea
-                {...PLAIN_TEXT_INPUT}
-                ref={sqlInputRef}
-                value={sql}
-                onChange={(event) => setSql(event.target.value)}
-                onKeyDown={(event) => {
-                  if (matchesShortcut(event.nativeEvent, SHORTCUTS.runCurrent) && !isImeKeyEvent(event.nativeEvent)) {
-                    event.preventDefault();
-                    handleRunCurrentSql();
-                  }
-                }}
-                rows={4}
-                className="w-full resize-y rounded-control border border-line-strong bg-surface-sunken p-2.5 font-mono text-xs text-fg focus:border-accent focus:outline-none"
-              />
+              <div className="overflow-hidden rounded-control border border-line-strong focus-within:border-accent">
+                <CodeMirror
+                  value={sql}
+                  onChange={(value) => setSql(value)}
+                  onCreateEditor={(view) => {
+                    editorViewRef.current = view;
+                  }}
+                  theme={resolvedTheme === 'dark' ? oneDark : undefined}
+                  extensions={editorExtensions}
+                  minHeight="96px"
+                  maxHeight="220px"
+                  basicSetup={{
+                    lineNumbers: true,
+                    foldGutter: false,
+                    dropCursor: false,
+                    allowMultipleSelections: false,
+                    indentOnInput: true,
+                    bracketMatching: true,
+                    closeBrackets: true,
+                    autocompletion: true,
+                    highlightSelectionMatches: true,
+                    searchKeymap: true
+                  }}
+                  className="text-xs"
+                />
+              </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">

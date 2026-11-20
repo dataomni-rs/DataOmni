@@ -251,4 +251,34 @@ describe('workspace store', () => {
 
     expect(useWorkspaceStore.getState().activeTabId).toBe('sql-b');
   });
+
+  it('opens target table tab with pending jump filters, consumes once, and cleans up on close', () => {
+    useWorkspaceStore.getState().jumpToTableData(
+      'profile-a',
+      { schema: 'public', table: 'users' },
+      [{ column: 'id', value: '42' }]
+    );
+
+    const expectedTabId = workspaceTabId('profile-a', 'table-data', {
+      schema: 'public',
+      table: 'users'
+    });
+    expect(useWorkspaceStore.getState().activeTabId).toBe(expectedTabId);
+    expect(useWorkspaceStore.getState().pendingTableJumps[expectedTabId]?.filters).toEqual([
+      { column: 'id', value: '42' }
+    ]);
+
+    const consumed = useWorkspaceStore.getState().consumePendingTableJump(expectedTabId);
+    expect(consumed?.filters).toEqual([{ column: 'id', value: '42' }]);
+    expect(useWorkspaceStore.getState().consumePendingTableJump(expectedTabId)).toBeNull();
+
+    // 重新入队后关掉标签，待执行跳转应一并清理
+    useWorkspaceStore.getState().jumpToTableData(
+      'profile-a',
+      { schema: 'public', table: 'users' },
+      [{ column: 'id', value: '99' }]
+    );
+    useWorkspaceStore.getState().closeTab(expectedTabId);
+    expect(useWorkspaceStore.getState().pendingTableJumps[expectedTabId]).toBeUndefined();
+  });
 });

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) const USAGE: &str = "usage: dataomni cli es <connection> <operation> ...
+pub(super) const USAGE: &str = "usage: dataomni es <connection> <operation> ...
   indices
   request <METHOD> <path> [<body>]   (<body> may be - to read it from stdin)
 both take [--timeout SECONDS]";

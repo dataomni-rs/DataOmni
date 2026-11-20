@@ -131,6 +131,9 @@ describe('DataProfileDialog', () => {
     expect(container.textContent).toContain('status');
     expect(container.textContent).toContain('PAID');
     expect(container.textContent).toContain('Schema 漂移');
+    expect(container.textContent).toContain('唯一键');
+    expect(container.textContent).toContain('分组');
+    expect(container.textContent).toContain('点击复制 SQL');
 
     await act(async () => {
       root.unmount();
