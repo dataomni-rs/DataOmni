@@ -30,10 +30,14 @@ Credentials come from the user's keychain; never ask the user for a password.
    unless you pass `--limit N` (up to 10000); `truncated: true` means there were more. Prefer
    aggregating in SQL over pulling many rows.
 4. `dataomni cli explain <connection> "<sql>"` shows the plan without running the statement.
-5. `dataomni cli export <connection> "<sql>" --out FILE` writes all rows to a new CSV or JSON file
-   (`--format json`); `dataomni cli backup <connection> --out PATH` makes a backup the way DataOmni
-   does.
-6. `dataomni cli test <connection>` checks the connection; on failure `error.diagnosis` says whether
+5. `dataomni cli export <connection> "<sql>" --out FILE` writes all rows to a new CSV, JSON, or
+   Parquet file (`--format json` or `--format parquet`); `dataomni cli backup <connection> --out PATH`
+   makes a backup the way DataOmni does.
+6. `dataomni cli profile <connection> "<sql>"` profiles column distributions (inferred type, null
+   ratio, distinct count, min/max/quantiles, top-5 values) via built-in DuckDB without pulling raw
+   rows (default 10000 rows, `--limit N` up to 100000). For a local Parquet/CSV/JSON file, use
+   `dataomni cli profile --file <path>`.
+7. `dataomni cli test <connection>` checks the connection; on failure `error.diagnosis` says whether
    the host resolved and the port answered.
 
 Pass long statements on stdin with `-` in place of the SQL: `dataomni cli query db - < query.sql`.

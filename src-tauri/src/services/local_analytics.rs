@@ -286,6 +286,16 @@ pub struct AnalyticsSession {
   columns: Vec<ColumnPlan>,
 }
 
+impl AnalyticsSession {
+  pub fn is_truncated(&self) -> bool {
+    self.truncated
+  }
+
+  pub fn file_kind(&self) -> Option<LocalFileKind> {
+    self.file_kind
+  }
+}
+
 struct RegistryEntry {
   session: Arc<AnalyticsSession>,
   last_used_seq: u64,

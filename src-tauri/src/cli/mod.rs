@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 /// 默认最多回多少行。Agent 的上下文按字计费，一张大表整张倒进去是浪费，要更多就明说
 const DEFAULT_ROW_LIMIT: usize = 200;
 const MAX_ROW_LIMIT: usize = 10_000;
+/// `profile` 默认采样/装载行数（`rfcs/cli-mcp-usability.md` CM2）
+const DEFAULT_PROFILE_ROW_LIMIT: usize = 10_000;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 /// 读口令最多等多久。钥匙串要授权时这一步会一直卡着，等到有人点了弹框
@@ -129,11 +131,16 @@ Commands:
                      (except _refresh, _flush, _forcemerge, _cache); POST only to
                      search endpoints (_search, _count, _msearch, _mget, ...);
                      PUT and DELETE never. The body is parsed JSON when it is JSON.
-  export <connection> <sql> --out FILE [--format csv|json] [--delimiter C]
+  export <connection> <sql> --out FILE [--format csv|json|parquet] [--delimiter C]
          [--no-header] [--null TEXT] [--bom] [--timeout SECONDS]
                      Write every row of one read-only statement to a new local
                      file (never overwrites), the same bytes the DataOmni export
-                     writes. 300 s timeout by default.
+                     writes (or Apache Parquet via built-in DuckDB). 300 s timeout by default.
+  profile <connection> <sql> [--limit N] [--timeout SECONDS]
+          | profile --file <path> [--limit N]
+                     Column-level data profile (inferred type, null ratio,
+                     distinct count, min/max/quantiles, top-5 values) via
+                     built-in sandboxed DuckDB. Default limit 10000 (up to 100000).
   ddl <connection> <table> [--schema S]
                      The definition the database itself gives for a table or
                      view (SHOW CREATE TABLE, sqlite_master, DBMS_METADATA, ...).
@@ -303,6 +310,7 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
     "es" => es(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "csv-preview" => csv_preview(rest).map(Output::Json),
     "export" => export(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
+    "profile" => profile_command(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "ddl" => ddl(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "backup" => backup(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     other => Err(CliError::usage(format!("unknown command {other}; run `dataomni cli help`"))),
@@ -679,20 +687,47 @@ fn run_es(
 /// 导出最多等多久：整表导出要几分钟，语句的默认 30 秒不够
 const DEFAULT_EXPORT_TIMEOUT_SECONDS: u64 = 300;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliExportFormat {
+  Csv,
+  Json,
+  Parquet,
+}
+
+impl CliExportFormat {
+  const fn as_str(self) -> &'static str {
+    match self {
+      Self::Csv => "csv",
+      Self::Json => "json",
+      Self::Parquet => "parquet",
+    }
+  }
+}
+
 struct ExportArguments {
   connection: String,
   sql: String,
   out: PathBuf,
+  format: CliExportFormat,
   options: crate::services::export_writer::ExportOptions,
   timeout: Duration,
 }
 
+struct CliExportResult {
+  path: String,
+  rows_written: u64,
+  bytes_written: u64,
+  truncated: bool,
+}
+
 fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> {
   use crate::services::export_writer::{ExportFormat, ExportOptions};
-  let usage = "usage: dataomni cli export <connection> <sql> --out FILE [--format csv|json] \
+  let usage =
+    "usage: dataomni cli export <connection> <sql> --out FILE [--format csv|json|parquet] \
     [--delimiter C] [--no-header] [--null TEXT] [--bom] [--timeout SECONDS]";
   let mut positional = Vec::new();
   let mut out = None;
+  let mut format = CliExportFormat::Csv;
   let mut options = ExportOptions {
     format: ExportFormat::Csv,
     delimiter: ",".to_string(),
@@ -714,13 +749,22 @@ fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> 
     match argument.as_str() {
       "--out" => out = Some(PathBuf::from(value("--out")?)),
       // `sql` 要知道哪些是计算列、自增列与序列（界面另查表的元数据），这一版不做
-      "--format" => {
-        options.format = match value("--format")?.as_str() {
-          "csv" => ExportFormat::Csv,
-          "json" => ExportFormat::Json,
-          other => return Err(CliError::usage(format!("--format is csv or json, got {other}"))),
+      "--format" => match value("--format")?.as_str() {
+        "csv" => {
+          format = CliExportFormat::Csv;
+          options.format = ExportFormat::Csv;
         }
-      }
+        "json" => {
+          format = CliExportFormat::Json;
+          options.format = ExportFormat::Json;
+        }
+        "parquet" => {
+          format = CliExportFormat::Parquet;
+        }
+        other => {
+          return Err(CliError::usage(format!("--format is csv, json or parquet, got {other}")))
+        }
+      },
       "--delimiter" => options.delimiter = value("--delimiter")?,
       "--null" => options.null_text = value("--null")?,
       "--no-header" => options.include_header = false,
@@ -742,6 +786,7 @@ fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> 
     connection,
     sql: read_argument(&sql)?,
     out,
+    format,
     options,
     timeout: Duration::from_secs(timeout_seconds),
   })
@@ -759,14 +804,19 @@ fn export(
   let outcome = run_export(&service, &profile, &arguments, config_dir);
   audit::record(log_dir, "export", &profile.name, &arguments.sql, &outcome, started.elapsed());
   let summary = outcome?;
-  Ok(json!({
+  let mut output = json!({
     "schema": OUTPUT_SCHEMA,
     "connection": profile.name,
+    "format": arguments.format.as_str(),
     "file": summary.path,
     "rows": summary.rows_written,
     "bytes": summary.bytes_written,
     "elapsed_ms": started.elapsed().as_millis() as u64,
-  }))
+  });
+  if arguments.format == CliExportFormat::Parquet {
+    output["truncated"] = json!(summary.truncated);
+  }
+  Ok(output)
 }
 
 fn run_export(
@@ -774,19 +824,231 @@ fn run_export(
   profile: &ConnectionProfile,
   arguments: &ExportArguments,
   config_dir: Option<&Path>,
-) -> Result<crate::services::export_writer::ExportSummary, CliError> {
+) -> Result<CliExportResult, CliError> {
   read_only_gate::check(&arguments.sql)
     .map_err(|refusal| CliError::refused(refusal.to_string()))?;
   if !session::supports(&profile.db_type) {
     return Err(unsupported(&profile.db_type));
   }
   let resolved = resolve_verified(service, profile)?;
-  block_on_within(arguments.timeout, "the export", async {
-    let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-    let summary = opened.export(&arguments.sql, &arguments.out, arguments.options.clone()).await;
-    opened.close().await;
-    summary.map_err(session_error)
-  })
+  match arguments.format {
+    CliExportFormat::Csv | CliExportFormat::Json => {
+      let summary = block_on_within(arguments.timeout, "the export", async {
+        let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
+        let summary =
+          opened.export(&arguments.sql, &arguments.out, arguments.options.clone()).await;
+        opened.close().await;
+        summary.map_err(session_error)
+      })?;
+      Ok(CliExportResult {
+        path: summary.path,
+        rows_written: summary.rows_written,
+        bytes_written: summary.bytes_written,
+        truncated: false,
+      })
+    }
+    CliExportFormat::Parquet => {
+      use crate::services::local_analytics::{
+        create_result_session, export_parquet_from_session, MAX_ANALYTICS_ROWS,
+      };
+      let query_result = block_on_within(arguments.timeout, "the export", async {
+        session::run_read_only(&resolved, &arguments.sql, MAX_ANALYTICS_ROWS, config_dir)
+          .await
+          .map_err(session_error)
+      })?;
+      let QueryExecutionResult::Rows { columns, column_metadata, rows, truncated, .. } =
+        query_result
+      else {
+        return Err(CliError::usage("the statement returned no rows to export"));
+      };
+      let (col_inputs, matrix) = result_to_analytics_inputs(&columns, &column_metadata, &rows);
+      let analytics =
+        create_result_session(&col_inputs, &matrix, MAX_ANALYTICS_ROWS).map_err(|error| {
+          CliError {
+            exit: Exit::Database,
+            kind: "analytics",
+            message: error.to_string(),
+            diagnosis: None,
+          }
+        })?;
+      let parquet =
+        export_parquet_from_session(&analytics, None, &arguments.out).map_err(|error| {
+          CliError {
+            exit: Exit::Database,
+            kind: "analytics",
+            message: error.to_string(),
+            diagnosis: None,
+          }
+        })?;
+      Ok(CliExportResult {
+        path: arguments.out.to_string_lossy().into_owned(),
+        rows_written: parquet.row_count,
+        bytes_written: parquet.bytes,
+        truncated: truncated || analytics.is_truncated(),
+      })
+    }
+  }
+}
+
+fn result_to_analytics_inputs(
+  columns: &[String],
+  column_metadata: &[crate::services::query_executor::QueryColumnMetadata],
+  rows: &[crate::services::query_executor::QueryRow],
+) -> (Vec<crate::services::local_analytics::AnalyticsColumnInput>, Vec<Vec<Value>>) {
+  let col_inputs = columns
+    .iter()
+    .enumerate()
+    .map(|(index, name)| {
+      let meta = column_metadata.get(index);
+      crate::services::local_analytics::AnalyticsColumnInput {
+        name: name.clone(),
+        logical_type: meta.map(|m| m.logical_type.clone()),
+        database_type: meta.map(|m| m.database_type.clone()),
+      }
+    })
+    .collect();
+  let matrix = rows
+    .iter()
+    .map(|row| columns.iter().map(|col| row.get(col).cloned().unwrap_or(Value::Null)).collect())
+    .collect();
+  (col_inputs, matrix)
+}
+
+enum ProfileTarget {
+  Query { connection: String, sql: String, timeout: Duration },
+  LocalFile { path: PathBuf },
+}
+
+struct ProfileArguments {
+  target: ProfileTarget,
+  row_limit: usize,
+}
+
+fn parse_profile_arguments(rest: &[String]) -> Result<ProfileArguments, CliError> {
+  use crate::services::local_analytics::MAX_ANALYTICS_ROWS;
+  let usage = "usage: dataomni cli profile <connection> <sql> [--limit N] [--timeout SECONDS] | dataomni cli profile --file <path> [--limit N]";
+  let mut positional = Vec::new();
+  let mut file: Option<PathBuf> = None;
+  let mut row_limit = DEFAULT_PROFILE_ROW_LIMIT;
+  let mut timeout_seconds: Option<u64> = None;
+  let mut iter = rest.iter();
+  while let Some(argument) = iter.next() {
+    match argument.as_str() {
+      "--file" => {
+        let path = iter.next().cloned().ok_or_else(|| CliError::usage("--file takes a path"))?;
+        if file.is_some() {
+          return Err(CliError::usage(usage));
+        }
+        file = Some(PathBuf::from(path));
+      }
+      "--limit" => {
+        row_limit = number_after("--limit", iter.next(), 1, MAX_ANALYTICS_ROWS as u64)? as usize
+      }
+      "--timeout" => {
+        timeout_seconds = Some(number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?)
+      }
+      flag if flag.starts_with("--") => {
+        return Err(CliError::usage(format!("unknown option {flag}; {usage}")))
+      }
+      _ => positional.push(argument.clone()),
+    }
+  }
+  if let Some(path) = file {
+    if !positional.is_empty() || timeout_seconds.is_some() {
+      return Err(CliError::usage(usage));
+    }
+    return Ok(ProfileArguments { target: ProfileTarget::LocalFile { path }, row_limit });
+  }
+  let [connection, sql] =
+    <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
+  let sql = read_argument(&sql)?;
+  let timeout = Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS));
+  Ok(ProfileArguments { target: ProfileTarget::Query { connection, sql, timeout }, row_limit })
+}
+
+fn profile_command(
+  rest: &[String],
+  config_dir: Option<&Path>,
+  log_dir: Option<&Path>,
+) -> Result<Value, CliError> {
+  use crate::services::local_analytics::{
+    create_result_session, open_local_file_session, profile_session,
+  };
+  let arguments = parse_profile_arguments(rest)?;
+  let started = Instant::now();
+  match arguments.target {
+    ProfileTarget::LocalFile { path } => {
+      if !path.is_file() {
+        return Err(CliError {
+          exit: Exit::Usage,
+          kind: "file",
+          message: format!("file not found: {}", path.display()),
+          diagnosis: None,
+        });
+      }
+      let session = open_local_file_session(&path, arguments.row_limit).map_err(|error| {
+        CliError { exit: Exit::Usage, kind: "file", message: error.to_string(), diagnosis: None }
+      })?;
+      let profile = profile_session("cli-file-profile", &session).map_err(|error| CliError {
+        exit: Exit::Database,
+        kind: "analytics",
+        message: error.to_string(),
+        diagnosis: None,
+      })?;
+      Ok(json!({
+        "schema": OUTPUT_SCHEMA,
+        "file": path.to_string_lossy(),
+        "file_kind": session.file_kind(),
+        "rows": profile.row_count,
+        "column_count": profile.column_count,
+        "truncated": session.is_truncated(),
+        "columns": profile.columns,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+      }))
+    }
+    ProfileTarget::Query { connection, sql, timeout } => {
+      let service = open_service(config_dir)?;
+      let conn_profile = find_open(&service, &connection)?;
+      let query_args = QueryArguments {
+        connection: connection.clone(),
+        sql: sql.clone(),
+        row_limit: arguments.row_limit,
+        timeout,
+      };
+      let outcome = run_query(&service, &conn_profile, &query_args, config_dir);
+      audit::record(log_dir, "profile", &conn_profile.name, &sql, &outcome, started.elapsed());
+      let result = outcome?;
+      let QueryExecutionResult::Rows { columns, column_metadata, rows, truncated, .. } = result
+      else {
+        return Err(CliError::usage("the statement returned no rows to profile"));
+      };
+      let (col_inputs, matrix) = result_to_analytics_inputs(&columns, &column_metadata, &rows);
+      let session =
+        create_result_session(&col_inputs, &matrix, arguments.row_limit).map_err(|error| {
+          CliError {
+            exit: Exit::Database,
+            kind: "analytics",
+            message: error.to_string(),
+            diagnosis: None,
+          }
+        })?;
+      let profile = profile_session("cli-profile", &session).map_err(|error| CliError {
+        exit: Exit::Database,
+        kind: "analytics",
+        message: error.to_string(),
+        diagnosis: None,
+      })?;
+      Ok(json!({
+        "schema": OUTPUT_SCHEMA,
+        "connection": conn_profile.name,
+        "rows": profile.row_count,
+        "column_count": profile.column_count,
+        "truncated": truncated || session.is_truncated(),
+        "columns": profile.columns,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+      }))
+    }
+  }
 }
 
 /// 本机的 CSV 文件：嗅探分隔符与编码（UTF-8，否则 gb18030），给表头、开头几行和字段数对不上的行。
@@ -2121,6 +2383,7 @@ mod tests {
       "neo4j",
       "es",
       "export",
+      "profile",
       "ddl",
       "backup",
       "csv-preview",
@@ -2192,5 +2455,87 @@ mod tests {
     let _ = std::fs::remove_file(dir.0.join("connections.json"));
     let (code, stdout, _) = run_in(&dir, &["connections"]);
     assert_eq!((code, names(&stdout).len()), (0, 0));
+  }
+
+  /// CM2：Parquet 导出与 `profile`（数据库连接模式 + `--file` 本地文件模式）端到端闭环
+  #[test]
+  fn export_parquet_and_profile_work_end_to_end() {
+    let dir = ConfigDir::with(&[]);
+    let db = seeded_sqlite(&dir.0);
+    std::fs::write(
+      dir.0.join("connections.json"),
+      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
+    )
+    .expect("config");
+
+    // 1. export --format parquet 写出合法 Parquet 文件且绝不覆盖已有文件
+    let parquet = dir.0.join("items.parquet");
+    let parquet_path = parquet.to_string_lossy().into_owned();
+    let (code, stdout, stderr) = run_in(
+      &dir,
+      &[
+        "export",
+        "local",
+        "SELECT id, name FROM items ORDER BY id",
+        "--out",
+        &parquet_path,
+        "--format",
+        "parquet",
+      ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let export_body = json_of(&stdout);
+    assert_eq!(export_body["format"], json!("parquet"));
+    assert_eq!(export_body["rows"], json!(1000));
+    assert!(export_body["bytes"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(export_body["truncated"], json!(false));
+
+    let (code, _, stderr) =
+      run_in(&dir, &["export", "local", "SELECT 1", "--out", &parquet_path, "--format", "parquet"]);
+    assert_eq!(code, Exit::Usage as i32, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    // 2. profile --file 分析导出的 Parquet 文件（不写审计日志）
+    let (code, stdout, stderr) = run_in(&dir, &["profile", "--file", &parquet_path]);
+    assert_eq!(code, 0, "{stderr}");
+    let file_profile_body = json_of(&stdout);
+    assert_eq!(file_profile_body["file_kind"], json!("parquet"));
+    assert_eq!(file_profile_body["rows"], json!(1000));
+    assert_eq!(file_profile_body["truncated"], json!(false));
+    let cols = file_profile_body["columns"].as_array().expect("file profile cols");
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0]["name"], json!("id"));
+    assert_eq!(cols[0]["distinctCount"], json!(1000));
+    assert!(cols[0]["p50"].is_number());
+
+    // 3. profile <conn> <sql> 走只读门、截断提示并写审计日志
+    let (code, stdout, stderr) = run_in(
+      &dir,
+      &["profile", "local", "SELECT id, name FROM items ORDER BY id", "--limit", "25"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let conn_profile_body = json_of(&stdout);
+    assert_eq!(conn_profile_body["connection"], json!("local"));
+    assert_eq!(conn_profile_body["rows"], json!(25));
+    assert_eq!(conn_profile_body["truncated"], json!(true));
+    assert_eq!(conn_profile_body["column_count"], json!(2));
+
+    let audit_log =
+      std::fs::read_to_string(dir.0.join("logs").join(AUDIT_FILE)).unwrap_or_default();
+    assert!(audit_log.contains(" profile "), "{audit_log}");
+    assert!(!audit_log.contains("ORDER BY id"), "{audit_log}");
+
+    // 4. 写语句被拒，混用参数报 usage
+    let (code, _, _) = run_in(&dir, &["profile", "local", "DELETE FROM items"]);
+    assert_eq!(code, Exit::Refused as i32);
+    for bad in [
+      &["profile"][..],
+      &["profile", "--file", &parquet_path, "local", "SELECT 1"],
+      &["profile", "--file", &parquet_path, "--timeout", "10"],
+      &["profile", "--file"],
+      &["profile", "local", "SELECT 1", "--limit", "0"],
+    ] {
+      assert_eq!(run_in(&dir, bad).0, Exit::Usage as i32, "{bad:?}");
+    }
   }
 }

@@ -32,7 +32,9 @@ never ask for a password.
 How to work: call `connections` first and use a name or id from it. Read the structure before \
 writing SQL (`dictionary` for the whole database, `schema` for tables or one table, `ddl` for the \
 database's own definition). `query` runs one read-only statement, 200 rows by default \
-(`truncated: true` means there were more); prefer aggregating in SQL. `explain` shows the plan \
+(`truncated: true` means there were more); prefer aggregating in SQL. `profile` summarizes column \
+distributions (null ratio, distinct count, min/max/quantiles, top-5 values) for a read-only query \
+without pulling raw rows. `explain` shows the plan \
 without running the statement. MongoDB, Redis, Neo4j and Elasticsearch connections take the \
 `mongo`, `redis`, `neo4j` and `es` tools instead of SQL.
 
@@ -163,6 +165,10 @@ const TOOLS: &[Tool] = &[
     description: "Run one read-only SQL statement (SELECT, WITH, SHOW, ...) in a read-only transaction that is rolled back. Write statements and several statements at once are refused. Returns columns and rows; at most `limit` rows (200 by default).",
   },
   Tool {
+    name: "profile",
+    description: "Profile the result of one read-only SQL statement via built-in sandboxed DuckDB: per-column inferredType, nullRatio, distinctCount, min/max/quantiles (p50/p95), and top-5 values without pulling raw rows (10000 rows by default, up to 100000).",
+  },
+  Tool {
     name: "explain",
     description: "The execution plan of one read-only SQL statement, as a tree (plan.roots) plus the database's own text (plan.raw). Never ANALYZE: the statement itself does not run.",
   },
@@ -244,6 +250,20 @@ fn input_schema(name: &str) -> Value {
         "connection": connection,
         "sql": string("One read-only statement"),
         "limit": limit("200"),
+        "timeout_seconds": timeout,
+      }),
+      &["connection", "sql"],
+    ),
+    // 严禁暴露 `file` 参数：MCP 不碰本机文件系统（rfcs/cli-mcp-usability.md CM2）
+    "profile" => object(
+      json!({
+        "connection": connection,
+        "sql": string("One read-only statement whose result will be profiled"),
+        "limit": integer(
+          "At most this many rows to load for profiling (10000 by default)",
+          1,
+          crate::services::local_analytics::MAX_ANALYTICS_ROWS as u64,
+        ),
         "timeout_seconds": timeout,
       }),
       &["connection", "sql"],
@@ -334,10 +354,10 @@ fn arguments_for(name: &str, arguments: &Map<String, Value>) -> Result<Vec<Strin
   match name {
     "connections" => {}
     "test" | "dictionary" => args.push(input.positional("connection")?),
-    "query" | "explain" => {
+    "query" | "profile" | "explain" => {
       args.push(input.positional("connection")?);
       args.push(input.positional("sql")?);
-      if name == "query" {
+      if name == "query" || name == "profile" {
         input.flag(&mut args, "limit", "--limit")?;
       }
       input.flag(&mut args, "timeout_seconds", "--timeout")?;
@@ -656,6 +676,7 @@ mod tests {
         "connections",
         "test",
         "query",
+        "profile",
         "explain",
         "schema",
         "ddl",
@@ -670,6 +691,9 @@ mod tests {
       let schema = &tool["inputSchema"];
       assert_eq!(schema["type"], "object", "{tool}");
       assert!(!tool["description"].as_str().unwrap_or_default().is_empty(), "{tool}");
+      if tool["name"] == "profile" {
+        assert!(schema["properties"].get("file").is_none(), "MCP profile must not expose file");
+      }
       for required in schema["required"].as_array().cloned().unwrap_or_default() {
         let key = required.as_str().unwrap_or_default();
         assert!(schema["properties"].get(key).is_some(), "{tool}: {key}");
@@ -678,6 +702,49 @@ mod tests {
     for hidden in ["export", "backup", "csv-preview", "help", "guide", "version"] {
       assert!(!names.contains(&hidden), "{hidden}");
     }
+  }
+
+  /// CM2 反向验证门：MCP `profile` 只接受已开放连接 + 只读 SQL，严禁暴露本机文件路径参数
+  #[test]
+  fn profile_tool_profiles_open_connections_and_rejects_local_file_access() {
+    let (dir, _) = sqlite_dir();
+    let (is_error, body) = call_tool(
+      &dir,
+      "profile",
+      json!({ "connection": "local", "sql": "SELECT id, name FROM items ORDER BY id", "limit": 50 }),
+    );
+    assert!(!is_error, "{body}");
+    assert_eq!(body["schema"], json!(1));
+    assert_eq!(body["connection"], json!("local"));
+    assert_eq!(body["rows"], json!(50));
+    assert_eq!(body["truncated"], json!(true));
+    let cols = body["columns"].as_array().expect("profile columns");
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0]["name"], json!("id"));
+    assert_eq!(cols[0]["distinctCount"], json!(50));
+    assert!(cols[0]["p50"].is_number(), "{body}");
+
+    // 反向验证：传 `file` 参数或试图借位置参数偷渡 `--file` 都必须报 usage
+    for bad in [
+      json!({ "file": "/etc/passwd" }),
+      json!({ "connection": "local", "sql": "SELECT 1", "file": "/etc/passwd" }),
+      json!({ "connection": "--file", "sql": "/etc/passwd" }),
+    ] {
+      let (is_error, body) = call_tool(&dir, "profile", bad.clone());
+      assert!(is_error, "{bad}: {body}");
+      assert_eq!(body["error"]["kind"], "usage", "{bad}: {body}");
+    }
+
+    // 生产连接不可见、写语句被拒
+    let (is_error, body) =
+      call_tool(&dir, "profile", json!({ "connection": "prod", "sql": "SELECT 1" }));
+    assert!(is_error);
+    assert_eq!(body["error"]["kind"], "not_found");
+
+    let (is_error, body) =
+      call_tool(&dir, "profile", json!({ "connection": "local", "sql": "DELETE FROM items" }));
+    assert!(is_error);
+    assert_eq!(body["error"]["kind"], "refused");
   }
 
   #[test]
