@@ -139,47 +139,52 @@ pub(super) async fn run(
     Ok::<_, String>((tunnels, Arc::new(pool)))
   };
   let deadline = session::CONNECT_DEADLINE;
-  let (_tunnels, pool) = tokio::time::timeout(deadline, connect)
+  let (tunnels, pool) = tokio::time::timeout(deadline, connect)
     .await
     .map_err(|_| {
       CliError::unavailable("connect", format!("could not connect within {} s", deadline.as_secs()))
     })?
     .map_err(|error| CliError::unavailable("connect", error))?;
   let timeout = arguments.timeout;
-  match &arguments.request {
-    Request::Indices => {
-      let objects = elasticsearch::list_objects(pool, timeout).await.map_err(database_error)?;
-      let indices: Vec<Value> = objects
-        .into_iter()
-        .map(|object| json!({ "name": object.object_name, "kind": object.object_kind }))
-        .collect();
-      Ok(json!({ "indices": indices }))
-    }
-    Request::Send { method, path, body } => {
-      // `_msearch` 的请求体是每行一份的 NDJSON，其余是一份 JSON
-      let ndjson =
-        path.split('?').next().unwrap_or("").split('/').any(|segment| segment == "_msearch");
-      let request = EsRequest {
-        method: method.clone(),
-        path: path.clone(),
-        body: body.clone(),
-        ndjson,
-        timeout,
-      };
-      let response = elasticsearch::run(pool, request).await.map_err(database_error)?;
-      let body =
-        serde_json::from_str::<Value>(&response.body).unwrap_or(Value::String(response.body));
-      if response.status >= 400 {
-        return Err(CliError {
-          exit: Exit::Database,
-          kind: "database",
-          message: format!("HTTP {}: {}", response.status, body),
-          diagnosis: None,
-        });
+  let outcome: Result<Value, CliError> = async {
+    match &arguments.request {
+      Request::Indices => {
+        let objects = elasticsearch::list_objects(pool, timeout).await.map_err(database_error)?;
+        let indices: Vec<Value> = objects
+          .into_iter()
+          .map(|object| json!({ "name": object.object_name, "kind": object.object_kind }))
+          .collect();
+        Ok(json!({ "indices": indices }))
       }
-      Ok(json!({ "status": response.status, "body": body }))
+      Request::Send { method, path, body } => {
+        // `_msearch` 的请求体是每行一份的 NDJSON，其余是一份 JSON
+        let ndjson =
+          path.split('?').next().unwrap_or("").split('/').any(|segment| segment == "_msearch");
+        let request = EsRequest {
+          method: method.clone(),
+          path: path.clone(),
+          body: body.clone(),
+          ndjson,
+          timeout,
+        };
+        let response = elasticsearch::run(pool, request).await.map_err(database_error)?;
+        let body =
+          serde_json::from_str::<Value>(&response.body).unwrap_or(Value::String(response.body));
+        if response.status >= 400 {
+          return Err(CliError {
+            exit: Exit::Database,
+            kind: "database",
+            message: format!("HTTP {}: {}", response.status, body),
+            diagnosis: None,
+          });
+        }
+        Ok(json!({ "status": response.status, "body": body }))
+      }
     }
   }
+  .await;
+  tunnels.close().await;
+  outcome
 }
 
 fn database_error(message: String) -> CliError {

@@ -144,7 +144,7 @@ pub(super) async fn run(
     Ok::<_, String>((tunnels, pool))
   };
   let deadline = session::CONNECT_DEADLINE;
-  let (_tunnels, pool) = tokio::time::timeout(deadline, connect)
+  let (tunnels, pool) = tokio::time::timeout(deadline, connect)
     .await
     .map_err(|_| {
       CliError::unavailable("connect", format!("could not connect within {} s", deadline.as_secs()))
@@ -152,59 +152,64 @@ pub(super) async fn run(
     .map_err(|error| CliError::unavailable("connect", error))?;
   let database = arguments.database.unwrap_or_else(|| pool.default_database());
   let timeout = arguments.timeout;
-  let body = match &arguments.request {
-    Request::Keyspaces => {
-      let entries = redis::list_keyspaces(&pool).await.map_err(database_error)?;
-      let keyspaces: Vec<Value> = entries
-        .into_iter()
-        .map(|entry| {
-          let index =
-            entry.object_name.strip_prefix("db").and_then(|index| index.parse::<i64>().ok());
-          json!({ "database": index, "keys": entry.keys })
-        })
-        .collect();
-      json!({ "keyspaces": keyspaces })
-    }
-    Request::Scan { pattern, kind, cursor, limit } => {
-      let request = ScanRequest {
-        database,
-        pattern: pattern.clone(),
-        cursor: cursor.clone(),
-        kind: kind.clone(),
-        page: *limit,
-        timeout,
-      };
-      let page = redis::scan(&pool, request).await.map_err(database_error)?;
-      json!({ "database": database, "keys": page.keys, "cursor": page.cursor })
-    }
-    Request::Get { key, position, limit } => {
-      let request = ValueRequest {
-        database,
-        key: key.as_bytes().to_vec(),
-        position: position.clone(),
-        page: *limit as u64,
-        timeout,
-      };
-      let value = redis::read_value(&pool, request).await.map_err(database_error)?;
-      json!({ "database": database, "key": key, "value": value })
-    }
-    Request::Command { arguments } => {
-      require_read_only(&pool, database, arguments, timeout).await?;
-      let bytes = arguments.iter().map(|argument| argument.as_bytes().to_vec()).collect();
-      let reply = redis::execute(&pool, database, bytes, timeout).await.map_err(|error| {
-        // 会阻塞、改连接状态的：同界面的命令行一样拒，这里是权限门的一部分
-        if error.starts_with(redis::REDIS_COMMAND_BLOCKING)
-          || error.starts_with(redis::REDIS_COMMAND_CONNECTION_STATE)
-        {
-          CliError::refused(error)
-        } else {
-          database_error(error)
-        }
-      })?;
-      json!({ "database": database, "reply": reply })
-    }
-  };
-  Ok(body)
+  let outcome: Result<Value, CliError> = async {
+    let body = match &arguments.request {
+      Request::Keyspaces => {
+        let entries = redis::list_keyspaces(&pool).await.map_err(database_error)?;
+        let keyspaces: Vec<Value> = entries
+          .into_iter()
+          .map(|entry| {
+            let index =
+              entry.object_name.strip_prefix("db").and_then(|index| index.parse::<i64>().ok());
+            json!({ "database": index, "keys": entry.keys })
+          })
+          .collect();
+        json!({ "keyspaces": keyspaces })
+      }
+      Request::Scan { pattern, kind, cursor, limit } => {
+        let request = ScanRequest {
+          database,
+          pattern: pattern.clone(),
+          cursor: cursor.clone(),
+          kind: kind.clone(),
+          page: *limit,
+          timeout,
+        };
+        let page = redis::scan(&pool, request).await.map_err(database_error)?;
+        json!({ "database": database, "keys": page.keys, "cursor": page.cursor })
+      }
+      Request::Get { key, position, limit } => {
+        let request = ValueRequest {
+          database,
+          key: key.as_bytes().to_vec(),
+          position: position.clone(),
+          page: *limit as u64,
+          timeout,
+        };
+        let value = redis::read_value(&pool, request).await.map_err(database_error)?;
+        json!({ "database": database, "key": key, "value": value })
+      }
+      Request::Command { arguments } => {
+        require_read_only(&pool, database, arguments, timeout).await?;
+        let bytes = arguments.iter().map(|argument| argument.as_bytes().to_vec()).collect();
+        let reply = redis::execute(&pool, database, bytes, timeout).await.map_err(|error| {
+          // 会阻塞、改连接状态的：同界面的命令行一样拒，这里是权限门的一部分
+          if error.starts_with(redis::REDIS_COMMAND_BLOCKING)
+            || error.starts_with(redis::REDIS_COMMAND_CONNECTION_STATE)
+          {
+            CliError::refused(error)
+          } else {
+            database_error(error)
+          }
+        })?;
+        json!({ "database": database, "reply": reply })
+      }
+    };
+    Ok(body)
+  }
+  .await;
+  tunnels.close().await;
+  outcome
 }
 
 /// 问服务器这条命令带不带 `readonly`。有子命令的（`OBJECT ENCODING`、`XINFO STREAM`）

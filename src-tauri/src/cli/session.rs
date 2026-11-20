@@ -44,13 +44,28 @@ pub(super) fn supports(db_type: &DatabaseType) -> bool {
     )
 }
 
+/// 一次调用里持有的 SSH 隧道租约：单次 CLI 命令拥有独立登记表并在结束时优雅断开；
+/// MCP 常驻会话复用进程级登记表，单次工具调用不关隧道，直到 `mcp::serve` 退出统一断开。
+pub(super) enum TunnelLease {
+  Owned(TunnelRegistry),
+  Shared,
+}
+
+impl TunnelLease {
+  pub(super) async fn close(self) {
+    if let Self::Owned(tunnels) = self {
+      tunnels.close_all().await;
+    }
+  }
+}
+
 /// 一次调用里打开的库。隧道随它一起活到这次调用结束
 pub(super) struct Opened {
   pool: Pool,
   /// 开只读事务的那一句。SQLite、DuckDB 以只读方式打开文件，ClickHouse 每条请求带
   /// `readonly = 1`，都不需要
   begin: Option<&'static str>,
-  _tunnels: TunnelRegistry,
+  tunnels: TunnelLease,
 }
 
 enum Pool {
@@ -139,22 +154,28 @@ async fn connect(
     }
     _ => return Err(Failure::Unsupported(profile.db_type.clone())),
   };
-  Ok(Opened { pool, begin, _tunnels: tunnels })
+  Ok(Opened { pool, begin, tunnels })
 }
 
-/// 连接配了 SSH 隧道就先打开它，给出本机这一头的端口。隧道活到返回的登记表被丢掉为止
+/// 连接配了 SSH 隧道就先打开它，给出本机这一头的端口。MCP 常驻会话内复用共享隧道池，
+/// 单次 CLI 调用使用独立登记表并在结束时优雅断开。
 pub(super) async fn tunnel(
   profile: &ConnectionProfile,
-) -> Result<(TunnelRegistry, Option<u16>), String> {
-  let tunnels = TunnelRegistry::default();
+) -> Result<(TunnelLease, Option<u16>), String> {
   let Some(tunnel) = &profile.ssh_tunnel else {
-    return Ok((tunnels, None));
+    return Ok((TunnelLease::Owned(TunnelRegistry::default()), None));
   };
   let known_hosts =
     default_known_hosts().ok_or_else(|| "cannot locate ~/.ssh/known_hosts".to_string())?;
+  if let Some(shared) = super::shared_mcp_tunnels() {
+    let port =
+      shared.ensure(profile, tunnel, &known_hosts).await.map_err(|error| error.to_string())?;
+    return Ok((TunnelLease::Shared, Some(port)));
+  }
+  let tunnels = TunnelRegistry::default();
   let port =
     tunnels.ensure(profile, tunnel, &known_hosts).await.map_err(|error| error.to_string())?;
-  Ok((tunnels, Some(port)))
+  Ok((TunnelLease::Owned(tunnels), Some(port)))
 }
 
 impl Opened {
@@ -245,6 +266,7 @@ impl Opened {
     if let Pool::Sqlx(pool) = self.pool {
       close(pool).await;
     }
+    self.tunnels.close().await;
   }
 }
 

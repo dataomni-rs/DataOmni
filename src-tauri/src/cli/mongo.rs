@@ -223,14 +223,15 @@ pub(super) async fn run(
     Ok::<_, String>((tunnels, client))
   };
   let deadline = session::CONNECT_DEADLINE;
-  let (_tunnels, client) = tokio::time::timeout(deadline, connect)
+  let (tunnels, client) = tokio::time::timeout(deadline, connect)
     .await
     .map_err(|_| {
       CliError::unavailable("connect", format!("could not connect within {} s", deadline.as_secs()))
     })?
     .map_err(|error| CliError::unavailable("connect", error))?;
   let timeout = arguments.timeout;
-  let body = match &arguments.request {
+  let outcome: Result<Value, CliError> = async {
+    let body = match &arguments.request {
     Request::Collections => {
       let entries = mongodb::list_collections(&client).await.map_err(database_error)?;
       let collections: Vec<Value> = entries
@@ -296,8 +297,12 @@ pub(super) async fn run(
           .map_err(database_error)?;
       json!({ "namespace": label(namespace), "indexes": structure.indexes, "options": structure.options })
     }
-  };
-  Ok(body)
+    };
+    Ok(body)
+  }
+  .await;
+  tunnels.close().await;
+  outcome
 }
 
 fn label(namespace: &Namespace) -> String {

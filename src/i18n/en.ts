@@ -1248,6 +1248,8 @@ export const en: Translations = {
   'form.usernamePlaceholder': 'Enter a username',
   'form.password': 'Password',
   'form.passwordPlaceholder': 'Enter a password',
+  'form.passwordStoredPlaceholder': 'Saved (leave blank to keep)',
+  'form.passwordStoredHint': 'Saved in the system credential store. Leave blank to keep it, or enter a new value to replace it.',
   'form.savePassword': 'Save the password in the system credential store',
   'form.savePasswordHint': 'When off, the password is used only for this app session and must be entered again after a restart.',
   'form.tlsCertificates':
