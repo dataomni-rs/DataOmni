@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Sparkles,
   Undo2
 } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -53,6 +54,9 @@ import { requireDatabase } from '../utils/requireDatabase';
 import { SegmentedControl, PLAIN_TEXT_INPUT } from './FormControls';
 import { CodegenDialog } from './CodegenDialog';
 import { SchemaCompareDialog } from './SchemaCompareDialog';
+import { AiSemanticsDraftDialog } from './AiSemanticsDraftDialog';
+import { useSettingsStore } from '../stores/settingsStore';
+import { aiAvailable } from '../utils/aiSettings';
 import { schemaDiffDialectFor } from '../utils/schemaDiff';
 import type { SqlDialect } from '../contracts/queryExecution';
 import type { CodegenSchema } from '../utils/codegenModel';
@@ -124,7 +128,20 @@ const TYPE_BUDGET = 16;
 export function ErDiagramView({ connection, onOpenSql }: ErDiagramViewProps) {
   const database = useQueryStore((state) => state.database);
   const [comparing, setComparing] = useState(false);
+  const [draftingSemantics, setDraftingSemantics] = useState(false);
+  const [aiInBuild, setAiInBuild] = useState(false);
+  const aiEnabled = useSettingsStore((state) => state.ai.enabled);
   const t = useLanguageStore((state) => state.t);
+
+  useEffect(() => {
+    let cancelled = false;
+    void aiAvailable().then((value) => {
+      if (!cancelled) setAiInBuild(value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // 我们自己执行过 DDL 就会 +1，图跟着重拉。外部改动靠刷新按钮。
   const schemaVersion = useAppStore((state) => state.schemaVersion);
 
@@ -235,6 +252,9 @@ export function ErDiagramView({ connection, onOpenSql }: ErDiagramViewProps) {
         document={{ title: connection.name, dialect: serverLabel(connection), origin: 'catalog' }}
         codegen={codegen}
         onCompare={schemaDiffDialectFor(connection.db_type) ? () => setComparing(true) : undefined}
+        onDraftSemantics={
+          aiInBuild && aiEnabled && tables.length > 0 ? () => setDraftingSemantics(true) : undefined
+        }
       />
       {comparing && (
         <SchemaCompareDialog
@@ -242,6 +262,17 @@ export function ErDiagramView({ connection, onOpenSql }: ErDiagramViewProps) {
           currentHandle={requireDatabase(database)}
           onOpenSql={onOpenSql}
           onClose={() => setComparing(false)}
+        />
+      )}
+      {draftingSemantics && (
+        <AiSemanticsDraftDialog
+          connectionId={connection.id}
+          connectionName={connection.name}
+          dialect={serverLabel(connection)}
+          environment={connection.environment}
+          tables={tables}
+          links={links}
+          onClose={() => setDraftingSemantics(false)}
         />
       )}
     </>
@@ -258,7 +289,8 @@ export function ErDiagramCanvas({
   onRefresh,
   document: source,
   codegen,
-  onCompare
+  onCompare,
+  onDraftSemantics
 }: {
   tables: ErTable[];
   links: ErLink[];
@@ -266,6 +298,8 @@ export function ErDiagramCanvas({
   codegen?: ErCodegen;
   /** 与另一个库比对结构（只有已有库的图才有） */
   onCompare?: () => void;
+  /** AI 业务语义注释草拟（仅含 ai feature 且设置开启时提供） */
+  onDraftSemantics?: () => void;
   /** 外部改了结构时用：数据库不会推送这件事，只能主动再查一遍 */
   onRefresh?: () => void;
 }) {
@@ -612,6 +646,11 @@ export function ErDiagramCanvas({
           {onCompare && (
             <ToolButton label={t('er.compare')} onClick={onCompare}>
               <GitCompareArrows size={13} />
+            </ToolButton>
+          )}
+          {onDraftSemantics && (
+            <ToolButton label={t('aiSemantics.triggerTitle')} onClick={onDraftSemantics}>
+              <Sparkles size={13} />
             </ToolButton>
           )}
           {onRefresh && (

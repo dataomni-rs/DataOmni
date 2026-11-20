@@ -66,6 +66,8 @@ pub fn run() {
     .manage(services::elasticsearch::EsRegistry::default())
     .manage(services::duckdb::DuckDbRegistry::default())
     .manage(services::clickhouse::ClickHouseRegistry::default())
+    .manage(services::local_analytics::LocalAnalyticsRegistry::default())
+    .manage(commands::ai_commands::AiRequestRegistry::default())
     .setup(|app| {
       // 启动日志留着：窗口起不来时，这一行是唯一能说明进程到底跑没跑的证据
       log::info!("DataOmni {} 启动", app.package_info().version);
@@ -83,7 +85,11 @@ pub fn run() {
       update_connection,
       delete_connection,
       get_connections,
+      get_connection_semantics,
+      save_connection_semantics,
       diagnostics,
+      agent_cli_info,
+      read_agent_audit_log,
       compiled_drivers,
       install_channel,
       check_app_update,
@@ -169,8 +175,18 @@ pub fn run() {
       // AI 设计（没编进 `ai` feature 时命令照样在，一律回答「这个构建没有 AI」）
       ai_available,
       ai_complete,
+      ai_cancel,
       ai_save_key,
       ai_has_key,
+      // 内置 DuckDB 统一结果集分析、列画像与本地文件探索（DA1–DA2）
+      analytics_load_result,
+      analytics_load_json_docs,
+      analytics_open_file,
+      analytics_profile,
+      analytics_query,
+      analytics_export_parquet,
+      analytics_cancel,
+      analytics_close,
       // 文件写入
       write_text_file,
       write_new_text_files,

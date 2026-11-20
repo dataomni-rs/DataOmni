@@ -1,9 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { AlertTriangle, Loader2, X } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Loader2, ShieldAlert, Sparkles, X } from 'lucide-react';
 import { clsx } from 'clsx';
+import type { ConnectionEnvironment } from '../contracts';
+import type { CompletionRelation } from '../contracts/databaseMetadata';
 import { useLanguageStore } from '../stores/languageStore';
 import { useQueryStore } from '../stores/queryStore';
+import { useSettingsStore } from '../stores/settingsStore';
+import {
+  aiAvailable,
+  cancelAiRequest,
+  completeWithAi,
+  createAiRequestId,
+  isAiCancelled,
+  isAiKeyMissing,
+  resolveAiEndpointForEnvironment
+} from '../utils/aiSettings';
+import {
+  buildExplainAnalysisPrompt,
+  parseExplainAnalysisReply,
+  type AiPromptMessages,
+  type ExplainAnalysisResult
+} from '../utils/aiSqlAssist';
 import { describeError } from '../utils/describeError';
 import { formatPlanMs, formatPlanRows, worstEstimate, type QueryPlan } from '../utils/planInsights';
 import { PlanTree } from './PlanTree';
@@ -15,6 +33,8 @@ interface QueryPlanDialogProps {
   /** 数据库类型，用来决定「真的执行一遍」给不给开 */
   dbType: string;
   databaseLabel: string;
+  environment?: ConnectionEnvironment;
+  relations?: readonly CompletionRelation[];
   onClose: () => void;
 }
 
@@ -35,9 +55,13 @@ export function QueryPlanDialog({
   connectionId,
   dbType,
   databaseLabel,
+  environment = 'development',
+  relations = [],
   onClose
 }: QueryPlanDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const language = useLanguageStore((state) => state.resolved);
+  const ai = useSettingsStore((state) => state.ai);
   // 只订阅 id：`refreshTransaction` 每次都会换掉整个 session 对象，
   // 把对象本身放进 effect 的依赖里会让取计划和刷事务状态互相触发，转不停
   const sessionId = useQueryStore((state) => state.session?.id ?? null);
@@ -49,6 +73,33 @@ export function QueryPlanDialog({
   const [plan, setPlan] = useState<QueryPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [aiInBuild, setAiInBuild] = useState(false);
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiSent, setAiSent] = useState<AiPromptMessages | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiRawReply, setAiRawReply] = useState<string | null>(null);
+  const [aiAnalysis, setAiAnalysis] = useState<ExplainAnalysisResult | null>(null);
+  const [copiedSuggestionIdx, setCopiedSuggestionIdx] = useState<number | null>(null);
+  const aiRequestIdRef = useRef<string | null>(null);
+
+  const endpointResolution = useMemo(
+    () => resolveAiEndpointForEnvironment(ai, environment),
+    [ai, environment]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void aiAvailable().then((value) => {
+      if (!cancelled) setAiInBuild(value);
+    });
+    return () => {
+      cancelled = true;
+      if (aiRequestIdRef.current) {
+        void cancelAiRequest(aiRequestIdRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -97,6 +148,68 @@ export function QueryPlanDialog({
   // 重新取计划时不显示上一份的结论：勾上「真的执行一遍」那一刻，旧计划的
   // 提示会停在屏幕上，读的人会以为那是新结果
   const worst = plan && !loading && !error ? worstEstimate(plan) : null;
+
+  const runAiExplainAnalysis = async () => {
+    if (!plan || !endpointResolution.ok) {
+      return;
+    }
+    const worstSummary = worst
+      ? `${worst.target ? `${worst.operation} (${worst.target})` : worst.operation}: estimated ${formatPlanRows(worst.estimatedRows)}, actual ${formatPlanRows(worst.actualRows)}`
+      : undefined;
+    const messages = buildExplainAnalysisPrompt({
+      dialect: databaseLabel,
+      sql,
+      planRaw: plan.raw,
+      worstEstimateSummary: worstSummary,
+      relations,
+      language
+    });
+    const requestId = createAiRequestId('explain');
+    aiRequestIdRef.current = requestId;
+    setAiSent(messages);
+    setAiError(null);
+    setAiRawReply(null);
+    setAiAnalysis(null);
+    setAiRunning(true);
+    try {
+      const reply = await completeWithAi(ai, messages, {
+        requestId,
+        endpoint: endpointResolution.endpoint
+      });
+      const parsed = parseExplainAnalysisReply(reply);
+      if (!parsed.ok) {
+        setAiError(t('aiSql.parseFailed'));
+        setAiRawReply(parsed.raw);
+      } else {
+        setAiAnalysis(parsed.value);
+      }
+    } catch (caught) {
+      if (isAiCancelled(caught)) {
+        setAiError(t('error.backend.aiCancelled'));
+      } else if (isAiKeyMissing(caught)) {
+        setAiError(t('error.backend.aiKeyMissing'));
+      } else {
+        setAiError(describeError(caught));
+      }
+    } finally {
+      if (aiRequestIdRef.current === requestId) {
+        aiRequestIdRef.current = null;
+      }
+      setAiRunning(false);
+    }
+  };
+
+  const copySuggestionSql = async (idx: number, sqlText: string) => {
+    try {
+      await navigator.clipboard.writeText(sqlText);
+      setCopiedSuggestionIdx(idx);
+      window.setTimeout(() => {
+        setCopiedSuggestionIdx((current) => (current === idx ? null : current));
+      }, 1500);
+    } catch {
+      // 忽略剪贴板错误
+    }
+  };
 
   return (
     <div
@@ -180,7 +293,45 @@ export function QueryPlanDialog({
               {autocommit ? t('plan.analyzeWillCommit') : t('plan.analyzeWillRun')}
             </span>
           )}
+
+          {aiInBuild && ai.enabled && !loading && !error && plan && (
+            <div className="ml-auto flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void runAiExplainAnalysis()}
+                disabled={aiRunning || !endpointResolution.ok}
+                className="inline-flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover disabled:opacity-50"
+              >
+                {aiRunning ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} className="text-accent" />}
+                {t('aiSql.explainAnalyzeButton')}
+              </button>
+              {aiRunning && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (aiRequestIdRef.current) void cancelAiRequest(aiRequestIdRef.current);
+                  }}
+                  className="rounded-control border border-line-strong bg-surface px-2 py-1 text-xs text-fg hover:bg-surface-hover"
+                >
+                  {t('common.cancel')}
+                </button>
+              )}
+            </div>
+          )}
         </div>
+
+        {aiInBuild && ai.enabled && !endpointResolution.ok && (
+          <div className="flex items-center gap-1.5 border-b border-warning-line bg-warning-soft px-5 py-1.5 text-xs text-warning">
+            <ShieldAlert size={13} className="shrink-0" />
+            <span>
+              {endpointResolution.reason === 'blocked-production'
+                ? t('aiSql.blockedProduction')
+                : endpointResolution.reason === 'local-only-required'
+                  ? t('aiSql.localOnlyRequired')
+                  : t('aiDesign.notConfigured')}
+            </span>
+          </div>
+        )}
 
         {worst && (
           <p className="border-b border-warning-line bg-warning-soft px-5 py-2 text-xs text-warning">
@@ -214,6 +365,79 @@ export function QueryPlanDialog({
               </pre>
               <p className="mt-2 text-xs text-fg-subtle">{t('plan.rawNote')}</p>
             </>
+          )}
+
+          {(aiSent || aiError || aiAnalysis) && (
+            <div className="mt-4 space-y-2 border-t border-line pt-3 text-xs">
+              <div className="flex items-center gap-1.5 font-medium text-fg">
+                <Sparkles size={13} className="text-accent" />
+                <span>{t('aiSql.explainResultTitle')}</span>
+              </div>
+              {aiSent && (
+                <details className="text-fg-muted">
+                  <summary className="cursor-pointer select-none">{t('aiDesign.sent')}</summary>
+                  <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-control border border-line bg-surface-sunken p-2 font-mono text-[11px] text-fg select-text">
+                    {`[system]\n${aiSent.system}\n\n[user]\n${aiSent.user}`}
+                  </pre>
+                </details>
+              )}
+              {aiError && (
+                <div className="rounded-control border border-danger-line bg-danger-soft px-3 py-2 text-danger">
+                  <p className="break-words">{aiError}</p>
+                  {aiRawReply && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer select-none">{t('aiDesign.rawReply')}</summary>
+                      <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words font-mono select-text">
+                        {aiRawReply}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              )}
+              {aiAnalysis && (
+                <div className="space-y-2 rounded-control border border-line bg-surface-sunken p-3">
+                  <p className="text-fg">{aiAnalysis.summary}</p>
+                  {aiAnalysis.bottlenecks.length > 0 && (
+                    <div>
+                      <p className="font-medium text-fg-muted">{t('aiSql.explainBottlenecks')}</p>
+                      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-fg">
+                        {aiAnalysis.bottlenecks.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {aiAnalysis.suggestions.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="font-medium text-fg-muted">{t('aiSql.explainSuggestions')}</p>
+                      {aiAnalysis.suggestions.map((suggestion, idx) => (
+                        <div key={idx} className="rounded-control border border-line bg-surface p-2.5 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-fg">{suggestion.title}</span>
+                            {suggestion.sql && (
+                              <button
+                                type="button"
+                                onClick={() => void copySuggestionSql(idx, suggestion.sql ?? '')}
+                                className="inline-flex items-center gap-1 rounded-control border border-line-strong px-2 py-0.5 text-[11px] text-fg hover:bg-surface-hover"
+                              >
+                                {copiedSuggestionIdx === idx ? <Check size={11} /> : <Copy size={11} />}
+                                {copiedSuggestionIdx === idx ? t('common.copied') : t('common.copy')}
+                              </button>
+                            )}
+                          </div>
+                          {suggestion.rationale && <p className="text-fg-muted">{suggestion.rationale}</p>}
+                          {suggestion.sql && (
+                            <pre className="overflow-x-auto rounded border border-line bg-surface-sunken px-2 py-1.5 font-mono text-[11px] text-fg select-text">
+                              {suggestion.sql}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

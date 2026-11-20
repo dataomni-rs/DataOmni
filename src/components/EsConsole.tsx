@@ -7,7 +7,7 @@ import { json } from '@codemirror/legacy-modes/mode/javascript';
 import { oneDark } from '@codemirror/theme-one-dark';
 import type { EditorView } from '@codemirror/view';
 import { clsx } from 'clsx';
-import { AlertCircle, Copy, Loader2, Play, X } from 'lucide-react';
+import { AlertCircle, BarChart2, Copy, Database, Loader2, Play, X } from 'lucide-react';
 import type { ConnectionProfile } from '../contracts/connection';
 import { selectActiveSqlDocument, useQueryStore } from '../stores/queryStore';
 import { useLanguageStore } from '../stores/languageStore';
@@ -20,6 +20,9 @@ import { useResizablePanel } from '../hooks/useResizablePanel';
 import { PanelResizeHandle } from './PanelResizeHandle';
 import { DestructiveStatementPrompt } from './DestructiveStatementPrompt';
 import { EsDocumentEditor } from './EsDocumentEditor';
+import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
+import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
+import { extractEsJsonDocs } from '../utils/analyticsProfile';
 import { documentAddress, type DocumentAddress } from '../utils/esDocument';
 import { appEditorTheme } from '../utils/editorTheme';
 import { runShortcutKeymap, type RunShortcutHandlers } from '../utils/runShortcutKeymap';
@@ -520,6 +523,17 @@ function ResponseView({
   const aggTables = useMemo(() => toAggTables(parsed), [parsed]);
   const [chosen, setView] = useState<ResponseViewOption | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [showAnalyze, setShowAnalyze] = useState(false);
+  const profileDocs = useMemo(() => extractEsJsonDocs(response.body), [response.body]);
+  const profileSource = useMemo<DataProfileSource>(
+    () => ({ kind: 'jsonDocuments', documents: profileDocs }),
+    [profileDocs]
+  );
+  const analyticsSource = useMemo<LocalAnalyticsSource>(
+    () => ({ kind: 'jsonDocuments', title: 'Elasticsearch', documents: profileDocs }),
+    [profileDocs]
+  );
   const views = VIEW_OPTIONS.filter((option) => (
     option === 'json' || (option === 'table' ? table !== null : aggTables.length > 0)
   ));
@@ -550,6 +564,28 @@ function ResponseView({
           {bulk && <span className="ml-2 text-warning">{t('es.bulkFailed', { failed: bulk.failed, count: bulk.total })}</span>}
         </p>
         <div className="flex shrink-0 items-center gap-2">
+          {profileDocs.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowProfile(true)}
+                title={t('result.profileTitle')}
+                className="flex items-center gap-1 rounded-control border border-line px-2 py-0.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg"
+              >
+                <BarChart2 size={12} />
+                <span>{t('result.profile')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAnalyze(true)}
+                title={t('result.analyzeTitle')}
+                className="flex items-center gap-1 rounded-control border border-line px-2 py-0.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg"
+              >
+                <Database size={12} />
+                <span>{t('result.analyze')}</span>
+              </button>
+            </>
+          )}
           {view === 'json' && pretty !== '' && (
             <button type="button" onClick={copy} className="flex items-center gap-1 text-xs text-fg-muted hover:text-fg">
               <Copy size={12} />
@@ -635,6 +671,18 @@ function ResponseView({
             <p className="mt-1 text-xs text-fg-muted">{t('es.tableCapped', { shown: shownRows.length, total: table.rows.length })}</p>
           )}
         </>
+      )}
+      {showProfile && (
+        <DataProfileDialog
+          source={profileSource}
+          onClose={() => setShowProfile(false)}
+        />
+      )}
+      {showAnalyze && (
+        <LocalAnalyticsDialog
+          source={analyticsSource}
+          onClose={() => setShowAnalyze(false)}
+        />
       )}
     </div>
   );

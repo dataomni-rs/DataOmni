@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { useShallow } from 'zustand/react/shallow';
 import {
   Plus,
@@ -10,7 +11,8 @@ import {
   X,
   SlidersHorizontal,
   History,
-  PanelLeftClose
+  PanelLeftClose,
+  FileSpreadsheet
 } from 'lucide-react';
 import { ConnectionConfig, useConnectionStore } from '../stores/connectionStore';
 import DatabaseExplorer from './DatabaseExplorer';
@@ -18,6 +20,8 @@ import { ConnectionForm } from './ConnectionForm';
 import { ThemeToggle } from './ThemeToggle';
 import { LanguageToggle } from './LanguageToggle';
 import { SettingsDialog } from './SettingsDialog';
+import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
+import { LOCAL_DATA_FILE_EXTENSIONS } from '../utils/analyticsQuery';
 import { EnvironmentBadgeTag } from './EnvironmentBadge';
 import { useAppStore } from '../stores/appStore';
 import { useConfirmPrompt } from './ConfirmPrompt';
@@ -71,6 +75,32 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // 只装本组件自己产生的错误（加载列表、删除连接）；连接过程的错误由 connector 持有
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<'agent' | undefined>(undefined);
+  const [localDataFile, setLocalDataFile] = useState<string | null>(null);
+  const localFileSource = useMemo<LocalAnalyticsSource | null>(
+    () => (localDataFile ? { kind: 'localFile', filePath: localDataFile } : null),
+    [localDataFile]
+  );
+
+  const handleOpenLocalDataFile = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: t('analytics.fileFilterName'),
+            extensions: [...LOCAL_DATA_FILE_EXTENSIONS]
+          }
+        ]
+      });
+      if (typeof selected === 'string' && selected.trim() !== '') {
+        setLocalDataFile(selected);
+      }
+    } catch (err) {
+      setConnectionError(describeError(err));
+    }
+  };
   const { ask, prompt: confirmPrompt } = useConfirmPrompt();
   const {
     connect,
@@ -328,6 +358,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <span className="text-xs text-fg-subtle">{t('app.language')}</span>
           <LanguageToggle />
         </div>
+        <button
+          type="button"
+          onClick={() => void handleOpenLocalDataFile()}
+          title={t('analytics.openLocalFileTitle')}
+          className="flex w-full items-center gap-2 rounded-control px-1 py-1 text-xs text-fg-subtle hover:bg-surface-hover hover:text-fg"
+        >
+          <FileSpreadsheet size={13} />
+          {t('analytics.openLocalFile')}
+        </button>
         {onOpenHistory && (
           <button
             type="button"
@@ -340,7 +379,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
         <button
           type="button"
-          onClick={() => setShowSettings(true)}
+          onClick={() => {
+            setSettingsSection(undefined);
+            setShowSettings(true);
+          }}
           className="flex w-full items-center gap-2 rounded-control px-1 py-1 text-xs text-fg-subtle hover:bg-surface-hover hover:text-fg"
         >
           <SlidersHorizontal size={13} />
@@ -348,7 +390,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
       </div>
 
-      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {localFileSource && (
+        <LocalAnalyticsDialog
+          source={localFileSource}
+          onClose={() => setLocalDataFile(null)}
+        />
+      )}
       {confirmPrompt}
 
       {/* 连接表单弹窗 */}
@@ -357,6 +404,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           connection={connectionForm.mode === 'edit' ? connectionForm.connection : undefined}
           mode={connectionForm.mode}
           onSaved={connectionForm.mode === 'edit' ? connectionForm.onSaved : undefined}
+          onOpenAgentGuide={() => {
+            setSettingsSection('agent');
+            setShowSettings(true);
+          }}
           onClose={() => {
             closeConnectionForm();
             // 重新加载连接列表
@@ -364,6 +415,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
               console.error('加载连接列表失败:', err);
               setConnectionError(describeError(err, t('connection.loadListFailed')));
             });
+          }}
+        />
+      )}
+      {showSettings && (
+        <SettingsDialog
+          initialSection={settingsSection}
+          onClose={() => {
+            setShowSettings(false);
+            setSettingsSection(undefined);
           }}
         />
       )}

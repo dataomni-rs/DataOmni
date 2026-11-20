@@ -24,14 +24,15 @@
 | P6–加固 | AI 设计与备份、只读 CLI、依赖审计、前端零 `sql:*` 权限与严格 CSP | [x] A0–A6c、A9、A8a（只读）、QS1–QS6、QT1–QT5、QR1–QR2、PA1–PA8 完成 |
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
-| v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证与 Homebrew Tap（`rfcs/roadmap-1.2.md`） | [x] `v1.2.0`（2026-11-17）与 `v1.2.1`（2026-11-18）正式发布，`dataomni-rs/homebrew-tap` 已上线；未结验证与渠道项并入 `v1.3` |
-| v1.3 路线 | 流水线提效、跨平台闭环、平滑更新与合规分发（`rfcs/roadmap-1.3.md`） | [-] `P0–P3`、`U1`、`U2`、`M1` 已完成并正式发布 `v1.2.2`（2026-11-19，带 `latest.json` 与 `dataomni-rs/homebrew-tap` 同步）；`P4`、`V1`、`V2`、`U3`、`M2`、`M3` 按实机与外部条件持续推进 |
+| v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、预发布审计修复（`2f112c7` / `c44dd9d`）、真二进制 CLI/MCP 冒烟与 macOS 实界面核验已完成，待 PR 跑通 CI 与 `V1` 跨平台实机验收后发版 |
+| 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
 
-## v1.3 路线：流水线提效、跨平台闭环、平滑更新与合规分发（2026-11-18 定）
+## v1.2.2 交付闭环与持续运维 / 条件触发项（原 `rfcs/roadmap-1.3.md` 跟踪池）
 
-规划、理由、验收标准与「明确不做」见 [`rfcs/roadmap-1.3.md`](rfcs/roadmap-1.3.md)。继续严守**「实用、好用、易用、功能稳定」**总纲，按 **P（流水线提效）→ V（跨平台闭环）→ U（平滑更新与分发合规）→ M（驱动解耦、国产库与商店变体）** 推进。
+原 [`rfcs/roadmap-1.3.md`](rfcs/roadmap-1.3.md) 中的全部核心代码项（`P0–P3`、`U1`、`U2`、`M1`）均已合并并随 `v1.2.2` 正式发布；以下保留该池中的实机验收门（`V1`，随 `v1.3.0` 一起验收收口）及外部/按条件触发的长期跟踪项（`P4`、`V2`、`U3`、`M2`、`M3`）。
 
 ### 第一阶段（P）：CI / 发布流水线提效与自动化收口
 
@@ -81,6 +82,48 @@
   - [ ] 达梦（DM8）：有明确接入诉求时基于 `M1` feature 隔离落地。
 - [ ] M3 Mac App Store（MAS）沙盒构建变体（可选上架渠道，前置 `U2` + `M1`）
   - 决定上架 MAS 时先写 `rfcs/mac-app-store.md`：基于关闭内置 `oracle` 的 feature 变体，补齐 `Entitlements.mas.plist` / `Entitlements.mas.inherit.plist`（`app-sandbox`、`network.client`、`network.server`、`files.user-selected.read-write`）与 `ITSAppUsesNonExemptEncryption = false`；为 SQLite（含同目录伴生文件权限）、DuckDB、SSH 私钥与 TLS 证书实现 macOS Security-Scoped Bookmarks 跨重启持久化，沙盒下将 `known_hosts` 迁入应用容器目录，并提供一键打开的内置示例 SQLite 库供审核体验。
+
+---
+
+## v1.3.0 夯实根基路线：数据分析与可视化、CLI/MCP 与应用内 AI 可用性增强（2026-11-20 定）
+
+聚焦 DataOmni 单机个人版核心底座，暂不混入企业/团队功能。原交付闭环核心项已提前随 `v1.2.2` 发布，本阶段（**DA → CM → AI**）连同上方 **V1（Win11 / Linux 跨平台实机验收）** 作为正式的 **`v1.3.0`** 发版目标；三块互相复用、零重复造轮子，动手前先跑完对应 RFC 里的验证实验。
+
+### 第一阶段（DA）：内置 DuckDB 统一结果集分析与可视化（[`rfcs/duckdb-analytics.md`](rfcs/duckdb-analytics.md)）
+
+- [x] DA0 内存 DuckDB 装载、嵌套 JSON 投影、沙盒逃逸与取消实验（E1–E5）（`b54da35`，5 条集成实验全通含 E3 反向验证）
+  - 实测结果与拍板结论已写回 [`rfcs/duckdb-analytics.md`](rfcs/duckdb-analytics.md) §3：10 万行 × 20 列 debug 构建装载 `1.5s` / 画像 `2.59s` / DuckDB 内存 `54.5 MiB`（拍板上限 `100,000` 行 + `512MB`）；5,000 条异构 JSON 纯内存扫键 + `Appender` `120ms`（快 `read_json_auto` 4 倍，零临时文件且精确区分缺键与 `null`）；本地文件模式须先物化建表再锁死 `enable_external_access = false` + `lock_configuration = true`（`VIEW` 锁后查询会被拒）；`interrupt()` `0ms` 中止 4 亿组合自连接并可立即复用连接；`BIGINT`/`HUGEINT`/`DECIMAL(38,s)`/`BLOB` 精度映射与溢出退 `VARCHAR` 验证通过。
+- [x] DA1 内存 DuckDB 分析沙盒（`services/local_analytics.rs`）与列级数据画像（Data Profiling）（`1a9f2b9`，`cargo test --lib` 464 条含 6 条沙盒/精度/取消/NoSQL 漂移门、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + 195 文件 2344 条全绿）
+  - 落地无 `AppHandle` 依赖的 `LocalAnalyticsRegistry`（10 万行上限、512MB 内存上限、8 会话 LRU 淘汰、装载后立即 `enable_external_access=false` + `lock_configuration=true` 反向验证、支持 `interrupt()` 取消恢复与卸载销毁）；实现 SQL 结果集与 MongoDB/ES 异构 JSON 文档（零临时文件、精确 `presentRatio`/`explicitNullCount`）统一列画像，新增 `DataProfileDialog` 并按需接入 SQL 查询结果、表浏览、MongoDB 集合页与 Elasticsearch 控制台。
+- [x] DA2 结果集二次 SQL / 透视、Parquet 导出与本地文件即席探索（`69504ef`，`cargo test --lib` 466 条含二次查询/PIVOT/Parquet 往返/本地文件锁沙盒门、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + 197 文件 2349 条全绿）
+  - 在 `services/local_analytics.rs` 新增 `open_local_file_session`（物化 `.parquet`/`.csv`/`.tsv`/`.json`/`.ndjson` 后立即锁死 `enable_external_access = false` + `lock_configuration = true`）、`query_session`（`read_only_gate` + 沙盒锁双层防线，复用 `duckdb::decode`）与 `export_parquet_from_session`（沙盒内跑只读 SQL 取数、独立瞬态连接原子写盘）；落地 `LocalAnalyticsDialog`（`GROUP BY` / `PIVOT` / 重复空值快捷模板、列画像点击即过滤、图表、CSV/JSON/Parquet 导出）与侧边栏「打开本地数据文件」免连接探索入口。
+- [x] DA3 原生 SVG 图表扩展、DuckDB 聚合破 200 行上限与 SVG/PNG 导出（`b31e453`，`eslint` + `tsc` + 198 文件 2356 条全绿，含 `resultChart.test.ts` 33 条与 `ResultChartDialog.test.tsx`）
+  - 在纯函数 `src/utils/resultChart.ts` 扩展 `stacked-bar`、`area`、`scatter`（2,000 点上限显式提示）、`heatmap`（24×24 交叉热力图）及 Markdown 摘要，坚持不做双 Y 轴、零重型图库依赖；超 200 行时在 `ResultChartDialog` 内提供显式内存 DuckDB 聚合（`SUM/AVG/COUNT/MAX/MIN` + Top 10/20/50，标题栏标明口径并在聚合完成后立即销毁临时会话）；复用 `src/utils/svgExport.ts` 导出带主题背景色的 SVG 与 2× PNG。
+
+### 第二阶段（CM）：CLI 与 MCP 可用性增强（[`rfcs/cli-mcp-usability.md`](rfcs/cli-mcp-usability.md)）
+
+严守既有只读、`PROD` 物理不可见与 `<id>#agent` 凭证校验红线；MCP 严禁暴露任意本机文件读写路径。
+
+- [x] CM1 GUI 内 MCP / CLI 一键接入引导与只读审计日志查看器（`9610f20`，`cargo test --lib` 470 条含 4 条审计日志解析与 PATH 探测单测、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + 200 文件 2361 条全绿）
+  - 后端新增 `agent_cli_info()`（返回真实可执行路径、PATH 可见性、已开放非生产连接数、审计日志路径与内置 `guide.md`，零口令返回）与 `read_agent_audit_log(limit?)`（只读倒序解析 `dataomni-cli.log` 及其 `.1` 轮转文件，含双引号/转义/Unicode 连接名与截断行容错）；前端落地 `agentConfigSnippets` 纯函数、`AgentCliSection` 设置小节（Claude Code 一键命令、Claude Desktop / Cursor `mcpServers` JSON、复制/导出 `SKILL.md` 及按结果与关键字筛选的不可篡改审计视图）以及连接表单「开放只读访问」下方的直达入口。
+- [x] CM2 CLI / MCP 接入内置 DuckDB 能力（`export --format parquet` 与 `profile` 画像）（`10b7e39`，`cargo test --lib cli::` 57 条全通含 Parquet 导出/画像往返与 MCP `file` 参数隔离反向门、`clippy` 默认与 `--no-default-features` 零告警）
+  - 直接复用 `services/local_analytics.rs`：CLI 新增 `export --format parquet`（沿用只读事务与绝不覆盖已有文件规则）及 `profile <conn> "<sql>" [--limit N]`（默认 10,000 行、最高 100,000 行，写审计日志且不记 SQL 原文）与 `profile --file <path>`（仅 CLI 可用，不碰连接）；MCP 新增只读 `profile` 工具，schema 显式关闭 `additionalProperties` 且无 `file` 参数，反向验证传 `file` 或偷渡 `--file` 均报 `usage`。
+- [x] CM3 `cli query --param` 参数化查询与 `cli diff` 只读结构差异报告（`7d1e38f`，`cargo test --lib -- named_parameters cli::` 63 条全通 + 前端 `queryParameters.test.ts` 16 条含共用语料双测、`clippy` 默认与 `--no-default-features` 零告警）
+  - 将 `:name` 扫描与各方言占位符改写沉淀至 `services/named_parameters.rs` 并新增共用语料 `fixtures/bind-parameters-conformance.json` 钉住前后端一致；`cli query` 新增 `--param` / `--param-null` / `--params-json`、MCP `query` 新增 `params`（单测验证参数哨兵值绝不落盘 `dataomni-cli.log`，并顺带修复 `duckdb-rs` 读取 `SQLNULL` 绑定列时的内部 panic）；新增 `cli/diff.rs`、`cli diff <src> <dst> [--format json|markdown]` 与 MCP `diff`（双边均经 Agent 权限与 `<id>#agent` 校验，任一侧为 `PROD` 或未开放统一返回相同 `not_found` 文案，只出差异报告绝不执行 DDL）。
+- [x] CM4 连接级本地业务语义备注（Glossary）注入 `dictionary` / MCP（`a1d8aaa`，`cargo test --lib` 481 条全通含 `connection_semantics` 与 `dictionary` 无侵入逐字节兼容门、`clippy` 默认与 `--no-default-features` 零告警、前端 200 文件 2362 条全绿）
+  - 新增 `services/connection_semantics.rs`，按连接存储独立侧文件 `semantics/<id>.md`（上限 32 KB、防路径穿越、删连接同步清理、不碰 `connections.json` 与 `<id>#agent` 指纹，超限读取按 UTF-8 字符边界显式截断）；连接表单新增 Markdown 语义备注编辑框；无备注时 `dictionary` 逐字节兼容 `fixtures/dictionary-conformance.json`，有备注时自动附入 `## Business Semantics & Notes`，单表 `cli/MCP schema` 按 `### <table>` 小节按需返回 `"semantics"` 字段。
+
+### 第三阶段（AI）：应用内克制型 AI 可用性增强（[`rfcs/ai-sql-assist.md`](rfcs/ai-sql-assist.md)）
+
+整块继续留在 Cargo feature `ai` 后；零数据行外发、发包原文全程可展开查看、绝不自动执行任何 SQL。
+
+- [x] AI0 既有缺陷修补与 AI 配置底座完善（`345b75e`，Rust `ai_commands` + `services::ai` 10 条全通含 500ms 内取消门、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + `aiSettings.test.ts` 7 条全绿）
+  - [x] 修补 `src/utils/aiSettings.ts` `isAiKeyMissing` 误查 `DATAOMNI_CREDENTIAL_MISSING` 缺陷，对齐后端 `DATAOMNI_AI_KEY_MISSING` 并补回归单测；
+  - [x] 新增 `ai_cancel(requestId)` 中止正在进行的模型请求、设置页「测试连接」按钮、本地无 Key 端点（Ollama / `127.0.0.1` / `::1`，自动绕过系统代理）免拦截支持，以及多预设（`#ai` / `#ai:local`）与「`STAGING`/`PROD` 仅允许本地模型」环境路由守卫（无损兼容旧版 `dataomni.ai-settings`）。
+- [x] AI1 SQL 编辑器三把「手术刀」（`084cd6a`，`eslint` + `tsc` + 202 文件 2372 条全绿，含 `aiSqlAssist.test.ts` 与 `AiSqlAssistDialog.test.tsx`）
+  - 落地纯函数 `src/utils/aiSqlAssist.ts`（类型层拒绝任何表数据行入参；E1–E3 预算与解析门：选表上限 15 张、`PROD` 默认 0 张、报错诊断只抽涉及表列、EXPLAIN 原文截断至 16 KB，容忍裸 JSON / 代码块 / `fixedSql: null`）与 `AiSqlAssistDialog`，在 SQL 编辑器工具栏（NL→SQL / 选中改写，自动融合 `CM4` 连接级语义备注）、`QueryErrorPanel`（报错一键诊断修复）与 `QueryPlanDialog`（EXPLAIN 瓶颈与候选索引解读）三处克制接入，全程支持展开查看 `[system]/[user]` 原文、中途取消、敏感环境守卫拦截，且绝不自动执行 SQL。
+- [x] AI2 数据字典 AI 业务语义注释草拟（与 `CM4` 闭环）（`ce2c08c`，`eslint` + `tsc` + 204 文件 2376 条、Rust `cargo test --lib` 485 条与 `--no-default-features` 469 条、`clippy` 双构建全绿）
+  - 落地纯函数 `src/utils/aiSemanticsDraft.ts`（每批最多 20 张表、零数据行外发、固定输出 `<!-- AI-inferred: review before trusting -->` / `[AI 推测]` 与 `### <table>` 分节）与 `AiSemanticsDraftDialog`，接入 ER 图工具栏（未编入 `ai` feature 或未启用时隐藏）；用户审阅修改后写入 `CM4` 的 `semantics/<id>.md`，反哺人读数据字典、编辑器 AI 助手与 CLI / MCP 外部 Agent。
 
 ---
 

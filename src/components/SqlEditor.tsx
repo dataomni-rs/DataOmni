@@ -21,7 +21,8 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
-  ChevronsUpDown
+  ChevronsUpDown,
+  Sparkles
 } from 'lucide-react';
 import { selectActiveSqlDocument, useQueryStore, SqlStatement } from '../stores/queryStore';
 import type { QueryExecution } from '../contracts/queryExecution';
@@ -40,6 +41,8 @@ import { DestructiveStatementPrompt } from './DestructiveStatementPrompt';
 import { QueryPlanDialog } from './QueryPlanDialog';
 import { QueryParametersDialog } from './QueryParametersDialog';
 import { QueryTemplatesDialog } from './QueryTemplatesDialog';
+import { AiSqlAssistDialog, type AiSqlAssistMode } from './AiSqlAssistDialog';
+import { aiAvailable } from '../utils/aiSettings';
 import type { QueryTemplate } from '../utils/queryTemplates';
 import { dialectSupportsParameters, parameterNames } from '../utils/queryParameters';
 import { highestRiskNeedingConfirmation, type StatementRisk } from '../utils/statementRisk';
@@ -94,6 +97,26 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
   const { relations, error: catalogError } = useCompletionCatalog(connection);
   // 确认门槛按环境可配，默认等于可配置之前的固定行为
   const confirmationPolicy = useSettingsStore((state) => state.confirmationPolicy);
+  const aiSettings = useSettingsStore((state) => state.ai);
+  const [aiInBuild, setAiInBuild] = useState(false);
+  const [aiAssistState, setAiAssistState] = useState<{
+    mode: AiSqlAssistMode;
+    replaceRange?: { from: number; to: number };
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void aiAvailable().then((value) => {
+      if (!cancelled) {
+        setAiInBuild(value);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const showAiSqlTools = aiInBuild && aiSettings.enabled;
   // 文档随活动 SQL 标签切换，单独订阅
   const { sqlInput, statements, latestExecutionIdByStatement } =
     useQueryStore(selectActiveSqlDocument);
@@ -593,7 +616,34 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
           connectionId={connection.id}
           dbType={connection.db_type}
           databaseLabel={serverLabel(connection)}
+          environment={connection.environment}
+          relations={relations}
           onClose={() => setExplaining(null)}
+        />
+      )}
+
+      {aiAssistState && (
+        <AiSqlAssistDialog
+          connectionId={connection.id}
+          dialect={serverLabel(connection)}
+          environment={connection.environment}
+          relations={relations}
+          mode={aiAssistState.mode}
+          onApplySql={(draftSql) => {
+            const view = editorViewRef.current;
+            const range = aiAssistState.replaceRange;
+            if (view && range && range.to <= view.state.doc.length) {
+              view.dispatch({
+                changes: { from: range.from, to: range.to, insert: draftSql },
+                selection: { anchor: range.from + draftSql.length },
+                scrollIntoView: true
+              });
+              view.focus();
+            } else {
+              insertTemplateSql(draftSql);
+            }
+          }}
+          onClose={() => setAiAssistState(null)}
         />
       )}
 
@@ -707,6 +757,34 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
           >
             <BookMarked size={14} />
           </button>
+
+          {/* AI 写 SQL / 改写（AI1：仅在含 ai feature 且设置已启用时露出，绝不自动执行） */}
+          {showAiSqlTools && (
+            <button
+              type="button"
+              onClick={() => {
+                const view = editorViewRef.current;
+                const selection = view?.state.selection.main;
+                const selectedText =
+                  view && selection && !selection.empty
+                    ? view.state.doc.sliceString(selection.from, selection.to)
+                    : undefined;
+                setAiAssistState({
+                  mode: { kind: 'nl-to-sql', existingSql: selectedText },
+                  replaceRange:
+                    selection && !selection.empty
+                      ? { from: selection.from, to: selection.to }
+                      : undefined
+                });
+              }}
+              aria-label={t('aiSql.toolbarTrigger')}
+              title={t('aiSql.toolbarTrigger')}
+              className="flex items-center gap-1 rounded-control border border-line-strong px-2 py-1 text-xs text-fg-muted transition-colors hover:bg-surface-hover hover:text-fg"
+            >
+              <Sparkles size={13} className="text-accent" />
+              <span>{t('aiSql.toolbarTrigger')}</span>
+            </button>
+          )}
 
           {/* 另存为 .sql。和格式化一样只给图标——头部已经很挤 */}
           <button
@@ -972,6 +1050,22 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
                   formatExecutionTime={formatExecutionTime}
                   statementOffset={statementOffset}
                   onJumpToError={jumpToOffset}
+                  onAiDiagnose={
+                    showAiSqlTools && statement.error
+                      ? () => {
+                          const range = statementRanges[index];
+                          setAiAssistState({
+                            mode: {
+                              kind: 'error-fix',
+                              failingSql: statement.sql,
+                              errorMessage: statement.error ?? '',
+                              details: statement.errorDetails
+                            },
+                            replaceRange: range ? { from: range.from, to: range.to } : undefined
+                          });
+                        }
+                      : undefined
+                  }
                 />
               );
             })}
@@ -996,6 +1090,7 @@ interface SqlStatementCardProps {
   /** 这条语句在整份文档里的起始偏移，用来把数据库给的相对位置换成可跳转的位置 */
   statementOffset?: number;
   onJumpToError?: (offset: number) => void;
+  onAiDiagnose?: () => void;
 }
 
 // 查询结果表格组件已移至单独的文件 QueryResultScrollTable.tsx
@@ -1010,7 +1105,8 @@ const SqlStatementCard: React.FC<SqlStatementCardProps> = ({
   onToggleCollapsed,
   formatExecutionTime,
   statementOffset,
-  onJumpToError
+  onJumpToError,
+  onAiDiagnose
 }) => {
   const t = useLanguageStore((state) => state.t);
   const hasOutput = Boolean(statement.result || statement.error);
@@ -1153,6 +1249,7 @@ const SqlStatementCard: React.FC<SqlStatementCardProps> = ({
           sql={statement.sql}
           statementOffset={statementOffset}
           onJumpToError={onJumpToError}
+          onAiDiagnose={onAiDiagnose}
         />
       )}
     </div>

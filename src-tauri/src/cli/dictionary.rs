@@ -100,12 +100,26 @@ pub(super) fn links_from_rows(rows: &[Value]) -> Vec<Link> {
     .collect()
 }
 
+#[cfg(test)]
 pub(super) fn render(
   title: &str,
   dialect: &str,
   date: &str,
   tables: &[Table],
   links: &[Link],
+) -> String {
+  render_with_semantics(title, dialect, date, tables, links, None)
+}
+
+/// 附带连接级业务语义备注（`semantics/<id>.md`）的数据字典渲染：
+/// 无备注时输出与 `render()` / `fixtures/dictionary-conformance.json` 逐字节一致。
+pub(super) fn render_with_semantics(
+  title: &str,
+  dialect: &str,
+  date: &str,
+  tables: &[Table],
+  links: &[Link],
+  semantics: Option<&str>,
 ) -> String {
   let mut out = vec![
     format!("# {title}"),
@@ -120,6 +134,14 @@ pub(super) fn render(
      Column comments, defaults, indexes and unique constraints are not included."
       .to_string(),
   ];
+  if let Some(notes) = semantics.map(str::trim).filter(|text| !text.is_empty()) {
+    out.extend([
+      String::new(),
+      "## Business Semantics & Notes".to_string(),
+      String::new(),
+      notes.to_string(),
+    ]);
+  }
   for table in tables {
     let key = table.key();
     out.extend([String::new(), format!("## {key}"), String::new()]);

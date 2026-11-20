@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub const AI_REQUEST_FAILED: &str = "DATAOMNI_AI_REQUEST_FAILED";
 pub const AI_BAD_RESPONSE: &str = "DATAOMNI_AI_BAD_RESPONSE";
+pub const AI_CANCELLED: &str = "DATAOMNI_AI_CANCELLED";
 
 /// 一份设计十来张表、上百列，输出要几千个 token；A0 实验里单次中位数 4.6 秒，
 /// 慢的模型再翻几倍。超过两分钟多半是服务端卡住了
@@ -40,11 +41,42 @@ pub struct AiRequest {
   pub model: String,
   pub system: String,
   pub user: String,
+  /// 可选请求 ID，用于 `ai_cancel(requestId)` 中途取消正在进行的请求
+  #[serde(default)]
+  pub request_id: Option<String>,
+  /// 可选配置档案 ID（省略或 `"default"` 读 `#ai`，其余如 `"local"` 读 `#ai:local`）
+  #[serde(default)]
+  pub profile_id: Option<String>,
+  /// 可选输出上限（如连通性探测传 16）
+  #[serde(default)]
+  pub max_tokens: Option<u32>,
+}
+
+/// 判断端点是否指向本机回环地址（Ollama / LM Studio 等免 Key 本地模型服务）。
+/// 严格按 URL Host 判定，拒绝 `localhost.evil.com` 等伪装域名。
+pub fn is_local_ai_endpoint(base_url: &str) -> bool {
+  let Ok(parsed) = url::Url::parse(base_url.trim()) else {
+    return false;
+  };
+  if !matches!(parsed.scheme(), "http" | "https") {
+    return false;
+  }
+  match parsed.host() {
+    Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+    Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+    None => false,
+  }
 }
 
 pub async fn complete(request: &AiRequest, api_key: &str) -> Result<String, QueryError> {
-  // 生产环境不关代理：模型服务在公网上，很多人正是靠代理才连得上
-  let client = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().map_err(|error| {
+  // 生产环境不关代理：模型服务在公网上，很多人正是靠代理才连得上；
+  // 但指向本机回环地址（Ollama / LM Studio）时绕过系统代理，避免被代理黑洞
+  let mut builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
+  if is_local_ai_endpoint(&request.base_url) {
+    builder = builder.no_proxy();
+  }
+  let client = builder.build().map_err(|error| {
     QueryError::message(format!("{AI_REQUEST_FAILED}: {}", error_chain(&error)))
   })?;
   complete_with(&client, request, api_key).await
@@ -56,31 +88,43 @@ pub async fn complete_with(
   api_key: &str,
 ) -> Result<String, QueryError> {
   let base = request.base_url.trim().trim_end_matches('/');
+  let key = api_key.trim();
   let (builder, body) = match request.protocol {
-    AiProtocol::Anthropic => (
-      client
-        .post(format!("{base}/v1/messages"))
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01"),
-      json!({
-        "model": request.model,
-        "max_tokens": MAX_OUTPUT_TOKENS,
-        "system": request.system,
-        "messages": [{ "role": "user", "content": request.user }],
-      }),
-    ),
+    AiProtocol::Anthropic => {
+      let mut req =
+        client.post(format!("{base}/v1/messages")).header("anthropic-version", "2023-06-01");
+      if !key.is_empty() {
+        req = req.header("x-api-key", key);
+      }
+      (
+        req,
+        json!({
+          "model": request.model,
+          "max_tokens": request.max_tokens.unwrap_or(MAX_OUTPUT_TOKENS),
+          "system": request.system,
+          "messages": [{ "role": "user", "content": request.user }],
+        }),
+      )
+    }
     // 不发 `response_format`：OpenAI 兼容的各家不是都认，不认的直接 400。
     // 提示里已经要求只输出 JSON，读的那一侧也容忍一层代码块
-    AiProtocol::Openai => (
-      client.post(format!("{base}/chat/completions")).bearer_auth(api_key),
-      json!({
+    AiProtocol::Openai => {
+      let mut req = client.post(format!("{base}/chat/completions"));
+      if !key.is_empty() {
+        req = req.bearer_auth(key);
+      }
+      let mut payload = json!({
         "model": request.model,
         "messages": [
           { "role": "system", "content": request.system },
           { "role": "user", "content": request.user },
         ],
-      }),
-    ),
+      });
+      if let Some(max_tokens) = request.max_tokens {
+        payload["max_tokens"] = json!(max_tokens);
+      }
+      (req, payload)
+    }
   };
 
   // reqwest 没开 `json` feature（别处用不上），请求体手写序列化
@@ -186,7 +230,34 @@ mod tests {
       model: "m-1".into(),
       system: "只输出 JSON".into(),
       user: "博客".into(),
+      request_id: None,
+      profile_id: None,
+      max_tokens: None,
     }
+  }
+
+  #[test]
+  fn detects_only_true_loopback_endpoints_as_local() {
+    assert!(is_local_ai_endpoint("http://localhost:11434/v1"));
+    assert!(is_local_ai_endpoint("http://127.0.0.1:1234/v1"));
+    assert!(is_local_ai_endpoint("http://[::1]:11434/v1"));
+    assert!(!is_local_ai_endpoint("https://api.openai.com/v1"));
+    assert!(!is_local_ai_endpoint("http://localhost.evil.com/v1"));
+    assert!(!is_local_ai_endpoint("http://192.168.1.50:11434/v1"));
+    assert!(!is_local_ai_endpoint("not a url"));
+  }
+
+  #[tokio::test]
+  async fn keyless_local_request_omits_auth_header_and_forwards_max_tokens() {
+    let (base, server) =
+      serve_once("200 OK", r#"{"choices":[{"message":{"role":"assistant","content":"OK"}}]}"#);
+    let mut req = request(AiProtocol::Openai, format!("{base}/v1"));
+    req.max_tokens = Some(16);
+    let text = complete_with(&client(), &req, "").await.expect("complete keyless local");
+    assert_eq!(text, "OK");
+    let received = server.join().expect("server").to_ascii_lowercase();
+    assert!(!received.contains("authorization:"), "{received}");
+    assert!(received.contains(r#""max_tokens":16"#), "{received}");
   }
 
   /// reqwest 的 Display 只有「error sending request」，看不出是拒连、证书还是 DNS

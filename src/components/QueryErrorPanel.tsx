@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertCircle, ClipboardCopy, Crosshair } from 'lucide-react';
+import { AlertCircle, ClipboardCopy, Crosshair, Sparkles } from 'lucide-react';
 import type { QueryExecutionError } from '../contracts/queryExecution';
 import { useLanguageStore } from '../stores/languageStore';
 import { formatQueryErrorReport, locateQueryError } from '../utils/queryError';
@@ -14,6 +14,8 @@ interface QueryErrorPanelProps {
   /** 这条语句在整份文档里的起始偏移，用来把相对位置换算成可跳转的位置 */
   statementOffset?: number;
   onJumpToError?: (offset: number) => void;
+  /** 构建含 ai feature 且设置已开启时提供：打开报错诊断修复弹窗 */
+  onAiDiagnose?: () => void;
 }
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -40,7 +42,8 @@ export function QueryErrorPanel({
   details,
   sql,
   statementOffset = 0,
-  onJumpToError
+  onJumpToError,
+  onAiDiagnose
 }: QueryErrorPanelProps) {
   const t = useLanguageStore((state) => state.t);
   const [copied, setCopied] = useState(false);
@@ -117,15 +120,27 @@ export function QueryErrorPanel({
           {details?.table && <Row label={t('queryError.table')} value={details.table} />}
         </div>
 
-        <button
-          type="button"
-          onClick={copyAll}
-          title={t('queryError.copyAll')}
-          className="flex shrink-0 items-center gap-1 rounded-control border border-danger-line px-2 py-1 text-xs text-danger hover:bg-danger-soft"
-        >
-          <ClipboardCopy size={12} />
-          {copied ? t('common.copied') : t('common.copy')}
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {onAiDiagnose && (
+            <button
+              type="button"
+              onClick={onAiDiagnose}
+              className="flex shrink-0 items-center gap-1 rounded-control border border-danger-line bg-surface px-2 py-1 text-xs text-danger hover:bg-danger-soft"
+            >
+              <Sparkles size={12} />
+              {t('aiSql.errorDiagnoseTrigger')}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={copyAll}
+            title={t('queryError.copyAll')}
+            className="flex shrink-0 items-center gap-1 rounded-control border border-danger-line px-2 py-1 text-xs text-danger hover:bg-danger-soft"
+          >
+            <ClipboardCopy size={12} />
+            {copied ? t('common.copied') : t('common.copy')}
+          </button>
+        </div>
       </div>
     </div>
   );

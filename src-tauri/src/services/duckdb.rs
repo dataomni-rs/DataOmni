@@ -215,7 +215,12 @@ fn select_rows(
     };
     let mut values = Map::new();
     for (index, (name, type_id)) in columns.iter().enumerate() {
-      let value: Value = row.get(index).map_err(|error| query_error(&error, None))?;
+      // duckdb-rs 1.2 对 Arrow `DataType::Null`（即 `SQLNULL`，如 `SELECT NULL` 或绑定 NULL 参数）调用 `row.get` 会 panic
+      let value: Value = if *type_id == LogicalTypeId::SqlNull {
+        Value::Null
+      } else {
+        row.get(index).map_err(|error| query_error(&error, None))?
+      };
       values.insert(name.clone(), untagged(decode(&value, *type_id)));
     }
     result.push(values);
@@ -626,7 +631,12 @@ fn run_statement(
   while let Some(row) = rows.next().map_err(|error| query_error(&error, Some(statement)))? {
     let mut values = Map::new();
     for (index, (name, type_id)) in names.iter().zip(&type_ids).enumerate() {
-      let value: Value = row.get(index).map_err(|error| query_error(&error, None))?;
+      // duckdb-rs 1.2 对 `SQLNULL` 列调用 `row.get` 会触发内部 unreachable panic
+      let value: Value = if *type_id == LogicalTypeId::SqlNull {
+        Value::Null
+      } else {
+        row.get(index).map_err(|error| query_error(&error, None))?
+      };
       values.insert(name.clone(), decode(&value, *type_id));
     }
     if sender.blocking_send(Fetched::Row(values)).is_err() {
@@ -637,7 +647,9 @@ fn run_statement(
 }
 
 /// 结果集的列：同名的编上号，元数据与行里的键用的是同一份名字
-fn column_header(statement: &duckdb::Statement<'_>) -> (Vec<QueryColumnMetadata>, Vec<String>) {
+pub(crate) fn column_header(
+  statement: &duckdb::Statement<'_>,
+) -> (Vec<QueryColumnMetadata>, Vec<String>) {
   let names = number_duplicate_columns(statement.column_names().iter().map(String::as_str));
   let metadata = names
     .iter()
@@ -732,7 +744,7 @@ const MAX_SAFE_INTEGER: i128 = (1 << 53) - 1;
 /// 一个单元格。约定和另外几家相同：超出安全整数的、小数、时间与二进制带类型
 /// 标签，以文本传；其余是裸值。嵌套类型（LIST / STRUCT / MAP / UNION）整个写成
 /// 一段 JSON 文本，标成 `json`。
-fn decode(value: &Value, type_id: LogicalTypeId) -> JsonValue {
+pub(crate) fn decode(value: &Value, type_id: LogicalTypeId) -> JsonValue {
   match value {
     Value::Null => JsonValue::Null,
     Value::Boolean(value) => JsonValue::from(*value),

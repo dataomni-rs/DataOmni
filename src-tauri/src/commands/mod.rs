@@ -1,4 +1,5 @@
 pub mod ai_commands;
+pub mod analytics_commands;
 pub mod app_commands;
 pub mod connection_commands;
 pub mod database_commands;
@@ -9,6 +10,7 @@ pub mod neo4j_commands;
 pub mod redis_commands;
 
 pub use ai_commands::*;
+pub use analytics_commands::*;
 pub use app_commands::*;
 pub use connection_commands::*;
 pub use database_commands::*;

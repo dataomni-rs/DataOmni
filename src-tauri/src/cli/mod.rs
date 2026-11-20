@@ -10,6 +10,7 @@
 
 mod audit;
 mod dictionary;
+mod diff;
 mod elasticsearch;
 mod mcp;
 mod mongo;
@@ -31,6 +32,8 @@ use std::time::{Duration, Instant};
 /// 默认最多回多少行。Agent 的上下文按字计费，一张大表整张倒进去是浪费，要更多就明说
 const DEFAULT_ROW_LIMIT: usize = 200;
 const MAX_ROW_LIMIT: usize = 10_000;
+/// `profile` 默认采样/装载行数（`rfcs/cli-mcp-usability.md` CM2）
+const DEFAULT_PROFILE_ROW_LIMIT: usize = 10_000;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 /// 读口令最多等多久。钥匙串要授权时这一步会一直卡着，等到有人点了弹框
@@ -91,9 +94,16 @@ Usage: dataomni cli <command> [arguments]
 Commands:
   connections        List the connections open to the command line
   query <connection> <sql> [--limit N] [--timeout SECONDS]
+        [--param K=V ...] [--param-null K ...] [--params-json JSON]
                      Run one read-only statement. <connection> is a name or id
                      from `connections`; <sql> may be - to read it from stdin.
-                     At most 200 rows by default (--limit up to 10000), 30 s timeout.
+                     Named :params are bound via prepared parameters and never
+                     logged. At most 200 rows by default (--limit up to 10000),
+                     30 s timeout.
+  diff <source-connection> <target-connection> [--format json|markdown] [--timeout SECONDS]
+                     Read-only schema diff between two open connections (tables,
+                     columns, primary keys, indexes and foreign keys). Reports
+                     differences only and never executes DDL.
   schema <connection> [<table> [--schema S]]
                      Without a table: the tables and views. With a table: its
                      columns, indexes (one row per index column) and foreign keys.
@@ -129,11 +139,16 @@ Commands:
                      (except _refresh, _flush, _forcemerge, _cache); POST only to
                      search endpoints (_search, _count, _msearch, _mget, ...);
                      PUT and DELETE never. The body is parsed JSON when it is JSON.
-  export <connection> <sql> --out FILE [--format csv|json] [--delimiter C]
+  export <connection> <sql> --out FILE [--format csv|json|parquet] [--delimiter C]
          [--no-header] [--null TEXT] [--bom] [--timeout SECONDS]
                      Write every row of one read-only statement to a new local
                      file (never overwrites), the same bytes the DataOmni export
-                     writes. 300 s timeout by default.
+                     writes (or Apache Parquet via built-in DuckDB). 300 s timeout by default.
+  profile <connection> <sql> [--limit N] [--timeout SECONDS]
+          | profile --file <path> [--limit N]
+                     Column-level data profile (inferred type, null ratio,
+                     distinct count, min/max/quantiles, top-5 values) via
+                     built-in sandboxed DuckDB. Default limit 10000 (up to 100000).
   ddl <connection> <table> [--schema S]
                      The definition the database itself gives for a table or
                      view (SHOW CREATE TABLE, sqlite_master, DBMS_METADATA, ...).
@@ -165,7 +180,9 @@ Nothing on this command line can widen that.
 ";
 
 /// 给 Agent 读的说明，格式是 Claude Code 的 Skill（`SKILL.md`），存下来就能用（设计文档 §7）
-const GUIDE: &str = include_str!("guide.md");
+pub(crate) const GUIDE: &str = include_str!("guide.md");
+
+pub(crate) use audit::{read_audit_log_from, AuditLogEntry, AUDIT_FILE, MAX_AUDIT_ENTRIES};
 
 /// 命令行读写的两个目录。测试换成临时目录，不碰本机真实的配置与日志
 struct Dirs {
@@ -291,6 +308,7 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
       Ok(Output::Json(list_open(&service)))
     }
     "query" => query(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
+    "diff" => diff_command(rest, config_dir, dirs.log.as_deref()),
     "schema" => schema(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "explain" => explain(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "test" => test(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
@@ -301,6 +319,7 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
     "es" => es(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "csv-preview" => csv_preview(rest).map(Output::Json),
     "export" => export(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
+    "profile" => profile_command(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "ddl" => ddl(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "backup" => backup(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     other => Err(CliError::usage(format!("unknown command {other}; run `dataomni cli help`"))),
@@ -312,18 +331,21 @@ struct QueryArguments {
   sql: String,
   row_limit: usize,
   timeout: Duration,
+  params: std::collections::HashMap<String, Value>,
 }
 
-/// `query` 与 `explain` 的参数。`usage` 是那条命令的用法；没有 `--limit` 的命令传
-/// `accepts_limit = false`，给了就报错，而不是悄悄不理
+/// `query` 与 `explain` 的参数。`usage` 是那条命令的用法；没有 `--limit` / `--param` 的命令传
+/// `false`，给了就报错，而不是悄悄不理
 fn parse_statement_arguments(
   rest: &[String],
   usage: &str,
   accepts_limit: bool,
+  accepts_params: bool,
 ) -> Result<QueryArguments, CliError> {
   let mut positional = Vec::new();
   let mut row_limit = DEFAULT_ROW_LIMIT;
   let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+  let mut params = std::collections::HashMap::new();
   let mut iter = rest.iter();
   while let Some(argument) = iter.next() {
     match argument.as_str() {
@@ -333,13 +355,56 @@ fn parse_statement_arguments(
       "--timeout" => {
         timeout_seconds = number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?
       }
+      "--param" if accepts_params => {
+        let raw = iter.next().ok_or_else(|| CliError::usage("--param takes name=value"))?;
+        let Some((key, value)) = raw.split_once('=') else {
+          return Err(CliError::usage("--param takes name=value"));
+        };
+        if key.is_empty() {
+          return Err(CliError::usage("--param name cannot be empty"));
+        }
+        params.insert(key.to_string(), Value::String(value.to_string()));
+      }
+      "--param-null" if accepts_params => {
+        let key = iter
+          .next()
+          .filter(|name| !name.is_empty())
+          .ok_or_else(|| CliError::usage("--param-null takes a parameter name"))?;
+        params.insert(key.clone(), Value::Null);
+      }
+      "--params-json" if accepts_params => {
+        let raw =
+          iter.next().ok_or_else(|| CliError::usage("--params-json takes a JSON object"))?;
+        let parsed: Value = serde_json::from_str(raw)
+          .map_err(|error| CliError::usage(format!("--params-json is not valid JSON: {error}")))?;
+        let Value::Object(map) = parsed else {
+          return Err(CliError::usage("--params-json must be a JSON object"));
+        };
+        for (key, value) in map {
+          if key.is_empty() {
+            return Err(CliError::usage("--params-json parameter name cannot be empty"));
+          }
+          if !matches!(value, Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) {
+            return Err(CliError::usage(format!(
+              "parameter {key} must be a string, number, boolean or null"
+            )));
+          }
+          params.insert(key, value);
+        }
+      }
       _ => positional.push(argument.clone()),
     }
   }
   let [connection, sql] =
     <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
   let sql = read_argument(&sql)?;
-  Ok(QueryArguments { connection, sql, row_limit, timeout: Duration::from_secs(timeout_seconds) })
+  Ok(QueryArguments {
+    connection,
+    sql,
+    row_limit,
+    timeout: Duration::from_secs(timeout_seconds),
+    params,
+  })
 }
 
 /// `-` 表示从标准输入读：语句、条件、管道都可能长得不便写在命令行上
@@ -366,12 +431,13 @@ fn query(
   config_dir: Option<&Path>,
   log_dir: Option<&Path>,
 ) -> Result<Value, CliError> {
-  let usage = "usage: dataomni cli query <connection> <sql> [--limit N] [--timeout SECONDS]";
-  let arguments = parse_statement_arguments(rest, usage, true)?;
+  let usage = "usage: dataomni cli query <connection> <sql> [--limit N] [--timeout SECONDS] [--param K=V ...] [--param-null K ...] [--params-json JSON]";
+  let arguments = parse_statement_arguments(rest, usage, true, true)?;
   let service = open_service(config_dir)?;
   let profile = find_open(&service, &arguments.connection)?;
   let started = Instant::now();
   let outcome = run_query(&service, &profile, &arguments, config_dir);
+  // 审计只记参数化之前的原始 SQL 长度与 SHA-256，参数值绝不进日志（CM3 安全红线）
   audit::record(log_dir, "query", &profile.name, &arguments.sql, &outcome, started.elapsed());
   let result = outcome?;
   Ok(query_output(&profile, result, started.elapsed()))
@@ -383,14 +449,26 @@ fn run_query(
   arguments: &QueryArguments,
   config_dir: Option<&Path>,
 ) -> Result<QueryExecutionResult, CliError> {
-  // 先过语句门、再看类型，最后才读口令：被拒的语句不该换来一次钥匙串弹框
+  // 先过语句门、再看类型与参数绑定，最后才读口令：被拒的语句不该换来一次钥匙串弹框
   read_only_gate::check(&arguments.sql)
     .map_err(|refusal| CliError::refused(refusal.to_string()))?;
   if !session::supports(&profile.db_type) {
     return Err(unsupported(&profile.db_type));
   }
+  let rewritten = crate::services::named_parameters::rewrite_named_parameters(
+    &arguments.sql,
+    &profile.db_type,
+    &arguments.params,
+  )
+  .map_err(|error| CliError::usage(error.to_string()))?;
   let resolved = resolve_verified(service, profile)?;
-  let run = session::run_read_only(&resolved, &arguments.sql, arguments.row_limit, config_dir);
+  let run = session::run_read_only_with_params(
+    &resolved,
+    &rewritten.sql,
+    &rewritten.params,
+    arguments.row_limit,
+    config_dir,
+  );
   block_on_within(arguments.timeout, "the statement", async { run.await.map_err(session_error) })
 }
 
@@ -400,7 +478,7 @@ fn explain(
   log_dir: Option<&Path>,
 ) -> Result<Value, CliError> {
   let usage = "usage: dataomni cli explain <connection> <sql> [--timeout SECONDS]";
-  let arguments = parse_statement_arguments(rest, usage, false)?;
+  let arguments = parse_statement_arguments(rest, usage, false, false)?;
   let service = open_service(config_dir)?;
   let profile = find_open(&service, &arguments.connection)?;
   let started = Instant::now();
@@ -535,7 +613,17 @@ fn run_dictionary(
   let date = chrono::Local::now().format("%Y-%m-%d").to_string();
   let tables = dictionary::tables_from_rows(&columns);
   let links = dictionary::links_from_rows(&foreign_keys);
-  Ok(dictionary::render(&profile.name, dictionary::dialect(profile), &date, &tables, &links))
+  let semantics = config_dir.and_then(|dir| {
+    crate::services::connection_semantics::read_semantics_for_agent(dir, &profile.id)
+  });
+  Ok(dictionary::render_with_semantics(
+    &profile.name,
+    dictionary::dialect(profile),
+    &date,
+    &tables,
+    &links,
+    semantics.as_deref(),
+  ))
 }
 
 fn mongo(
@@ -677,20 +765,47 @@ fn run_es(
 /// 导出最多等多久：整表导出要几分钟，语句的默认 30 秒不够
 const DEFAULT_EXPORT_TIMEOUT_SECONDS: u64 = 300;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliExportFormat {
+  Csv,
+  Json,
+  Parquet,
+}
+
+impl CliExportFormat {
+  const fn as_str(self) -> &'static str {
+    match self {
+      Self::Csv => "csv",
+      Self::Json => "json",
+      Self::Parquet => "parquet",
+    }
+  }
+}
+
 struct ExportArguments {
   connection: String,
   sql: String,
   out: PathBuf,
+  format: CliExportFormat,
   options: crate::services::export_writer::ExportOptions,
   timeout: Duration,
 }
 
+struct CliExportResult {
+  path: String,
+  rows_written: u64,
+  bytes_written: u64,
+  truncated: bool,
+}
+
 fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> {
   use crate::services::export_writer::{ExportFormat, ExportOptions};
-  let usage = "usage: dataomni cli export <connection> <sql> --out FILE [--format csv|json] \
+  let usage =
+    "usage: dataomni cli export <connection> <sql> --out FILE [--format csv|json|parquet] \
     [--delimiter C] [--no-header] [--null TEXT] [--bom] [--timeout SECONDS]";
   let mut positional = Vec::new();
   let mut out = None;
+  let mut format = CliExportFormat::Csv;
   let mut options = ExportOptions {
     format: ExportFormat::Csv,
     delimiter: ",".to_string(),
@@ -712,13 +827,22 @@ fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> 
     match argument.as_str() {
       "--out" => out = Some(PathBuf::from(value("--out")?)),
       // `sql` 要知道哪些是计算列、自增列与序列（界面另查表的元数据），这一版不做
-      "--format" => {
-        options.format = match value("--format")?.as_str() {
-          "csv" => ExportFormat::Csv,
-          "json" => ExportFormat::Json,
-          other => return Err(CliError::usage(format!("--format is csv or json, got {other}"))),
+      "--format" => match value("--format")?.as_str() {
+        "csv" => {
+          format = CliExportFormat::Csv;
+          options.format = ExportFormat::Csv;
         }
-      }
+        "json" => {
+          format = CliExportFormat::Json;
+          options.format = ExportFormat::Json;
+        }
+        "parquet" => {
+          format = CliExportFormat::Parquet;
+        }
+        other => {
+          return Err(CliError::usage(format!("--format is csv, json or parquet, got {other}")))
+        }
+      },
       "--delimiter" => options.delimiter = value("--delimiter")?,
       "--null" => options.null_text = value("--null")?,
       "--no-header" => options.include_header = false,
@@ -740,6 +864,7 @@ fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> 
     connection,
     sql: read_argument(&sql)?,
     out,
+    format,
     options,
     timeout: Duration::from_secs(timeout_seconds),
   })
@@ -757,14 +882,19 @@ fn export(
   let outcome = run_export(&service, &profile, &arguments, config_dir);
   audit::record(log_dir, "export", &profile.name, &arguments.sql, &outcome, started.elapsed());
   let summary = outcome?;
-  Ok(json!({
+  let mut output = json!({
     "schema": OUTPUT_SCHEMA,
     "connection": profile.name,
+    "format": arguments.format.as_str(),
     "file": summary.path,
     "rows": summary.rows_written,
     "bytes": summary.bytes_written,
     "elapsed_ms": started.elapsed().as_millis() as u64,
-  }))
+  });
+  if arguments.format == CliExportFormat::Parquet {
+    output["truncated"] = json!(summary.truncated);
+  }
+  Ok(output)
 }
 
 fn run_export(
@@ -772,19 +902,232 @@ fn run_export(
   profile: &ConnectionProfile,
   arguments: &ExportArguments,
   config_dir: Option<&Path>,
-) -> Result<crate::services::export_writer::ExportSummary, CliError> {
+) -> Result<CliExportResult, CliError> {
   read_only_gate::check(&arguments.sql)
     .map_err(|refusal| CliError::refused(refusal.to_string()))?;
   if !session::supports(&profile.db_type) {
     return Err(unsupported(&profile.db_type));
   }
   let resolved = resolve_verified(service, profile)?;
-  block_on_within(arguments.timeout, "the export", async {
-    let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-    let summary = opened.export(&arguments.sql, &arguments.out, arguments.options.clone()).await;
-    opened.close().await;
-    summary.map_err(session_error)
-  })
+  match arguments.format {
+    CliExportFormat::Csv | CliExportFormat::Json => {
+      let summary = block_on_within(arguments.timeout, "the export", async {
+        let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
+        let summary =
+          opened.export(&arguments.sql, &arguments.out, arguments.options.clone()).await;
+        opened.close().await;
+        summary.map_err(session_error)
+      })?;
+      Ok(CliExportResult {
+        path: summary.path,
+        rows_written: summary.rows_written,
+        bytes_written: summary.bytes_written,
+        truncated: false,
+      })
+    }
+    CliExportFormat::Parquet => {
+      use crate::services::local_analytics::{
+        create_result_session, export_parquet_from_session, MAX_ANALYTICS_ROWS,
+      };
+      let query_result = block_on_within(arguments.timeout, "the export", async {
+        session::run_read_only(&resolved, &arguments.sql, MAX_ANALYTICS_ROWS, config_dir)
+          .await
+          .map_err(session_error)
+      })?;
+      let QueryExecutionResult::Rows { columns, column_metadata, rows, truncated, .. } =
+        query_result
+      else {
+        return Err(CliError::usage("the statement returned no rows to export"));
+      };
+      let (col_inputs, matrix) = result_to_analytics_inputs(&columns, &column_metadata, &rows);
+      let analytics =
+        create_result_session(&col_inputs, &matrix, MAX_ANALYTICS_ROWS).map_err(|error| {
+          CliError {
+            exit: Exit::Database,
+            kind: "analytics",
+            message: error.to_string(),
+            diagnosis: None,
+          }
+        })?;
+      let parquet =
+        export_parquet_from_session(&analytics, None, &arguments.out).map_err(|error| {
+          CliError {
+            exit: Exit::Database,
+            kind: "analytics",
+            message: error.to_string(),
+            diagnosis: None,
+          }
+        })?;
+      Ok(CliExportResult {
+        path: arguments.out.to_string_lossy().into_owned(),
+        rows_written: parquet.row_count,
+        bytes_written: parquet.bytes,
+        truncated: truncated || analytics.is_truncated(),
+      })
+    }
+  }
+}
+
+fn result_to_analytics_inputs(
+  columns: &[String],
+  column_metadata: &[crate::services::query_executor::QueryColumnMetadata],
+  rows: &[crate::services::query_executor::QueryRow],
+) -> (Vec<crate::services::local_analytics::AnalyticsColumnInput>, Vec<Vec<Value>>) {
+  let col_inputs = columns
+    .iter()
+    .enumerate()
+    .map(|(index, name)| {
+      let meta = column_metadata.get(index);
+      crate::services::local_analytics::AnalyticsColumnInput {
+        name: name.clone(),
+        logical_type: meta.map(|m| m.logical_type.clone()),
+        database_type: meta.map(|m| m.database_type.clone()),
+      }
+    })
+    .collect();
+  let matrix = rows
+    .iter()
+    .map(|row| columns.iter().map(|col| row.get(col).cloned().unwrap_or(Value::Null)).collect())
+    .collect();
+  (col_inputs, matrix)
+}
+
+enum ProfileTarget {
+  Query { connection: String, sql: String, timeout: Duration },
+  LocalFile { path: PathBuf },
+}
+
+struct ProfileArguments {
+  target: ProfileTarget,
+  row_limit: usize,
+}
+
+fn parse_profile_arguments(rest: &[String]) -> Result<ProfileArguments, CliError> {
+  use crate::services::local_analytics::MAX_ANALYTICS_ROWS;
+  let usage = "usage: dataomni cli profile <connection> <sql> [--limit N] [--timeout SECONDS] | dataomni cli profile --file <path> [--limit N]";
+  let mut positional = Vec::new();
+  let mut file: Option<PathBuf> = None;
+  let mut row_limit = DEFAULT_PROFILE_ROW_LIMIT;
+  let mut timeout_seconds: Option<u64> = None;
+  let mut iter = rest.iter();
+  while let Some(argument) = iter.next() {
+    match argument.as_str() {
+      "--file" => {
+        let path = iter.next().cloned().ok_or_else(|| CliError::usage("--file takes a path"))?;
+        if file.is_some() {
+          return Err(CliError::usage(usage));
+        }
+        file = Some(PathBuf::from(path));
+      }
+      "--limit" => {
+        row_limit = number_after("--limit", iter.next(), 1, MAX_ANALYTICS_ROWS as u64)? as usize
+      }
+      "--timeout" => {
+        timeout_seconds = Some(number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?)
+      }
+      flag if flag.starts_with("--") => {
+        return Err(CliError::usage(format!("unknown option {flag}; {usage}")))
+      }
+      _ => positional.push(argument.clone()),
+    }
+  }
+  if let Some(path) = file {
+    if !positional.is_empty() || timeout_seconds.is_some() {
+      return Err(CliError::usage(usage));
+    }
+    return Ok(ProfileArguments { target: ProfileTarget::LocalFile { path }, row_limit });
+  }
+  let [connection, sql] =
+    <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
+  let sql = read_argument(&sql)?;
+  let timeout = Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS));
+  Ok(ProfileArguments { target: ProfileTarget::Query { connection, sql, timeout }, row_limit })
+}
+
+fn profile_command(
+  rest: &[String],
+  config_dir: Option<&Path>,
+  log_dir: Option<&Path>,
+) -> Result<Value, CliError> {
+  use crate::services::local_analytics::{
+    create_result_session, open_local_file_session, profile_session,
+  };
+  let arguments = parse_profile_arguments(rest)?;
+  let started = Instant::now();
+  match arguments.target {
+    ProfileTarget::LocalFile { path } => {
+      if !path.is_file() {
+        return Err(CliError {
+          exit: Exit::Usage,
+          kind: "file",
+          message: format!("file not found: {}", path.display()),
+          diagnosis: None,
+        });
+      }
+      let session = open_local_file_session(&path, arguments.row_limit).map_err(|error| {
+        CliError { exit: Exit::Usage, kind: "file", message: error.to_string(), diagnosis: None }
+      })?;
+      let profile = profile_session("cli-file-profile", &session).map_err(|error| CliError {
+        exit: Exit::Database,
+        kind: "analytics",
+        message: error.to_string(),
+        diagnosis: None,
+      })?;
+      Ok(json!({
+        "schema": OUTPUT_SCHEMA,
+        "file": path.to_string_lossy(),
+        "file_kind": session.file_kind(),
+        "rows": profile.row_count,
+        "column_count": profile.column_count,
+        "truncated": session.is_truncated(),
+        "columns": profile.columns,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+      }))
+    }
+    ProfileTarget::Query { connection, sql, timeout } => {
+      let service = open_service(config_dir)?;
+      let conn_profile = find_open(&service, &connection)?;
+      let query_args = QueryArguments {
+        connection: connection.clone(),
+        sql: sql.clone(),
+        row_limit: arguments.row_limit,
+        timeout,
+        params: std::collections::HashMap::new(),
+      };
+      let outcome = run_query(&service, &conn_profile, &query_args, config_dir);
+      audit::record(log_dir, "profile", &conn_profile.name, &sql, &outcome, started.elapsed());
+      let result = outcome?;
+      let QueryExecutionResult::Rows { columns, column_metadata, rows, truncated, .. } = result
+      else {
+        return Err(CliError::usage("the statement returned no rows to profile"));
+      };
+      let (col_inputs, matrix) = result_to_analytics_inputs(&columns, &column_metadata, &rows);
+      let session =
+        create_result_session(&col_inputs, &matrix, arguments.row_limit).map_err(|error| {
+          CliError {
+            exit: Exit::Database,
+            kind: "analytics",
+            message: error.to_string(),
+            diagnosis: None,
+          }
+        })?;
+      let profile = profile_session("cli-profile", &session).map_err(|error| CliError {
+        exit: Exit::Database,
+        kind: "analytics",
+        message: error.to_string(),
+        diagnosis: None,
+      })?;
+      Ok(json!({
+        "schema": OUTPUT_SCHEMA,
+        "connection": conn_profile.name,
+        "rows": profile.row_count,
+        "column_count": profile.column_count,
+        "truncated": truncated || session.is_truncated(),
+        "columns": profile.columns,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+      }))
+    }
+  }
 }
 
 /// 本机的 CSV 文件：嗅探分隔符与编码（UTF-8，否则 gb18030），给表头、开头几行和字段数对不上的行。
@@ -1076,6 +1419,197 @@ async fn ddl_statements(
   Ok(statements)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffFormat {
+  Json,
+  Markdown,
+}
+
+struct DiffArguments {
+  source: String,
+  target: String,
+  format: DiffFormat,
+  timeout: Duration,
+}
+
+fn parse_diff_arguments(rest: &[String]) -> Result<DiffArguments, CliError> {
+  let usage =
+    "usage: dataomni cli diff <source-connection> <target-connection> [--format json|markdown] [--timeout SECONDS]";
+  let mut positional = Vec::new();
+  let mut format = DiffFormat::Json;
+  let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+  let mut iter = rest.iter();
+  while let Some(argument) = iter.next() {
+    match argument.as_str() {
+      "--format" => {
+        let value =
+          iter.next().ok_or_else(|| CliError::usage("--format takes json or markdown"))?;
+        format = match value.as_str() {
+          "json" => DiffFormat::Json,
+          "markdown" => DiffFormat::Markdown,
+          other => {
+            return Err(CliError::usage(format!("--format is json or markdown, got {other}")))
+          }
+        };
+      }
+      "--timeout" => {
+        timeout_seconds = number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?
+      }
+      flag if flag.starts_with("--") => {
+        return Err(CliError::usage(format!("unknown option {flag}; {usage}")))
+      }
+      _ => positional.push(argument.clone()),
+    }
+  }
+  let [source, target] = <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
+  Ok(DiffArguments { source, target, format, timeout: Duration::from_secs(timeout_seconds) })
+}
+
+/// CM3 只读跨库结构差异报告：双边连接均须开放且通过凭证校验（任一不可见一律报统一的 `not_found`，不泄露哪一侧受限）。
+fn diff_command(
+  rest: &[String],
+  config_dir: Option<&Path>,
+  log_dir: Option<&Path>,
+) -> Result<Output, CliError> {
+  let arguments = parse_diff_arguments(rest)?;
+  let service = open_service(config_dir)?;
+  let bilateral_not_found = || CliError {
+    exit: Exit::Usage,
+    kind: "not_found",
+    message: "one or both connections are not open to the command line".to_string(),
+    diagnosis: None,
+  };
+  let source_profile = find_open(&service, &arguments.source).map_err(|_| bilateral_not_found())?;
+  let target_profile = find_open(&service, &arguments.target).map_err(|_| bilateral_not_found())?;
+  let started = Instant::now();
+  let outcome = run_diff(&service, &source_profile, &target_profile, arguments.timeout, config_dir);
+  let label = format!("{} -> {}", source_profile.name, target_profile.name);
+  audit::record(log_dir, "diff", &label, "", &outcome, started.elapsed());
+  let report = outcome?;
+  match arguments.format {
+    DiffFormat::Markdown => {
+      Ok(Output::Text(diff::render_markdown(&source_profile.name, &target_profile.name, &report)))
+    }
+    DiffFormat::Json => Ok(Output::Json(json!({
+      "schema": OUTPUT_SCHEMA,
+      "source": source_profile.name,
+      "target": target_profile.name,
+      "same_dialect": report.same_dialect,
+      "ignore_schema": report.ignore_schema,
+      "summary": report.summary,
+      "tables_added": report.tables_added,
+      "tables_removed": report.tables_removed,
+      "tables_changed": report.tables_changed,
+      "elapsed_ms": started.elapsed().as_millis() as u64,
+    }))),
+  }
+}
+
+fn run_diff(
+  service: &ConnectionService,
+  source_profile: &ConnectionProfile,
+  target_profile: &ConnectionProfile,
+  timeout: Duration,
+  config_dir: Option<&Path>,
+) -> Result<diff::SchemaDiffReport, CliError> {
+  if !diff::supports_diff(&source_profile.db_type) {
+    return Err(unsupported(&source_profile.db_type));
+  }
+  if !diff::supports_diff(&target_profile.db_type) {
+    return Err(unsupported(&target_profile.db_type));
+  }
+  let source_resolved = resolve_verified(service, source_profile)?;
+  let target_resolved = resolve_verified(service, target_profile)?;
+  block_on_within(timeout, "the schema diff", async {
+    let source_tables = load_diff_snapshot(&source_resolved, config_dir).await?;
+    let target_tables = load_diff_snapshot(&target_resolved, config_dir).await?;
+    Ok(diff::compare_snapshots(
+      &source_resolved.db_type,
+      &source_tables,
+      &target_resolved.db_type,
+      &target_tables,
+    ))
+  })
+}
+
+async fn load_diff_snapshot(
+  profile: &ConnectionProfile,
+  config_dir: Option<&Path>,
+) -> Result<Vec<diff::DiffTable>, CliError> {
+  let obj_queries = crate::services::object_catalog::object_catalog_queries(&profile.db_type)
+    .ok_or_else(|| unsupported(&profile.db_type))?;
+  let meta_queries = crate::services::schema_metadata::schema_metadata_queries(&profile.db_type)
+    .ok_or_else(|| unsupported(&profile.db_type))?;
+  let database = profile.database.clone().unwrap_or_default();
+  if obj_queries.object_parameter_count > 0 && database.is_empty() {
+    return Err(CliError::usage(format!(
+      "{} has no database name; set one in DataOmni",
+      profile.name
+    )));
+  }
+
+  let opened = session::open(profile, config_dir).await.map_err(session_error)?;
+  let outcome = async {
+    let params = vec![Value::String(database); usize::from(obj_queries.object_parameter_count)];
+    let rows = opened.select(obj_queries.objects, params).await.map_err(session_error)?;
+    let mut tables = Vec::new();
+    for row in rows {
+      let kind = row["object_kind"].as_str().unwrap_or_default().to_ascii_lowercase();
+      if !kind.contains("table") {
+        continue;
+      }
+      let name = row["object_name"].as_str().unwrap_or_default().trim().to_string();
+      if name.is_empty() {
+        continue;
+      }
+      let schema =
+        row["object_schema"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+      let meta_params = if meta_queries.parameter_count == 1 {
+        vec![Value::from(name.as_str())]
+      } else {
+        vec![Value::from(name.as_str()), schema.as_deref().map_or(Value::Null, Value::from)]
+      };
+      let col_rows =
+        opened.select(meta_queries.columns, meta_params.clone()).await.map_err(session_error)?;
+      let idx_rows =
+        opened.select(meta_queries.indexes, meta_params.clone()).await.map_err(session_error)?;
+      let fk_rows =
+        opened.select(meta_queries.foreign_keys, meta_params).await.map_err(session_error)?;
+
+      let mut columns = Vec::with_capacity(col_rows.len());
+      let mut primary_key = Vec::new();
+      for col in col_rows {
+        let col_name = col["column_name"].as_str().unwrap_or_default().to_string();
+        let data_type = col["data_type"].as_str().unwrap_or_default().to_string();
+        let nullable = truthy(&col["is_nullable"]);
+        let is_pk = truthy(&col["is_primary_key"]);
+        let default = match &col["column_default"] {
+          Value::Null => None,
+          Value::String(text) => Some(text.clone()),
+          other => Some(other.to_string()),
+        };
+        if is_pk {
+          primary_key.push(col_name.clone());
+        }
+        columns.push(diff::DiffColumn {
+          name: col_name,
+          data_type,
+          nullable,
+          primary_key: is_pk,
+          default,
+        });
+      }
+      let indexes = diff::indexes_from_rows(&idx_rows, truthy);
+      let foreign_keys = diff::foreign_keys_from_rows(&fk_rows);
+      tables.push(diff::DiffTable { schema, name, columns, primary_key, indexes, foreign_keys });
+    }
+    Ok(tables)
+  }
+  .await;
+  opened.close().await;
+  outcome
+}
+
 fn schema(
   rest: &[String],
   config_dir: Option<&Path>,
@@ -1114,6 +1648,22 @@ fn run_schema(
   let mut output = json!({ "schema": OUTPUT_SCHEMA, "connection": profile.name });
   if let (Value::Object(output), Value::Object(body)) = (&mut output, body) {
     output.extend(body);
+  }
+  if let Some(table) = arguments.table.as_deref() {
+    if let Some(table_semantics) = config_dir
+      .and_then(|dir| {
+        crate::services::connection_semantics::read_semantics_for_agent(dir, &profile.id)
+      })
+      .and_then(|notes| {
+        crate::services::connection_semantics::extract_table_section(
+          &notes,
+          table,
+          arguments.schema.as_deref(),
+        )
+      })
+    {
+      output["semantics"] = Value::String(table_semantics);
+    }
   }
   Ok(output)
 }
@@ -2111,6 +2661,7 @@ mod tests {
     const COMMANDS: &[&str] = &[
       "connections",
       "query",
+      "diff",
       "schema",
       "explain",
       "dictionary",
@@ -2119,6 +2670,7 @@ mod tests {
       "neo4j",
       "es",
       "export",
+      "profile",
       "ddl",
       "backup",
       "csv-preview",
@@ -2190,5 +2742,293 @@ mod tests {
     let _ = std::fs::remove_file(dir.0.join("connections.json"));
     let (code, stdout, _) = run_in(&dir, &["connections"]);
     assert_eq!((code, names(&stdout).len()), (0, 0));
+  }
+
+  /// CM2：Parquet 导出与 `profile`（数据库连接模式 + `--file` 本地文件模式）端到端闭环
+  #[test]
+  fn export_parquet_and_profile_work_end_to_end() {
+    let dir = ConfigDir::with(&[]);
+    let db = seeded_sqlite(&dir.0);
+    std::fs::write(
+      dir.0.join("connections.json"),
+      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
+    )
+    .expect("config");
+
+    // 1. export --format parquet 写出合法 Parquet 文件且绝不覆盖已有文件
+    let parquet = dir.0.join("items.parquet");
+    let parquet_path = parquet.to_string_lossy().into_owned();
+    let (code, stdout, stderr) = run_in(
+      &dir,
+      &[
+        "export",
+        "local",
+        "SELECT id, name FROM items ORDER BY id",
+        "--out",
+        &parquet_path,
+        "--format",
+        "parquet",
+      ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let export_body = json_of(&stdout);
+    assert_eq!(export_body["format"], json!("parquet"));
+    assert_eq!(export_body["rows"], json!(1000));
+    assert!(export_body["bytes"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(export_body["truncated"], json!(false));
+
+    let (code, _, stderr) =
+      run_in(&dir, &["export", "local", "SELECT 1", "--out", &parquet_path, "--format", "parquet"]);
+    assert_eq!(code, Exit::Usage as i32, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    // 2. profile --file 分析导出的 Parquet 文件（不写审计日志）
+    let (code, stdout, stderr) = run_in(&dir, &["profile", "--file", &parquet_path]);
+    assert_eq!(code, 0, "{stderr}");
+    let file_profile_body = json_of(&stdout);
+    assert_eq!(file_profile_body["file_kind"], json!("parquet"));
+    assert_eq!(file_profile_body["rows"], json!(1000));
+    assert_eq!(file_profile_body["truncated"], json!(false));
+    let cols = file_profile_body["columns"].as_array().expect("file profile cols");
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0]["name"], json!("id"));
+    assert_eq!(cols[0]["distinctCount"], json!(1000));
+    assert!(cols[0]["p50"].is_number());
+
+    // 3. profile <conn> <sql> 走只读门、截断提示并写审计日志
+    let (code, stdout, stderr) = run_in(
+      &dir,
+      &["profile", "local", "SELECT id, name FROM items ORDER BY id", "--limit", "25"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let conn_profile_body = json_of(&stdout);
+    assert_eq!(conn_profile_body["connection"], json!("local"));
+    assert_eq!(conn_profile_body["rows"], json!(25));
+    assert_eq!(conn_profile_body["truncated"], json!(true));
+    assert_eq!(conn_profile_body["column_count"], json!(2));
+
+    let audit_log =
+      std::fs::read_to_string(dir.0.join("logs").join(AUDIT_FILE)).unwrap_or_default();
+    assert!(audit_log.contains(" profile "), "{audit_log}");
+    assert!(!audit_log.contains("ORDER BY id"), "{audit_log}");
+
+    // 4. 写语句被拒，混用参数报 usage
+    let (code, _, _) = run_in(&dir, &["profile", "local", "DELETE FROM items"]);
+    assert_eq!(code, Exit::Refused as i32);
+    for bad in [
+      &["profile"][..],
+      &["profile", "--file", &parquet_path, "local", "SELECT 1"],
+      &["profile", "--file", &parquet_path, "--timeout", "10"],
+      &["profile", "--file"],
+      &["profile", "local", "SELECT 1", "--limit", "0"],
+    ] {
+      assert_eq!(run_in(&dir, bad).0, Exit::Usage as i32, "{bad:?}");
+    }
+  }
+
+  /// CM3 参数化查询门：SQLite 与 DuckDB 支持 `--param` / `--param-null` / `--params-json`，
+  /// 严禁把参数值明文写入 `dataomni-cli.log`
+  #[test]
+  fn query_supports_named_parameters_without_logging_values() {
+    let dir = ConfigDir::with(&[]);
+    let db = seeded_sqlite(&dir.0);
+    let duck_path = dir.0.join("sample.duckdb");
+    {
+      let conn = duckdb::Connection::open(&duck_path).expect("create duckdb");
+      conn
+        .execute_batch(
+          "CREATE TABLE metrics (id INT, tag VARCHAR, note VARCHAR);
+           INSERT INTO metrics VALUES (1, 'alpha', 'ok'), (2, 'beta', NULL);",
+        )
+        .expect("seed duckdb");
+    }
+    std::fs::write(
+      dir.0.join("connections.json"),
+      Value::from(vec![
+        file_profile("s", "local", "sqlite", &db, "development"),
+        file_profile("d", "duck", "duckdb", &duck_path, "development"),
+      ])
+      .to_string(),
+    )
+    .expect("config");
+
+    // 1. SQLite: --params-json 保留数字类型，--param 传字符串
+    let secret_sentinel = "SECRET_PARAM_SENTINEL_9981";
+    let (code, stdout, stderr) = run_in(
+      &dir,
+      &[
+        "query",
+        "local",
+        "SELECT id, name, :note AS note FROM items WHERE id = :target_id",
+        "--params-json",
+        r#"{"target_id": 7}"#,
+        "--param",
+        &format!("note={secret_sentinel}"),
+      ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let body = json_of(&stdout);
+    assert_eq!(body["rows"], json!([[7, "item 7", secret_sentinel]]));
+
+    // 2. DuckDB: --param + --param-null
+    let (code, stdout, stderr) = run_in(
+      &dir,
+      &[
+        "query",
+        "duck",
+        "SELECT id, :empty_val AS n FROM metrics WHERE tag = :tag",
+        "--param",
+        "tag=beta",
+        "--param-null",
+        "empty_val",
+      ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json_of(&stdout)["rows"], json!([[2, null]]));
+
+    // 3. 安全红线：参数值严禁写入审计日志
+    let audit_log =
+      std::fs::read_to_string(dir.0.join("logs").join(AUDIT_FILE)).unwrap_or_default();
+    assert!(audit_log.contains(" query "), "{audit_log}");
+    assert!(!audit_log.contains(secret_sentinel), "parameter value leaked into audit log!");
+
+    // 4. 缺参、多参、非法 JSON 与写语句校验
+    let (code, _, _) = run_in(&dir, &["query", "local", "SELECT * FROM items WHERE id = :missing"]);
+    assert_eq!(code, Exit::Usage as i32);
+    let (code, _, _) = run_in(&dir, &["query", "local", "SELECT 1", "--param", "unused=1"]);
+    assert_eq!(code, Exit::Usage as i32);
+    let (code, _, _) =
+      run_in(&dir, &["query", "local", "DELETE FROM items WHERE id = :id", "--param", "id=1"]);
+    assert_eq!(code, Exit::Refused as i32);
+  }
+
+  /// CM3 只读结构差异门：`cli diff` 识别新增表/缺失表/列与索引变更；任一侧为 PROD 或未开放一律报 not_found
+  #[test]
+  fn diff_reports_schema_differences_and_enforces_bilateral_access() {
+    let dir = ConfigDir::with(&[]);
+    let src_db = dir.0.join("src.sqlite");
+    let dst_db = dir.0.join("dst.sqlite");
+    {
+      let rt = tokio::runtime::Runtime::new().expect("runtime");
+      rt.block_on(async {
+        let src_pool = sqlx::SqlitePool::connect_with(
+          sqlx::sqlite::SqliteConnectOptions::new().filename(&src_db).create_if_missing(true),
+        )
+        .await
+        .expect("src sqlite");
+        sqlx::raw_sql(
+          "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL, role TEXT DEFAULT 'member');
+           CREATE UNIQUE INDEX idx_users_email ON users(email);
+           CREATE TABLE events (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id));",
+        )
+        .execute(&src_pool)
+        .await
+        .expect("seed src");
+        src_pool.close().await;
+
+        let dst_pool = sqlx::SqlitePool::connect_with(
+          sqlx::sqlite::SqliteConnectOptions::new().filename(&dst_db).create_if_missing(true),
+        )
+        .await
+        .expect("dst sqlite");
+        sqlx::raw_sql(
+          "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, legacy TEXT);
+           CREATE TABLE old_temp (id INTEGER PRIMARY KEY);",
+        )
+        .execute(&dst_pool)
+        .await
+        .expect("seed dst");
+        dst_pool.close().await;
+      });
+    }
+    let mut hidden_profile = file_profile("h", "hidden", "sqlite", &dst_db, "development");
+    hidden_profile["agent_access"] = json!("off");
+    std::fs::write(
+      dir.0.join("connections.json"),
+      Value::from(vec![
+        file_profile("a", "dev", "sqlite", &src_db, "development"),
+        file_profile("b", "staging", "sqlite", &dst_db, "staging"),
+        file_profile("p", "prod", "sqlite", &dst_db, "production"),
+        hidden_profile,
+      ])
+      .to_string(),
+    )
+    .expect("config");
+
+    // 1. JSON 差异报告
+    let (code, stdout, stderr) = run_in(&dir, &["diff", "dev", "staging"]);
+    assert_eq!(code, 0, "{stderr}");
+    let body = json_of(&stdout);
+    assert_eq!(body["schema"], json!(1));
+    assert_eq!(body["same_dialect"], json!(true));
+    assert_eq!(body["summary"]["tablesAdded"], json!(1));
+    assert_eq!(body["summary"]["tablesRemoved"], json!(1));
+    assert_eq!(body["summary"]["tablesChanged"], json!(1));
+    assert_eq!(body["tables_added"], json!(["events"]));
+    assert_eq!(body["tables_removed"], json!(["old_temp"]));
+    assert_eq!(body["tables_changed"][0]["table"], json!("users"));
+
+    // 2. Markdown 摘要格式
+    let (code, stdout, stderr) = run_in(&dir, &["diff", "dev", "staging", "--format", "markdown"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("# Schema Diff: dev → staging"), "{stdout}");
+    assert!(stdout.contains("events"), "{stdout}");
+    assert!(stdout.contains("old_temp"), "{stdout}");
+
+    // 3. 双边权限门：无论源还是目标是 PROD 或未开放，报错 kind 和文案完全一致（不泄露哪侧存在）
+    let (c1, _, e1) = run_in(&dir, &["diff", "dev", "prod"]);
+    let (c2, _, e2) = run_in(&dir, &["diff", "prod", "dev"]);
+    let (c3, _, e3) = run_in(&dir, &["diff", "dev", "hidden"]);
+    for (code, err) in [(c1, &e1), (c2, &e2), (c3, &e3)] {
+      assert_eq!(code, Exit::Usage as i32, "{err}");
+      assert_eq!(json_of(err)["error"]["kind"], json!("not_found"), "{err}");
+    }
+    assert_eq!(json_of(&e1)["error"]["message"], json_of(&e2)["error"]["message"]);
+    assert_eq!(json_of(&e1)["error"]["message"], json_of(&e3)["error"]["message"]);
+  }
+
+  /// CM4 语义备注无侵入门：无侧文件时 dictionary/schema 输出不变；有侧文件时注入备注段与表级说明
+  #[test]
+  fn connection_semantics_injects_into_dictionary_and_schema_without_breaking_baseline() {
+    let dir = ConfigDir::with(&[]);
+    let db = seeded_sqlite(&dir.0);
+    std::fs::write(
+      dir.0.join("connections.json"),
+      Value::from(vec![file_profile("conn-sem", "local", "sqlite", &db, "development")])
+        .to_string(),
+    )
+    .expect("config");
+
+    // 1. 无侧文件：dictionary 不含语义块，schema 不含 semantics 字段
+    let (code, baseline_dict, stderr) = run_in(&dir, &["dictionary", "local"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!baseline_dict.contains("## Business Semantics & Notes"), "{baseline_dict}");
+
+    let (code, baseline_schema, stderr) = run_in(&dir, &["schema", "local", "items"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(json_of(&baseline_schema).get("semantics").is_none(), "{baseline_schema}");
+
+    // 2. 写入 semantics/conn-sem.md 后：dictionary 在物理表之前注入，schema 附带对应表小节
+    crate::services::connection_semantics::save_semantics(
+      &dir.0,
+      "conn-sem",
+      "All amounts are in cents.\n\n### items\n- `name` is the customer-facing SKU label.\n",
+    )
+    .expect("save semantics");
+
+    let (code, enriched_dict, stderr) = run_in(&dir, &["dictionary", "local"]);
+    assert_eq!(code, 0, "{stderr}");
+    let sem_pos =
+      enriched_dict.find("## Business Semantics & Notes").expect("semantics heading in dictionary");
+    let table_pos = enriched_dict.find("## items").expect("table heading in dictionary");
+    assert!(sem_pos < table_pos, "semantics must appear before physical tables");
+    assert!(enriched_dict.contains("All amounts are in cents."));
+
+    let (code, enriched_schema, stderr) = run_in(&dir, &["schema", "local", "items"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+      json_of(&enriched_schema)["semantics"],
+      json!("- `name` is the customer-facing SKU label.")
+    );
   }
 }

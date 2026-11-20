@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { SqlDialect } from '../contracts/queryExecution';
 import { bindParameters, nameParameterError, parameterNames, type ParameterInput } from './queryParameters';
@@ -96,5 +98,42 @@ describe('nameParameterError', () => {
     const error = { message: 'syntax error at or near "FORM"' };
     expect(nameParameterError(error, ['id'])).toBe(error);
     expect(nameParameterError('plain text', ['id'])).toBe('plain text');
+  });
+});
+
+describe('bind-parameters conformance corpus', () => {
+  interface ConformanceCase {
+    why: string;
+    dialect: SqlDialect;
+    sql: string;
+    names: string[];
+    rewritten: string | null;
+    unsupported?: boolean;
+  }
+
+  const corpusPath = resolve(process.cwd(), 'fixtures/bind-parameters-conformance.json');
+  const corpus = JSON.parse(readFileSync(corpusPath, 'utf8')) as { cases: ConformanceCase[] };
+
+  it('matches every shared case identically with Rust named_parameters', () => {
+    expect(corpus.cases.length).toBeGreaterThan(0);
+    for (const item of corpus.cases) {
+      const scanned = sqlParameters(item.sql, item.dialect).map((param) => param.name);
+      expect(scanned, item.why).toEqual(item.names);
+
+      const inputs: Record<string, ParameterInput> = {};
+      for (const name of item.names) {
+        inputs[name] = text(`val_${name}`);
+      }
+      const bound = bindParameters(item.sql, item.dialect, inputs);
+      if (item.unsupported) {
+        expect(bound, item.why).toEqual({ ok: false, reason: 'unsupported-dialect' });
+      } else {
+        expect(bound.ok, item.why).toBe(true);
+        if (bound.ok) {
+          expect(bound.sql, item.why).toBe(item.rewritten);
+          expect(bound.names, item.why).toEqual(item.names);
+        }
+      }
+    }
   });
 });

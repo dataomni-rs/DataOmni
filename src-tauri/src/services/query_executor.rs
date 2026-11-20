@@ -415,6 +415,31 @@ impl SessionConnection {
     }
   }
 
+  /// 带 JSON 绑定参数执行只读查询并返回完整结果集（参数为空时直接走无参 `execute`）
+  pub async fn execute_with_json_params(
+    &mut self,
+    sql: &str,
+    params: &[JsonValue],
+    row_limit: usize,
+  ) -> Result<QueryExecutionResult, QueryError> {
+    if params.is_empty() {
+      return self.execute(sql, row_limit).await;
+    }
+    let mut rows = Vec::new();
+    let summary = self
+      .execute_streaming_with_params(
+        sql,
+        params,
+        StreamOptions::limited(row_limit, DEFAULT_QUERY_BYTE_LIMIT, row_limit.max(1)),
+        &mut |batch| {
+          rows.extend(batch.rows);
+          Ok(())
+        },
+      )
+      .await?;
+    summary_with_rows(summary, rows)
+  }
+
   /// 只问「这条语句返回哪些列」，不取任何一行。
   ///
   /// 导出要先写 CSV 表头，而表头必须在第一批数据之前就写出去。三种驱动的

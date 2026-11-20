@@ -28,12 +28,20 @@ Credentials come from the user's keychain; never ask the user for a password.
      the definition the database itself keeps.
 3. `dataomni cli query <connection> "<sql>"` runs one read-only statement. At most 200 rows come back
    unless you pass `--limit N` (up to 10000); `truncated: true` means there were more. Prefer
-   aggregating in SQL over pulling many rows.
-4. `dataomni cli explain <connection> "<sql>"` shows the plan without running the statement.
-5. `dataomni cli export <connection> "<sql>" --out FILE` writes all rows to a new CSV or JSON file
-   (`--format json`); `dataomni cli backup <connection> --out PATH` makes a backup the way DataOmni
-   does.
-6. `dataomni cli test <connection>` checks the connection; on failure `error.diagnosis` says whether
+   aggregating in SQL over pulling many rows. Pass `:name` bind parameters safely with
+   `--param name=value`, `--param-null name`, or `--params-json '{"id": 1}'` (values are never logged).
+4. `dataomni cli diff <source> <target> [--format json|markdown]` compares the schema of two open
+   non-production connections (tables, columns, primary keys, indexes, foreign keys) and prints a
+   read-only difference report without executing any DDL.
+5. `dataomni cli explain <connection> "<sql>"` shows the plan without running the statement.
+6. `dataomni cli export <connection> "<sql>" --out FILE` writes all rows to a new CSV, JSON, or
+   Parquet file (`--format json` or `--format parquet`); `dataomni cli backup <connection> --out PATH`
+   makes a backup the way DataOmni does.
+7. `dataomni cli profile <connection> "<sql>"` profiles column distributions (inferred type, null
+   ratio, distinct count, min/max/quantiles, top-5 values) via built-in DuckDB without pulling raw
+   rows (default 10000 rows, `--limit N` up to 100000). For a local Parquet/CSV/JSON file, use
+   `dataomni cli profile --file <path>`.
+8. `dataomni cli test <connection>` checks the connection; on failure `error.diagnosis` says whether
    the host resolved and the port answered.
 
 Pass long statements on stdin with `-` in place of the SQL: `dataomni cli query db - < query.sql`.
