@@ -2317,7 +2317,10 @@ mod tests {
       let (code, stdout, stderr) = run_in(&dir, &[cmd, "--help"]);
       assert_eq!(code, 0, "{cmd} --help stderr={stderr}");
       assert!(stdout.contains(expected), "{cmd} --help stdout={stdout}");
-      assert!(!stdout.contains("dataomni cli "), "{cmd} --help still shows legacy prefix: {stdout}");
+      assert!(
+        !stdout.contains("dataomni cli "),
+        "{cmd} --help still shows legacy prefix: {stdout}"
+      );
     }
   }
 
