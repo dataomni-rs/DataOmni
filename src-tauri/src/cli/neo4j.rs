@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) const USAGE: &str = "usage: dataomni cli neo4j <connection> <operation> ...
+pub(super) const USAGE: &str = "usage: dataomni neo4j <connection> <operation> ...
   labels
   run <cypher> [--limit N]       (<cypher> may be - to read it from stdin)
 both take [--db DATABASE] [--timeout SECONDS]";

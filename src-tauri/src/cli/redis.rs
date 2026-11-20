@@ -14,7 +14,7 @@ use crate::services::redis::{
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub(super) const USAGE: &str = "usage: dataomni cli redis <connection> <operation> ...
+pub(super) const USAGE: &str = "usage: dataomni redis <connection> <operation> ...
   keyspaces
   scan [<pattern>] [--type T] [--cursor C] [--limit N]
   get <key> [--position P] [--limit N]

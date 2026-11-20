@@ -16,7 +16,7 @@ use ::mongodb::bson::{Bson, Document};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub(super) const USAGE: &str = "usage: dataomni cli mongo <connection> <operation> ...
+pub(super) const USAGE: &str = "usage: dataomni mongo <connection> <operation> ...
   collections
   find <database>.<collection> [<filter>] [--sort S] [--skip N] [--limit N]
   count <database>.<collection> [<filter>]
