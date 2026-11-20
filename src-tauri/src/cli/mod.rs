@@ -87,9 +87,14 @@ impl CliError {
 }
 
 const HELP: &str = "\
-DataOmni command line: read-only access to connections you opened to agents in DataOmni.
+DataOmni: desktop database client, standalone read-only CLI, and MCP server.
+CLI and MCP run headless without launching or requiring the desktop app.
 
-Usage: dataomni cli <command> [arguments]
+Usage:
+  dataomni                         Launch the desktop application
+  dataomni <command> [arguments]   Run a standalone read-only CLI command
+  dataomni cli <command> [...]     Same as above (explicit prefix)
+  dataomni mcp                     Start the read-only MCP server over stdio
 
 Commands:
   connections        List the connections open to the command line
@@ -221,7 +226,50 @@ fn client_dir_beside(exe: &Path) -> Option<PathBuf> {
   Some(resources.join("instantclient"))
 }
 
-/// 入口：`args` 是 `cli` 之后的参数。返回进程退出码
+/// 进程入口分流结果：决定拉起桌面端、无头 CLI 还是 stdio MCP 服务。
+#[derive(Debug, PartialEq, Eq)]
+pub enum Invocation<'a> {
+  /// 无参数或桌面启动器参数（如 macOS Finder 的 `-psn_*`、显式 `gui`），拉起桌面窗口
+  Gui,
+  /// 无头只读 CLI（支持 `dataomni cli <cmd>`、`dataomni <cmd>`、`dataomni --help`、`dataomni -V` 等）
+  Cli(&'a [String]),
+  /// 无头只读 MCP stdio 服务（`dataomni mcp`）
+  Mcp(&'a [String]),
+}
+
+/// 根据程序名之后的参数（`&args[1..]`）决定启动形态：
+/// - 无参数、`gui` 或 macOS 桌面启动器参数（`-psn_*` / `-NS*` / `-Apple*`）→ 启动桌面端；
+/// - `cli ...` → 剥掉 `cli` 前缀进入无头 CLI（保持全部既有脚本与 Agent Skill 兼容）；
+/// - `mcp ...` → 进入无头 MCP；
+/// - 其余任何终端参数（`--help` / `-V` / `connections` / `query` / 拼写错误等）→ 走无头 CLI，绝不意外弹出界面窗口。
+pub fn classify_invocation(args: &[String]) -> Invocation<'_> {
+  let Some((first, rest)) = args.split_first() else {
+    return Invocation::Gui;
+  };
+  match first.as_str() {
+    "gui" if rest.is_empty() => Invocation::Gui,
+    "cli" => Invocation::Cli(rest),
+    "mcp" => Invocation::Mcp(rest),
+    flag if flag.starts_with("-psn_") || flag.starts_with("-NS") || flag.starts_with("-Apple") => {
+      Invocation::Gui
+    }
+    _ => Invocation::Cli(args),
+  }
+}
+
+const MCP_HELP: &str = "\
+DataOmni MCP server: read-only Model Context Protocol server over stdio.
+Runs headless without launching or requiring the desktop application.
+
+Usage:
+  dataomni mcp
+
+Connect your MCP host (Claude Code, Claude Desktop, Cursor, etc.) to this
+command over stdio. Only connections marked \"Command line & agent access:
+Read-only\" in DataOmni are visible; production connections are never visible.
+";
+
+/// 入口：`args` 是 CLI 命令与参数。返回进程退出码
 pub fn run(args: &[String]) -> i32 {
   if let Some(dir) = bundled_oracle_client() {
     crate::services::oracle::pin_client_dir(dir);
@@ -235,9 +283,10 @@ pub fn run(args: &[String]) -> i32 {
 /// `dataomni mcp`：stdio 上的 MCP 服务（`rfcs/mcp-server.md`）。工具调用拼成参数后走同一个
 /// `dispatch`，权限门只有一份。读到标准输入结束就退出
 pub fn serve_mcp(args: &[String]) -> i32 {
-  if let Some(extra) = args.first() {
-    eprintln!("dataomni mcp takes no arguments, got {extra}");
-    return Exit::Usage as i32;
+  let stdout = std::io::stdout();
+  let stderr = std::io::stderr();
+  if let Some(code) = handle_mcp_args(args, &mut stdout.lock(), &mut stderr.lock()) {
+    return code;
   }
   if let Some(dir) = bundled_oracle_client() {
     crate::services::oracle::pin_client_dir(dir);
@@ -247,8 +296,20 @@ pub fn serve_mcp(args: &[String]) -> i32 {
   KEYCHAIN_DEADLINE_EXITS.store(false, Ordering::SeqCst);
   let dirs = Dirs { config: app_config_dir(), log: app_log_dir() };
   let stdin = std::io::stdin();
-  let stdout = std::io::stdout();
   mcp::serve(&mut stdin.lock(), &mut stdout.lock(), &dirs)
+}
+
+fn handle_mcp_args(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Option<i32> {
+  if args.is_empty() {
+    return None;
+  }
+  if matches!(args, [flag] if matches!(flag.as_str(), "-h" | "--help" | "help")) {
+    let _ = write!(out, "{MCP_HELP}");
+    return Some(Exit::Ok as i32);
+  }
+  let _ =
+    writeln!(err, "dataomni mcp takes no arguments, got {} (run `dataomni mcp --help`)", args[0]);
+  Some(Exit::Usage as i32)
 }
 
 fn run_with(args: &[String], dirs: &Dirs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
@@ -287,18 +348,48 @@ enum Output {
   Text(String),
 }
 
+fn is_subcommand_help(rest: &[String]) -> bool {
+  matches!(rest, [flag] if matches!(flag.as_str(), "--help" | "-h"))
+}
+
 fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
   let config_dir = dirs.config.as_deref();
   let Some((command, rest)) = args.split_first() else {
     return Ok(Output::Text(HELP.to_string()));
   };
+  let known_command = matches!(
+    command.as_str(),
+    "guide"
+      | "version"
+      | "--version"
+      | "-V"
+      | "connections"
+      | "query"
+      | "diff"
+      | "schema"
+      | "explain"
+      | "test"
+      | "dictionary"
+      | "mongo"
+      | "redis"
+      | "neo4j"
+      | "es"
+      | "csv-preview"
+      | "export"
+      | "profile"
+      | "ddl"
+      | "backup"
+  );
+  if known_command && is_subcommand_help(rest) {
+    return Ok(Output::Text(HELP.to_string()));
+  }
   match command.as_str() {
     "help" | "--help" | "-h" => Ok(Output::Text(HELP.to_string())),
     "guide" => {
       no_arguments(command, rest)?;
       Ok(Output::Text(GUIDE.to_string()))
     }
-    "version" | "--version" => {
+    "version" | "--version" | "-V" => {
       no_arguments(command, rest)?;
       Ok(Output::Json(json!({ "schema": OUTPUT_SCHEMA, "version": env!("CARGO_PKG_VERSION") })))
     }
@@ -322,7 +413,7 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
     "profile" => profile_command(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "ddl" => ddl(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "backup" => backup(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
-    other => Err(CliError::usage(format!("unknown command {other}; run `dataomni cli help`"))),
+    other => Err(CliError::usage(format!("unknown command {other}; run `dataomni --help`"))),
   }
 }
 
@@ -2071,12 +2162,77 @@ mod tests {
   #[test]
   fn version_and_help() {
     let dir = ConfigDir::with(&[]);
-    let (code, stdout, _) = run_in(&dir, &["version"]);
-    let value: Value = serde_json::from_str(&stdout).unwrap_or_default();
-    assert_eq!((code, value["version"].as_str()), (0, Some(env!("CARGO_PKG_VERSION"))));
+    for flag in ["version", "--version", "-V"] {
+      let (code, stdout, _) = run_in(&dir, &[flag]);
+      let value: Value = serde_json::from_str(&stdout).unwrap_or_default();
+      assert_eq!((code, value["version"].as_str()), (0, Some(env!("CARGO_PKG_VERSION"))));
+    }
     let (code, stdout, _) = run_in(&dir, &[]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("Usage: dataomni cli"));
+    assert!(stdout.contains("dataomni <command> [arguments]"));
+    assert!(stdout.contains("dataomni cli <command>"));
+    assert!(stdout.contains("dataomni mcp"));
+
+    for cmd in ["connections", "query", "profile", "diff"] {
+      let (code, stdout, stderr) = run_in(&dir, &[cmd, "--help"]);
+      assert_eq!(code, 0, "{cmd} --help stderr={stderr}");
+      assert!(stdout.contains("Commands:"));
+    }
+  }
+
+  #[test]
+  fn classify_invocation_separates_gui_cli_and_mcp_cleanly() {
+    let to_vec = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+    // 无参、显式 gui 与 macOS 桌面启动器参数启动界面
+    assert_eq!(classify_invocation(&to_vec(&[])), Invocation::Gui);
+    assert_eq!(classify_invocation(&to_vec(&["gui"])), Invocation::Gui);
+    assert_eq!(classify_invocation(&to_vec(&["-psn_0_123456"])), Invocation::Gui);
+    assert_eq!(
+      classify_invocation(&to_vec(&["-NSDocumentRevisionsDebugMode", "YES"])),
+      Invocation::Gui
+    );
+    assert_eq!(classify_invocation(&to_vec(&["-AppleLanguages", "(en)"])), Invocation::Gui);
+
+    // 显式 cli 前缀与顶层直接调用均走无头 CLI（不启界面）
+    let explicit = to_vec(&["cli", "query", "dev", "SELECT 1"]);
+    assert_eq!(classify_invocation(&explicit), Invocation::Cli(&explicit[1..]));
+    let bare_cli = to_vec(&["cli"]);
+    assert_eq!(classify_invocation(&bare_cli), Invocation::Cli(&[]));
+
+    for direct in [
+      to_vec(&["--help"]),
+      to_vec(&["-h"]),
+      to_vec(&["help"]),
+      to_vec(&["--version"]),
+      to_vec(&["-V"]),
+      to_vec(&["connections"]),
+      to_vec(&["query", "dev", "SELECT 1"]),
+      to_vec(&["profile", "--file", "a.csv"]),
+      to_vec(&["unknown-typo"]),
+    ] {
+      assert_eq!(classify_invocation(&direct), Invocation::Cli(&direct[..]));
+    }
+
+    // mcp 走无头 MCP，支持 mcp --help 且拒绝未知参数
+    let mcp_bare = to_vec(&["mcp"]);
+    assert_eq!(classify_invocation(&mcp_bare), Invocation::Mcp(&[]));
+    let mcp_help = to_vec(&["mcp", "--help"]);
+    assert_eq!(classify_invocation(&mcp_help), Invocation::Mcp(&mcp_help[1..]));
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    assert_eq!(handle_mcp_args(&to_vec(&["--help"]), &mut out, &mut err), Some(0));
+    assert!(String::from_utf8_lossy(&out).contains("DataOmni MCP server"));
+    assert!(err.is_empty());
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    assert_eq!(
+      handle_mcp_args(&to_vec(&["--bogus"]), &mut out, &mut err),
+      Some(Exit::Usage as i32)
+    );
+    assert!(String::from_utf8_lossy(&err).contains("dataomni mcp --help"));
   }
 
   pub(super) fn file_profile(

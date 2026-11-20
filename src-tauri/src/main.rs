@@ -2,21 +2,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  // `dataomni cli …` 是给 Agent 与终端用的命令行，不起窗口。和应用共用一个二进制，
-  // 钥匙串才认得它（见 `cli` 模块）
+  // 终端调用（`dataomni --help`、`dataomni connections`、`dataomni cli ...`、`dataomni mcp`）
+  // 在起 Tauri 之前直接无头执行并退出，不启动桌面窗口；和应用共用同一二进制，钥匙串才能认得它
   let args: Vec<String> = std::env::args().collect();
-  if args.get(1).map(String::as_str) == Some("cli") {
-    #[cfg(windows)]
-    attach_parent_console();
-    std::process::exit(dataomni_lib::cli::run(&args[2..]));
+  match dataomni_lib::cli::classify_invocation(&args[1..]) {
+    dataomni_lib::cli::Invocation::Gui => dataomni_lib::run(),
+    dataomni_lib::cli::Invocation::Cli(cli_args) => {
+      #[cfg(windows)]
+      attach_parent_console();
+      std::process::exit(dataomni_lib::cli::run(cli_args));
+    }
+    dataomni_lib::cli::Invocation::Mcp(mcp_args) => {
+      #[cfg(windows)]
+      attach_parent_console();
+      std::process::exit(dataomni_lib::cli::serve_mcp(mcp_args));
+    }
   }
-  // `dataomni mcp`：同一套命令包成 stdio 上的 MCP 服务，给不能跑 shell 的 Agent 用
-  if args.get(1).map(String::as_str) == Some("mcp") {
-    #[cfg(windows)]
-    attach_parent_console();
-    std::process::exit(dataomni_lib::cli::serve_mcp(&args[2..]));
-  }
-  dataomni_lib::run()
 }
 
 /// 发布版是 GUI 子系统，从终端直接敲时没有标准输出。借用父进程（终端）的控制台；
