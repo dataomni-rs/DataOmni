@@ -168,12 +168,13 @@ impl Opened {
   }
 
   /// 执行一条已经过了语句门的语句
-  pub(super) async fn run_read_only(
+  pub(super) async fn run_read_only_with_params(
     &self,
     sql: &str,
+    params: &[JsonValue],
     row_limit: usize,
   ) -> Result<QueryExecutionResult, Failure> {
-    execute(self.pool_ref(), self.begin, sql, row_limit).await
+    execute(self.pool_ref(), self.begin, sql, params, row_limit).await
   }
 
   /// 跑我们自己的目录查询（`schema_metadata`、`object_catalog`），表名与 schema 走绑定参数
@@ -277,8 +278,18 @@ pub(super) async fn run_read_only(
   row_limit: usize,
   config_dir: Option<&Path>,
 ) -> Result<QueryExecutionResult, Failure> {
+  run_read_only_with_params(profile, sql, &[], row_limit, config_dir).await
+}
+
+pub(super) async fn run_read_only_with_params(
+  profile: &ConnectionProfile,
+  sql: &str,
+  params: &[JsonValue],
+  row_limit: usize,
+  config_dir: Option<&Path>,
+) -> Result<QueryExecutionResult, Failure> {
   let opened = open(profile, config_dir).await?;
-  let result = opened.run_read_only(sql, row_limit).await;
+  let result = opened.run_read_only_with_params(sql, params, row_limit).await;
   opened.close().await;
   result
 }
@@ -287,6 +298,7 @@ async fn execute(
   pool: PoolRef<'_>,
   begin: Option<&str>,
   sql: &str,
+  params: &[JsonValue],
   row_limit: usize,
 ) -> Result<QueryExecutionResult, Failure> {
   let mut session =
@@ -294,7 +306,7 @@ async fn execute(
   if let Some(begin) = begin {
     session.execute_unprepared(begin).await.map_err(Failure::Database)?;
   }
-  let result = session.execute(sql, row_limit).await;
+  let result = session.execute_with_json_params(sql, params, row_limit).await;
   if begin.is_some() {
     // 回滚失败时这条连接随后就关掉了，服务器在断开时同样回滚
     let _ = session.execute_unprepared("ROLLBACK").await;

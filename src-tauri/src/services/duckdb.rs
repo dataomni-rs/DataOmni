@@ -215,7 +215,12 @@ fn select_rows(
     };
     let mut values = Map::new();
     for (index, (name, type_id)) in columns.iter().enumerate() {
-      let value: Value = row.get(index).map_err(|error| query_error(&error, None))?;
+      // duckdb-rs 1.2 对 Arrow `DataType::Null`（即 `SQLNULL`，如 `SELECT NULL` 或绑定 NULL 参数）调用 `row.get` 会 panic
+      let value: Value = if *type_id == LogicalTypeId::SqlNull {
+        Value::Null
+      } else {
+        row.get(index).map_err(|error| query_error(&error, None))?
+      };
       values.insert(name.clone(), untagged(decode(&value, *type_id)));
     }
     result.push(values);
@@ -626,7 +631,12 @@ fn run_statement(
   while let Some(row) = rows.next().map_err(|error| query_error(&error, Some(statement)))? {
     let mut values = Map::new();
     for (index, (name, type_id)) in names.iter().zip(&type_ids).enumerate() {
-      let value: Value = row.get(index).map_err(|error| query_error(&error, None))?;
+      // duckdb-rs 1.2 对 `SQLNULL` 列调用 `row.get` 会触发内部 unreachable panic
+      let value: Value = if *type_id == LogicalTypeId::SqlNull {
+        Value::Null
+      } else {
+        row.get(index).map_err(|error| query_error(&error, None))?
+      };
       values.insert(name.clone(), decode(&value, *type_id));
     }
     if sender.blocking_send(Fetched::Row(values)).is_err() {

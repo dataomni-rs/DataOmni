@@ -848,7 +848,11 @@ pub fn query_session(
     }
     let mut values = Vec::with_capacity(columns.len());
     for (idx, type_id) in type_ids.iter().enumerate() {
-      let value: Value = row.get(idx).map_err(duck_error)?;
+      let value: Value = if *type_id == LogicalTypeId::SqlNull {
+        Value::Null
+      } else {
+        row.get(idx).map_err(duck_error)?
+      };
       values.push(duckdb_decode(&value, *type_id));
     }
     let row_bytes = serde_json::to_vec(&values).map(|encoded| encoded.len()).unwrap_or(0);
@@ -934,7 +938,11 @@ pub fn export_parquet_from_session(
       }
       let mut values = Vec::with_capacity(defs.len());
       for (idx, type_id) in type_ids.iter().enumerate() {
-        let raw: Value = row.get(idx).map_err(duck_error)?;
+        let raw: Value = if *type_id == LogicalTypeId::SqlNull {
+          Value::Null
+        } else {
+          row.get(idx).map_err(duck_error)?
+        };
         values.push(normalize_export_value(raw, *type_id));
       }
       collected.push(values);

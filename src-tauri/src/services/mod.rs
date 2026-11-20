@@ -16,6 +16,7 @@ pub mod local_analytics;
 pub mod mongo_command;
 pub mod mongo_shell;
 pub mod mongodb;
+pub mod named_parameters;
 pub mod neo4j;
 pub mod object_catalog;
 pub mod opengauss_relay;

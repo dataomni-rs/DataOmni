@@ -1,0 +1,83 @@
+{
+  "description": "Shared conformance corpus pinning :name SQL parameter scanning and dialect placeholder rewriting between TypeScript (src/utils/sqlStatements.ts + queryParameters.ts) and Rust (src-tauri/src/services/named_parameters.rs).",
+  "cases": [
+    {
+      "why": "plain parameters and repeated occurrences in PostgreSQL",
+      "dialect": "postgresql",
+      "sql": "SELECT * FROM orders WHERE status = :status AND (owner = :owner OR backup = :owner)",
+      "names": ["status", "owner", "owner"],
+      "rewritten": "SELECT * FROM orders WHERE status = $1 AND (owner = $2 OR backup = $3)"
+    },
+    {
+      "why": "array brackets in PostgreSQL allow parameters inside",
+      "dialect": "postgresql",
+      "sql": "SELECT * FROM t WHERE id = ANY(ARRAY[:first, :second])",
+      "names": ["first", "second"],
+      "rewritten": "SELECT * FROM t WHERE id = ANY(ARRAY[$1, $2])"
+    },
+    {
+      "why": "PostgreSQL type casts, dollar quotes, nested block comments, and escape strings",
+      "dialect": "postgresql",
+      "sql": "SELECT x::text, :a::int, $$ :b $$, $tag$ :c $tag$, E'it\\'s :d', /* outer /* :e */ still */ :f",
+      "names": ["a", "f"],
+      "rewritten": "SELECT x::text, $1::int, $$ :b $$, $tag$ :c $tag$, E'it\\'s :d', /* outer /* :e */ still */ $2"
+    },
+    {
+      "why": "strings, double-quoted identifiers, line comments, and block comments are skipped",
+      "dialect": "sqlite",
+      "sql": "SELECT ':a', \"col:b\" FROM t -- :c\n/* :d */ WHERE x = :e AND y = [col :f]",
+      "names": ["e"],
+      "rewritten": "SELECT ':a', \"col:b\" FROM t -- :c\n/* :d */ WHERE x = ? AND y = [col :f]"
+    },
+    {
+      "why": "MySQL backticks, # comments, assignments, labels, and positional markers",
+      "dialect": "mysql",
+      "sql": "SELECT `x:a`, :b # :comment\n, @n := 1, :1 WHERE c = :c",
+      "names": ["b", "c"],
+      "rewritten": "SELECT `x:a`, ? # :comment\n, @n := 1, :1 WHERE c = ?"
+    },
+    {
+      "why": "MySQL non-whitespace -- is subtraction, not a comment",
+      "dialect": "mysql",
+      "sql": "SELECT 5--:a",
+      "names": ["a"],
+      "rewritten": "SELECT 5--?"
+    },
+    {
+      "why": "SQL Server bracketed identifiers and @P1 placeholders",
+      "dialect": "sqlserver",
+      "sql": "SELECT [x :a], :b, :c FROM #tmp WHERE d = :b",
+      "names": ["b", "c", "b"],
+      "rewritten": "SELECT [x :a], @P1, @P2 FROM #tmp WHERE d = @P3"
+    },
+    {
+      "why": "Oracle q-quotes and trigger correlation names :new.col",
+      "dialect": "oracle",
+      "sql": "SELECT q'[it's :a]', nq'(hi :b)', :new.updated_at, :c FROM dual WHERE d = :d",
+      "names": ["c", "d"],
+      "rewritten": "SELECT q'[it's :a]', nq'(hi :b)', :new.updated_at, :1 FROM dual WHERE d = :2"
+    },
+    {
+      "why": "DuckDB uses ? placeholders and supports array slices without false positives",
+      "dialect": "duckdb",
+      "sql": "SELECT arr[lo:hi], arr[1:n], :limit_val FROM t WHERE k = :key",
+      "names": ["limit_val", "key"],
+      "rewritten": "SELECT arr[lo:hi], arr[1:n], ? FROM t WHERE k = ?"
+    },
+    {
+      "why": "ClickHouse typed parameter syntax {id:UInt64} is not a :name parameter",
+      "dialect": "clickhouse",
+      "sql": "SELECT {id:UInt64}, ':ignored' FROM t",
+      "names": [],
+      "rewritten": "SELECT {id:UInt64}, ':ignored' FROM t"
+    },
+    {
+      "why": "ClickHouse rejects actual :name parameters as unsupported dialect",
+      "dialect": "clickhouse",
+      "sql": "SELECT :x FROM t",
+      "names": ["x"],
+      "rewritten": null,
+      "unsupported": true
+    }
+  ]
+}

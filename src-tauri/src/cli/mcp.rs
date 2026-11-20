@@ -31,8 +31,9 @@ never ask for a password.
 
 How to work: call `connections` first and use a name or id from it. Read the structure before \
 writing SQL (`dictionary` for the whole database, `schema` for tables or one table, `ddl` for the \
-database's own definition). `query` runs one read-only statement, 200 rows by default \
-(`truncated: true` means there were more); prefer aggregating in SQL. `profile` summarizes column \
+database's own definition, `diff` to compare two open non-production connections). `query` runs one \
+read-only statement, 200 rows by default (`truncated: true` means there were more), and accepts \
+optional named `params` for `:name` placeholders; prefer aggregating in SQL. `profile` summarizes column \
 distributions (null ratio, distinct count, min/max/quantiles, top-5 values) for a read-only query \
 without pulling raw rows. `explain` shows the plan \
 without running the statement. MongoDB, Redis, Neo4j and Elasticsearch connections take the \
@@ -162,11 +163,15 @@ const TOOLS: &[Tool] = &[
   },
   Tool {
     name: "query",
-    description: "Run one read-only SQL statement (SELECT, WITH, SHOW, ...) in a read-only transaction that is rolled back. Write statements and several statements at once are refused. Returns columns and rows; at most `limit` rows (200 by default).",
+    description: "Run one read-only SQL statement (SELECT, WITH, SHOW, ...) in a read-only transaction that is rolled back. Write statements and several statements at once are refused. Optional `params` binds `:name` placeholders safely without logging parameter values. Returns columns and rows; at most `limit` rows (200 by default).",
   },
   Tool {
     name: "profile",
     description: "Profile the result of one read-only SQL statement via built-in sandboxed DuckDB: per-column inferredType, nullRatio, distinctCount, min/max/quantiles (p50/p95), and top-5 values without pulling raw rows (10000 rows by default, up to 100000).",
+  },
+  Tool {
+    name: "diff",
+    description: "Compare the schemas of two open non-production connections (source -> target: tables, columns, primary keys, indexes and foreign keys). Read-only report (json or markdown); never executes DDL.",
   },
   Tool {
     name: "explain",
@@ -249,10 +254,24 @@ fn input_schema(name: &str) -> Value {
       json!({
         "connection": connection,
         "sql": string("One read-only statement"),
+        "params": {
+          "type": "object",
+          "description": "Optional named values for :name bind placeholders (string, number, boolean, or null)",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] },
+        },
         "limit": limit("200"),
         "timeout_seconds": timeout,
       }),
       &["connection", "sql"],
+    ),
+    "diff" => object(
+      json!({
+        "source": string("Source connection name or id from `connections`"),
+        "target": string("Target connection name or id from `connections`"),
+        "format": { "type": "string", "enum": ["json", "markdown"], "description": "Output format (json by default)" },
+        "timeout_seconds": timeout,
+      }),
+      &["source", "target"],
     ),
     // 严禁暴露 `file` 参数：MCP 不碰本机文件系统（rfcs/cli-mcp-usability.md CM2）
     "profile" => object(
@@ -357,9 +376,18 @@ fn arguments_for(name: &str, arguments: &Map<String, Value>) -> Result<Vec<Strin
     "query" | "profile" | "explain" => {
       args.push(input.positional("connection")?);
       args.push(input.positional("sql")?);
+      if name == "query" {
+        input.params_object(&mut args, "params")?;
+      }
       if name == "query" || name == "profile" {
         input.flag(&mut args, "limit", "--limit")?;
       }
+      input.flag(&mut args, "timeout_seconds", "--timeout")?;
+    }
+    "diff" => {
+      args.push(input.positional("source")?);
+      args.push(input.positional("target")?);
+      input.flag(&mut args, "format", "--format")?;
       input.flag(&mut args, "timeout_seconds", "--timeout")?;
     }
     "schema" => {
@@ -513,6 +541,22 @@ impl Input<'_> {
           .ok_or_else(|| CliError::usage(format!("{key} takes strings")))
       })
       .collect()
+  }
+
+  /// `query` 工具的 `params` 参数对象，转换成 `--params-json`
+  fn params_object(&mut self, args: &mut Vec<String>, key: &'static str) -> Result<(), CliError> {
+    self.seen.push(key);
+    match self.map.get(key) {
+      None | Some(Value::Null) => Ok(()),
+      Some(value @ Value::Object(map)) => {
+        if !map.is_empty() {
+          args.push("--params-json".to_string());
+          args.push(value.to_string());
+        }
+        Ok(())
+      }
+      Some(_) => Err(CliError::usage(format!("{key} must be an object"))),
+    }
   }
 
   fn finish(self) -> Result<(), CliError> {
@@ -677,6 +721,7 @@ mod tests {
         "test",
         "query",
         "profile",
+        "diff",
         "explain",
         "schema",
         "ddl",
@@ -745,6 +790,39 @@ mod tests {
       call_tool(&dir, "profile", json!({ "connection": "local", "sql": "DELETE FROM items" }));
     assert!(is_error);
     assert_eq!(body["error"]["kind"], "refused");
+  }
+
+  /// CM3 MCP 门：`query` 支持 `params` 且不漏值，`diff` 支持双边校验与只读报告
+  #[test]
+  fn query_params_and_diff_tool_enforce_security_boundaries() {
+    let (dir, _) = sqlite_dir();
+    let (is_error, body) = call_tool(
+      &dir,
+      "query",
+      json!({
+        "connection": "local",
+        "sql": "SELECT id, name FROM items WHERE id = :id",
+        "params": { "id": 5 }
+      }),
+    );
+    assert!(!is_error, "{body}");
+    assert_eq!(body["rows"], json!([[5, "item 5"]]));
+
+    // 同库自比：identical = true
+    let (is_error, body) =
+      call_tool(&dir, "diff", json!({ "source": "local", "target": "local", "format": "json" }));
+    assert!(!is_error, "{body}");
+    assert_eq!(body["summary"]["identical"], json!(true));
+
+    // 双边任一侧为 PROD 一律 not_found
+    for args in [
+      json!({ "source": "local", "target": "prod" }),
+      json!({ "source": "prod", "target": "local" }),
+    ] {
+      let (is_error, body) = call_tool(&dir, "diff", args);
+      assert!(is_error);
+      assert_eq!(body["error"]["kind"], "not_found");
+    }
   }
 
   #[test]
