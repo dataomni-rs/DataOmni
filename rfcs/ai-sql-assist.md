@@ -1,6 +1,6 @@
 # 应用内克制型 AI 可用性增强（AI）
 
-> 立项日期：2026-11-20。当前状态：**设计稿（未开始实现）**。任务状态维护在根目录 `TODOs.md`「v1.3.0 夯实根基路线 · 第三阶段（AI）」。
+> 立项日期：2026-11-20。当前状态：**已实现（AI0–AI2，2026-11-20，跟代码走）**。任务状态维护在根目录 `TODOs.md`「v1.3.0 夯实根基路线 · 第三阶段（AI）」。
 > 本设计严格遵守 [rfcs/ai-design-and-export.md](./ai-design-and-export.md) 与 [rfcs/editions-and-branching.md](./editions-and-branching.md) 的既有红线：**整块留在 Cargo feature `ai` 后面、零数据行外发、发包原文全程可展开审阅、绝不自动执行任何 SQL**。
 
 ## 1. 要回答的问题

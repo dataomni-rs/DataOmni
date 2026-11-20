@@ -25,7 +25,7 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
-| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] 第一阶段 `DA0–DA3` 与第二阶段 `CM1–CM4`（`9610f20`、`10b7e39`、`7d1e38f`、`a1d8aaa`）已全部完成，接下来推进 `AI0–AI2` → `V1` 实机验收 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] 全部代码阶段 `DA0–DA3`、`CM1–CM4` 与 `AI0–AI2` 已完成并通过全量双特性门禁，待真界面视觉核验与 `V1` 跨平台实机验收后发版 |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -122,8 +122,8 @@
   - [x] 新增 `ai_cancel(requestId)` 中止正在进行的模型请求、设置页「测试连接」按钮、本地无 Key 端点（Ollama / `127.0.0.1` / `::1`，自动绕过系统代理）免拦截支持，以及多预设（`#ai` / `#ai:local`）与「`STAGING`/`PROD` 仅允许本地模型」环境路由守卫（无损兼容旧版 `dataomni.ai-settings`）。
 - [x] AI1 SQL 编辑器三把「手术刀」（`084cd6a`，`eslint` + `tsc` + 202 文件 2372 条全绿，含 `aiSqlAssist.test.ts` 与 `AiSqlAssistDialog.test.tsx`）
   - 落地纯函数 `src/utils/aiSqlAssist.ts`（类型层拒绝任何表数据行入参；E1–E3 预算与解析门：选表上限 15 张、`PROD` 默认 0 张、报错诊断只抽涉及表列、EXPLAIN 原文截断至 16 KB，容忍裸 JSON / 代码块 / `fixedSql: null`）与 `AiSqlAssistDialog`，在 SQL 编辑器工具栏（NL→SQL / 选中改写，自动融合 `CM4` 连接级语义备注）、`QueryErrorPanel`（报错一键诊断修复）与 `QueryPlanDialog`（EXPLAIN 瓶颈与候选索引解读）三处克制接入，全程支持展开查看 `[system]/[user]` 原文、中途取消、敏感环境守卫拦截，且绝不自动执行 SQL。
-- [ ] AI2 数据字典 AI 业务语义注释草拟（与 `CM4` 闭环）
-  - 按表分批草拟带 `[AI 推测]` 标识的业务说明，用户审阅修改后写入 `CM4` 的 `semantics/<id>.md`，反哺人读、编辑器 AI 与 CLI / MCP 外部 Agent。
+- [x] AI2 数据字典 AI 业务语义注释草拟（与 `CM4` 闭环）（`ce2c08c`，`eslint` + `tsc` + 204 文件 2376 条、Rust `cargo test --lib` 485 条与 `--no-default-features` 469 条、`clippy` 双构建全绿）
+  - 落地纯函数 `src/utils/aiSemanticsDraft.ts`（每批最多 20 张表、零数据行外发、固定输出 `<!-- AI-inferred: review before trusting -->` / `[AI 推测]` 与 `### <table>` 分节）与 `AiSemanticsDraftDialog`，接入 ER 图工具栏（未编入 `ai` feature 或未启用时隐藏）；用户审阅修改后写入 `CM4` 的 `semantics/<id>.md`，反哺人读数据字典、编辑器 AI 助手与 CLI / MCP 外部 Agent。
 
 ---
 
