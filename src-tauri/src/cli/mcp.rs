@@ -47,6 +47,8 @@ could not be reached.";
 
 /// 一直读到标准输入结束。返回进程退出码
 pub(super) fn serve(input: &mut dyn BufRead, out: &mut dyn Write, dirs: &Dirs) -> i32 {
+  // 常驻 MCP 会话复用同一份 Tokio 运行时与 SSH 隧道池，EOF 退出时由 guard 统一断开隧道
+  let _session = super::McpSessionGuard::enter().ok();
   let mut line = Vec::new();
   loop {
     line.clear();

@@ -4,9 +4,10 @@
 //! 绝不执行任何同步 DDL。
 
 use crate::models::DatabaseType;
+use crate::services::object_catalog::postgres_hidden_schemas;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -216,6 +217,247 @@ fn fk_signature(fk: &DiffForeignKey, same_dialect: bool, ignore_schema: bool) ->
   } else {
     format!("{}->{}:{}", cols.join(","), ref_table, ref_cols.join(","))
   }
+}
+
+/// 整库批量元数据查询（MySQL / PostgreSQL）：把 `3 × N` 次逐表往返压缩成 3 次常量往返，
+/// 解决大库经 SSH 隧道做 `dataomni diff` 时 30 秒超时的问题。
+pub(super) struct BulkDiffQueries {
+  pub columns: &'static str,
+  pub indexes: &'static str,
+  pub foreign_keys: &'static str,
+  /// 每段查询需要绑定的参数个数（MySQL 为 1 个库名，PostgreSQL 为 0）
+  pub parameter_count: u8,
+}
+
+const MYSQL_BULK_COLUMNS: &str = r#"
+SELECT
+  CAST(c.TABLE_SCHEMA AS CHAR) AS table_schema,
+  CAST(c.TABLE_NAME AS CHAR) AS table_name,
+  CAST(c.COLUMN_NAME AS CHAR) AS column_name,
+  CAST(c.COLUMN_TYPE AS CHAR) AS data_type,
+  (c.IS_NULLABLE = 'YES') AS is_nullable,
+  CAST(CASE
+    WHEN VERSION() NOT LIKE '%MariaDB%' THEN c.COLUMN_DEFAULT
+    WHEN c.COLUMN_DEFAULT = 'NULL' THEN NULL
+    WHEN c.COLUMN_DEFAULT LIKE '''%' THEN REPLACE(REPLACE(
+      SUBSTRING(c.COLUMN_DEFAULT, 2, CHAR_LENGTH(c.COLUMN_DEFAULT) - 2),
+      '''''', ''''),
+      CONCAT(CHAR(92 USING utf8mb4), CHAR(92 USING utf8mb4)), CHAR(92 USING utf8mb4))
+    ELSE c.COLUMN_DEFAULT
+  END AS CHAR) AS column_default,
+  (c.COLUMN_KEY = 'PRI') AS is_primary_key
+FROM INFORMATION_SCHEMA.COLUMNS c
+WHERE c.TABLE_SCHEMA = COALESCE(?, DATABASE())
+ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+"#;
+
+const MYSQL_BULK_INDEXES: &str = r#"
+SELECT
+  CAST(s.TABLE_SCHEMA AS CHAR) AS table_schema,
+  CAST(s.TABLE_NAME AS CHAR) AS table_name,
+  CAST(s.INDEX_NAME AS CHAR) AS index_name,
+  CAST(COALESCE(/*!80013 s.EXPRESSION, */ s.COLUMN_NAME) AS CHAR) AS column_name,
+  s.SEQ_IN_INDEX AS ordinal,
+  (s.NON_UNIQUE = 0) AS is_unique,
+  (s.INDEX_NAME = 'PRIMARY') AS is_primary
+FROM INFORMATION_SCHEMA.STATISTICS s
+WHERE s.TABLE_SCHEMA = COALESCE(?, DATABASE())
+ORDER BY s.TABLE_NAME, s.INDEX_NAME, s.SEQ_IN_INDEX
+"#;
+
+const MYSQL_BULK_FOREIGN_KEYS: &str = r#"
+SELECT
+  CAST(k.TABLE_SCHEMA AS CHAR) AS table_schema,
+  CAST(k.TABLE_NAME AS CHAR) AS table_name,
+  CAST(k.CONSTRAINT_NAME AS CHAR) AS constraint_name,
+  k.ORDINAL_POSITION AS ordinal,
+  CAST(k.COLUMN_NAME AS CHAR) AS column_name,
+  CAST(k.REFERENCED_TABLE_SCHEMA AS CHAR) AS referenced_schema,
+  CAST(k.REFERENCED_TABLE_NAME AS CHAR) AS referenced_table,
+  CAST(k.REFERENCED_COLUMN_NAME AS CHAR) AS referenced_column,
+  CAST(r.UPDATE_RULE AS CHAR) AS on_update,
+  CAST(r.DELETE_RULE AS CHAR) AS on_delete
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r
+  ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
+ AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+ AND r.TABLE_NAME = k.TABLE_NAME
+WHERE k.TABLE_SCHEMA = COALESCE(?, DATABASE())
+  AND k.REFERENCED_TABLE_NAME IS NOT NULL
+ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION
+"#;
+
+const POSTGRES_BULK_COLUMNS: &str = concat!(
+  r#"
+SELECT
+  n.nspname::text AS table_schema,
+  t.relname::text AS table_name,
+  a.attname::text AS column_name,
+  format_type(a.atttypid, a.atttypmod)::text AS data_type,
+  (NOT a.attnotnull) AS is_nullable,
+  pg_get_expr(d.adbin, d.adrelid)::text AS column_default,
+  (pk.ord IS NOT NULL) AS is_primary_key
+FROM pg_class t
+JOIN pg_namespace n ON n.oid = t.relnamespace
+JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped
+LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+LEFT JOIN (
+  SELECT x.conrelid, x.conkey[x.ord] AS attnum, x.ord
+  FROM (
+    SELECT c.conrelid, c.conkey, generate_subscripts(c.conkey, 1) AS ord
+    FROM pg_constraint c
+    WHERE c.contype = 'p'
+  ) x
+) pk ON pk.conrelid = t.oid AND pk.attnum = a.attnum
+WHERE t.relkind IN ('r', 'p')
+"#,
+  postgres_hidden_schemas!(),
+  "ORDER BY n.nspname, t.relname, a.attnum\n"
+);
+
+const POSTGRES_BULK_INDEXES: &str = concat!(
+  r#"
+SELECT
+  n.nspname::text AS table_schema,
+  t.relname::text AS table_name,
+  i.relname::text AS index_name,
+  pg_get_indexdef(ix.indexrelid, ix.ord, true)::text AS column_name,
+  ix.ord AS ordinal,
+  ix.indisunique AS is_unique,
+  ix.indisprimary AS is_primary
+FROM pg_class t
+JOIN pg_namespace n ON n.oid = t.relnamespace
+JOIN (
+  SELECT p.*, generate_series(1, p.indnkeyatts::int) AS ord
+  FROM pg_index p
+) ix ON ix.indrelid = t.oid
+JOIN pg_class i ON i.oid = ix.indexrelid
+WHERE t.relkind IN ('r', 'p')
+"#,
+  postgres_hidden_schemas!(),
+  "ORDER BY n.nspname, t.relname, i.relname, ix.ord\n"
+);
+
+const POSTGRES_BULK_FOREIGN_KEYS: &str = concat!(
+  r#"
+SELECT
+  n.nspname::text AS table_schema,
+  t.relname::text AS table_name,
+  c.conname::text AS constraint_name,
+  c.ord::int AS ordinal,
+  a.attname::text AS column_name,
+  fn.nspname::text AS referenced_schema,
+  ft.relname::text AS referenced_table,
+  fa.attname::text AS referenced_column,
+  CASE c.confupdtype
+    WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+    WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_update,
+  CASE c.confdeltype
+    WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+    WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_delete
+FROM (
+  SELECT c.*, generate_subscripts(c.conkey, 1) AS ord
+  FROM pg_constraint c
+  WHERE c.contype = 'f'
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_constraint p
+      WHERE p.oid = (row_to_json(c)->>'conparentid')::oid AND p.conrelid = c.conrelid
+    )
+) c
+JOIN pg_class t ON t.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+JOIN pg_class ft ON ft.oid = c.confrelid
+JOIN pg_namespace fn ON fn.oid = ft.relnamespace
+JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = c.conkey[c.ord]
+JOIN pg_attribute fa ON fa.attrelid = ft.oid AND fa.attnum = c.confkey[c.ord]
+WHERE t.relkind IN ('r', 'p')
+"#,
+  postgres_hidden_schemas!(),
+  "ORDER BY n.nspname, t.relname, c.conname, c.ord\n"
+);
+
+pub(super) fn bulk_diff_queries(db_type: &DatabaseType) -> Option<BulkDiffQueries> {
+  match db_type {
+    DatabaseType::MySQL => Some(BulkDiffQueries {
+      columns: MYSQL_BULK_COLUMNS,
+      indexes: MYSQL_BULK_INDEXES,
+      foreign_keys: MYSQL_BULK_FOREIGN_KEYS,
+      parameter_count: 1,
+    }),
+    DatabaseType::PostgreSQL => Some(BulkDiffQueries {
+      columns: POSTGRES_BULK_COLUMNS,
+      indexes: POSTGRES_BULK_INDEXES,
+      foreign_keys: POSTGRES_BULK_FOREIGN_KEYS,
+      parameter_count: 0,
+    }),
+    _ => None,
+  }
+}
+
+/// 从 `schema_metadata::columns`（或批量列查询）原始目录行解析出列定义与主键列列表。
+pub(super) fn columns_and_pk_from_rows(
+  rows: &[Value],
+  truthy: fn(&Value) -> bool,
+) -> (Vec<DiffColumn>, Vec<String>) {
+  let mut columns = Vec::with_capacity(rows.len());
+  let mut primary_key = Vec::new();
+  for col in rows {
+    let col_name = col["column_name"].as_str().unwrap_or_default().to_string();
+    let data_type = col["data_type"].as_str().unwrap_or_default().to_string();
+    let nullable = truthy(&col["is_nullable"]);
+    let is_pk = truthy(&col["is_primary_key"]);
+    let default = match &col["column_default"] {
+      Value::Null => None,
+      Value::String(text) => Some(text.clone()),
+      other => Some(other.to_string()),
+    };
+    if is_pk {
+      primary_key.push(col_name.clone());
+    }
+    columns.push(DiffColumn { name: col_name, data_type, nullable, primary_key: is_pk, default });
+  }
+  (columns, primary_key)
+}
+
+fn group_by_table(rows: Vec<Value>) -> HashMap<(Option<String>, String), Vec<Value>> {
+  let mut grouped: HashMap<(Option<String>, String), Vec<Value>> = HashMap::new();
+  for row in rows {
+    let name = row["table_name"].as_str().unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+      continue;
+    }
+    let schema =
+      row["table_schema"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    grouped.entry((schema, name)).or_default().push(row);
+  }
+  grouped
+}
+
+/// 将整库批量查询结果按 `table_list`（已过滤掉视图的表清单）拼装为 `DiffTable` 列表。
+pub(super) fn build_bulk_tables(
+  table_list: Vec<(Option<String>, String)>,
+  col_rows: Vec<Value>,
+  idx_rows: Vec<Value>,
+  fk_rows: Vec<Value>,
+  truthy: fn(&Value) -> bool,
+) -> Vec<DiffTable> {
+  let mut cols_by_table = group_by_table(col_rows);
+  let mut idxs_by_table = group_by_table(idx_rows);
+  let mut fks_by_table = group_by_table(fk_rows);
+
+  table_list
+    .into_iter()
+    .map(|(schema, name)| {
+      let key = (schema.clone(), name.clone());
+      let c_rows = cols_by_table.remove(&key).unwrap_or_default();
+      let i_rows = idxs_by_table.remove(&key).unwrap_or_default();
+      let f_rows = fks_by_table.remove(&key).unwrap_or_default();
+      let (columns, primary_key) = columns_and_pk_from_rows(&c_rows, truthy);
+      let indexes = indexes_from_rows(&i_rows, truthy);
+      let foreign_keys = foreign_keys_from_rows(&f_rows);
+      DiffTable { schema, name, columns, primary_key, indexes, foreign_keys }
+    })
+    .collect()
 }
 
 /// 从 `schema_metadata::indexes` 原始目录行归并出逻辑索引（过滤主键索引）。
@@ -608,5 +850,45 @@ mod tests {
     assert!(md.contains("audit_logs"));
     assert!(md.contains("deprecated_tmp"));
     assert!(md.contains("+ Column `status`"));
+  }
+
+  #[test]
+  fn build_bulk_tables_groups_columns_indexes_and_fks_while_excluding_views() {
+    use serde_json::json;
+
+    let truthy = |v: &Value| matches!(v, Value::Bool(true)) || v.as_i64() == Some(1);
+    let table_list =
+      vec![(Some("app".into()), "users".into()), (Some("app".into()), "orders".into())];
+    let col_rows = vec![
+      json!({ "table_schema": "app", "table_name": "users", "column_name": "id", "data_type": "bigint", "is_nullable": 0, "column_default": null, "is_primary_key": 1 }),
+      json!({ "table_schema": "app", "table_name": "users", "column_name": "email", "data_type": "varchar(128)", "is_nullable": 0, "column_default": null, "is_primary_key": 0 }),
+      json!({ "table_schema": "app", "table_name": "orders", "column_name": "id", "data_type": "bigint", "is_nullable": 0, "column_default": null, "is_primary_key": 1 }),
+      json!({ "table_schema": "app", "table_name": "orders", "column_name": "user_id", "data_type": "bigint", "is_nullable": 0, "column_default": null, "is_primary_key": 0 }),
+      // 视图不在 table_list 里，应被忽略
+      json!({ "table_schema": "app", "table_name": "active_users_view", "column_name": "id", "data_type": "bigint", "is_nullable": 0, "column_default": null, "is_primary_key": 0 }),
+    ];
+    let idx_rows = vec![
+      json!({ "table_schema": "app", "table_name": "users", "index_name": "PRIMARY", "column_name": "id", "ordinal": 1, "is_unique": 1, "is_primary": 1 }),
+      json!({ "table_schema": "app", "table_name": "users", "index_name": "idx_email", "column_name": "email", "ordinal": 1, "is_unique": 1, "is_primary": 0 }),
+    ];
+    let fk_rows = vec![json!({
+      "table_schema": "app", "table_name": "orders", "constraint_name": "fk_orders_user",
+      "ordinal": 1, "column_name": "user_id", "referenced_schema": "app",
+      "referenced_table": "users", "referenced_column": "id",
+      "on_update": "NO ACTION", "on_delete": "CASCADE"
+    })];
+
+    let tables = build_bulk_tables(table_list, col_rows, idx_rows, fk_rows, truthy);
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0].name, "users");
+    assert_eq!(tables[0].primary_key, vec!["id"]);
+    assert_eq!(tables[0].indexes.len(), 1);
+    assert_eq!(tables[0].indexes[0].name, "idx_email");
+    assert_eq!(tables[1].name, "orders");
+    assert_eq!(tables[1].foreign_keys.len(), 1);
+    assert_eq!(tables[1].foreign_keys[0].referenced_table, "app.users");
+    assert!(bulk_diff_queries(&DatabaseType::MySQL).is_some());
+    assert!(bulk_diff_queries(&DatabaseType::PostgreSQL).is_some());
+    assert!(bulk_diff_queries(&DatabaseType::SQLite).is_none());
   }
 }

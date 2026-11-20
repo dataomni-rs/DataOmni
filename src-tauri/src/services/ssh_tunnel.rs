@@ -189,6 +189,7 @@ fn verify_host_key(
 /// 这样「拆除隧道」就是「把这个结构丢掉」，不需要额外记着调什么。
 pub struct ActiveTunnel {
   pub local_port: u16,
+  fingerprint: String,
   session: Arc<Handle<HostKeyCheck>>,
   _shutdown: tokio::sync::oneshot::Sender<()>,
 }
@@ -198,6 +199,36 @@ impl ActiveTunnel {
   pub fn is_alive(&self) -> bool {
     !self.session.is_closed()
   }
+
+  /// 主动向跳板机发 SSH Disconnect，避免高频短连接把远端 sshd 留在半开状态
+  pub async fn disconnect(&self) {
+    if !self.session.is_closed() {
+      let _ = tokio::time::timeout(
+        Duration::from_millis(500),
+        self.session.disconnect(russh::Disconnect::ByApplication, "", "en"),
+      )
+      .await;
+    }
+  }
+}
+
+/// 决定复用隧道是否仍匹配当前配置的指纹（不含任何口令/私钥内容）
+fn tunnel_fingerprint(config: &ConnectionProfile, tunnel: &SshTunnelConfig) -> String {
+  let (target_host, target_port) = tunnel.target(config);
+  let auth = match tunnel.auth {
+    SshAuthMethod::PrivateKey => "key",
+    SshAuthMethod::Password => "pwd",
+  };
+  format!(
+    "{}:{}@{}|{}|{}|{}:{}",
+    tunnel.host,
+    tunnel.port,
+    tunnel.username,
+    auth,
+    tunnel.private_key_path,
+    target_host,
+    target_port
+  )
 }
 
 /// 把开头的 `~` 换成当前用户的主目录。
@@ -321,11 +352,12 @@ pub async fn open(
     .port();
 
   let (target_host, target_port) = tunnel.target(config);
+  let fingerprint = tunnel_fingerprint(config, tunnel);
   let session = Arc::new(session);
   let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
   tokio::spawn(forward(listener, Arc::clone(&session), target_host, target_port, shutdown_signal));
 
-  Ok(ActiveTunnel { local_port, session, _shutdown: shutdown })
+  Ok(ActiveTunnel { local_port, fingerprint, session, _shutdown: shutdown })
 }
 
 /// 接一条本地连接就开一条 SSH 通道，然后双向拷贝。
@@ -382,24 +414,32 @@ impl TunnelRegistry {
     tunnel: &SshTunnelConfig,
     known_hosts: &Path,
   ) -> Result<u16, TunnelError> {
+    let expected_fingerprint = tunnel_fingerprint(config, tunnel);
     let mut entries = self.entries.lock().await;
 
     // 草稿还没有 id（连接表单里「测试连接」是在保存之前点的），这时不能复用：
     // 所有草稿共用空字符串这一个键，第二个草稿会连上第一个草稿的跳板机，
     // 而界面上显示的是它自己填的那一台。宁可每次重建
-    if config.id.is_empty() {
-      entries.remove(&config.id);
+    let stale = if config.id.is_empty() {
+      entries.remove(&config.id)
     } else if let Some(existing) = entries.get(&config.id) {
-      // 会话死了的条目要先摘掉。留着它等于把用户接到一个已经空掉的端口上，
-      // 而报出来的会是数据库驱动的「连不上」
-      if existing.is_alive() {
+      // 会话死了或配置参数变了的条目要先摘掉。留着它等于把用户接到一个已经空掉
+      // 或指向旧主机的本地端口上
+      if existing.is_alive() && existing.fingerprint == expected_fingerprint {
         return Ok(existing.local_port);
       }
-      entries.remove(&config.id);
+      entries.remove(&config.id)
+    } else {
+      None
+    };
+    drop(entries);
+    if let Some(old) = stale {
+      old.disconnect().await;
     }
 
     let opened = open(config, tunnel, known_hosts).await?;
     let local_port = opened.local_port;
+    let mut entries = self.entries.lock().await;
     entries.insert(config.id.clone(), opened);
     Ok(local_port)
   }
@@ -416,11 +456,17 @@ impl TunnelRegistry {
 
   /// 拆掉这个 profile 的隧道。没有也算成功——断开一条不存在的连接不是错误
   pub async fn close(&self, profile_id: &str) {
-    self.entries.lock().await.remove(profile_id);
+    let removed = self.entries.lock().await.remove(profile_id);
+    if let Some(tunnel) = removed {
+      tunnel.disconnect().await;
+    }
   }
 
   pub async fn close_all(&self) {
-    self.entries.lock().await.clear();
+    let removed: Vec<ActiveTunnel> = self.entries.lock().await.drain().map(|(_, t)| t).collect();
+    for tunnel in removed {
+      tunnel.disconnect().await;
+    }
   }
 }
 
@@ -678,5 +724,45 @@ mod tests {
     }
 
     let _ = std::fs::remove_file(&known_hosts);
+  }
+
+  #[test]
+  fn tunnel_fingerprint_tracks_jump_host_and_target_changes_without_secret() {
+    let mut profile = serde_json::from_value::<ConnectionProfile>(serde_json::json!({
+      "id": "p1",
+      "name": "claw",
+      "db_type": "mysql",
+      "host": "127.0.0.1",
+      "port": 33306,
+      "database": "app",
+      "username": "dev",
+      "password": "",
+      "ssl": false,
+      "options": {},
+      "tags": []
+    }))
+    .expect("profile");
+    let mut tunnel = SshTunnelConfig {
+      host: "jump-a.internal".to_string(),
+      port: 22,
+      username: "ops".to_string(),
+      auth: SshAuthMethod::Password,
+      private_key_path: String::new(),
+      secret: "top-secret-password".to_string(),
+      secret_ref: None,
+      remote_host: None,
+      remote_port: None,
+    };
+
+    let fp_a = tunnel_fingerprint(&profile, &tunnel);
+    assert!(!fp_a.contains("top-secret-password"));
+
+    tunnel.host = "jump-b.internal".to_string();
+    let fp_b = tunnel_fingerprint(&profile, &tunnel);
+    assert_ne!(fp_a, fp_b);
+
+    profile.port = 33307;
+    let fp_c = tunnel_fingerprint(&profile, &tunnel);
+    assert_ne!(fp_b, fp_c);
   }
 }

@@ -22,8 +22,9 @@ use crate::models::{ConnectionProfile, DatabaseType};
 use crate::services::connection_service::{app_config_dir, ConnectionService, APP_IDENTIFIER};
 use crate::services::query_executor::QueryExecutionResult;
 use crate::services::read_only_gate;
+use crate::services::ssh_tunnel::TunnelRegistry;
 use serde_json::{json, Value};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -275,9 +276,10 @@ pub fn run(args: &[String]) -> i32 {
     crate::services::oracle::pin_client_dir(dir);
   }
   let stdout = std::io::stdout();
+  let stdout_is_tty = stdout.is_terminal();
   let stderr = std::io::stderr();
   let dirs = Dirs { config: app_config_dir(), log: app_log_dir() };
-  run_with(args, &dirs, &mut stdout.lock(), &mut stderr.lock())
+  run_with_tty(args, &dirs, &mut stdout.lock(), &mut stderr.lock(), stdout_is_tty)
 }
 
 /// `dataomni mcp`：stdio 上的 MCP 服务（`rfcs/mcp-server.md`）。工具调用拼成参数后走同一个
@@ -312,12 +314,31 @@ fn handle_mcp_args(args: &[String], out: &mut dyn Write, err: &mut dyn Write) ->
   Some(Exit::Usage as i32)
 }
 
+const EMPTY_CONNECTIONS_TTY_HINT: &str = "\
+Hint: no connections are open to the CLI. In DataOmni, edit a non-production \
+connection and set \"Command line & agent access\" to \"Read-only\" \
+(production connections are never visible).";
+
+#[cfg(test)]
 fn run_with(args: &[String], dirs: &Dirs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+  run_with_tty(args, dirs, out, err, false)
+}
+
+fn run_with_tty(
+  args: &[String],
+  dirs: &Dirs,
+  out: &mut dyn Write,
+  err: &mut dyn Write,
+  stdout_is_tty: bool,
+) -> i32 {
   let result = dispatch(args, dirs);
   // 写不进 stdout / stderr（管道被关了）时也没有别处可说，退出码照样给
   match result {
     Ok(Output::Json(value)) => {
       let _ = writeln!(out, "{value}");
+      if stdout_is_tty && is_empty_connections_response(args, &value) {
+        let _ = writeln!(err, "{EMPTY_CONNECTIONS_TTY_HINT}");
+      }
       Exit::Ok as i32
     }
     Ok(Output::Text(text)) => {
@@ -329,6 +350,13 @@ fn run_with(args: &[String], dirs: &Dirs, out: &mut dyn Write, err: &mut dyn Wri
       error.exit as i32
     }
   }
+}
+
+/// 静态判定：仅当执行 `connections` 且开放列表与不可用列表均为空时返回 true，不泄露隐藏或生产连接是否存在
+fn is_empty_connections_response(args: &[String], value: &Value) -> bool {
+  args.first().is_some_and(|cmd| cmd == "connections")
+    && value.get("connections").and_then(Value::as_array).is_some_and(Vec::is_empty)
+    && value.get("unavailable").and_then(Value::as_array).is_some_and(Vec::is_empty)
 }
 
 /// 错误在 stderr 上的那份 JSON。MCP 的工具错误里放的也是它，Agent 照样按 `kind` 分
@@ -1259,19 +1287,62 @@ fn csv_preview(rest: &[String]) -> Result<Value, CliError> {
   Ok(output)
 }
 
-/// 在一个新的运行时里跑完 `work`，到点没完就报超时。`what` 是报错里的主语
+struct McpRuntime {
+  runtime: tokio::runtime::Runtime,
+  tunnels: Arc<TunnelRegistry>,
+}
+
+thread_local! {
+  static ACTIVE_MCP: std::cell::RefCell<Option<Arc<McpRuntime>>> =
+    const { std::cell::RefCell::new(None) };
+}
+
+/// `mcp::serve` 期间持有的常驻 Tokio 运行时与 SSH 隧道复用池。
+/// 离开作用域时优雅断开全部活跃隧道再释放运行时。
+pub(super) struct McpSessionGuard {
+  runtime: Arc<McpRuntime>,
+}
+
+impl McpSessionGuard {
+  pub(super) fn enter() -> Result<Self, CliError> {
+    let runtime =
+      Arc::new(McpRuntime { runtime: runtime()?, tunnels: Arc::new(TunnelRegistry::default()) });
+    ACTIVE_MCP.with(|slot| {
+      *slot.borrow_mut() = Some(Arc::clone(&runtime));
+    });
+    Ok(Self { runtime })
+  }
+}
+
+impl Drop for McpSessionGuard {
+  fn drop(&mut self) {
+    ACTIVE_MCP.with(|slot| {
+      *slot.borrow_mut() = None;
+    });
+    self.runtime.runtime.block_on(self.runtime.tunnels.close_all());
+  }
+}
+
+pub(super) fn shared_mcp_tunnels() -> Option<Arc<TunnelRegistry>> {
+  ACTIVE_MCP.with(|slot| slot.borrow().as_ref().map(|mcp| Arc::clone(&mcp.tunnels)))
+}
+
+/// 在常驻 MCP 运行时或新运行时里跑完 `work`，到点没完就报超时。`what` 是报错里的主语
 fn block_on_within<T>(
   timeout: Duration,
   what: &str,
   work: impl std::future::Future<Output = Result<T, CliError>>,
 ) -> Result<T, CliError> {
-  runtime()?.block_on(async { tokio::time::timeout(timeout, work).await }).map_err(|_| {
-    CliError {
-      exit: Exit::Database,
-      kind: "timeout",
-      message: format!("{what} did not finish within {} s", timeout.as_secs()),
-      diagnosis: None,
-    }
+  let shared = ACTIVE_MCP.with(|slot| slot.borrow().clone());
+  let timed = match shared {
+    Some(mcp) => mcp.runtime.block_on(async { tokio::time::timeout(timeout, work).await }),
+    None => runtime()?.block_on(async { tokio::time::timeout(timeout, work).await }),
+  };
+  timed.map_err(|_| CliError {
+    exit: Exit::Database,
+    kind: "timeout",
+    message: format!("{what} did not finish within {} s", timeout.as_secs()),
+    diagnosis: None,
   })?
 }
 
@@ -1350,10 +1421,12 @@ fn run_backup(
     DatabaseType::PostgreSQL | DatabaseType::MySQL | DatabaseType::MongoDB => {
       let resolved = resolve_verified(service, profile)?;
       runtime()?.block_on(async {
-        let (_tunnels, port) = session::tunnel(&resolved)
+        let (tunnels, port) = session::tunnel(&resolved)
           .await
           .map_err(|error| CliError::unavailable("connect", error))?;
-        backup_with_tool(&resolved, port, out, database).await.map_err(backup_error)
+        let outcome = backup_with_tool(&resolved, port, out, database).await.map_err(backup_error);
+        tunnels.close().await;
+        outcome
       })
     }
     DatabaseType::SQLite | DatabaseType::DuckDB => {
@@ -1641,9 +1714,10 @@ async fn load_diff_snapshot(
 
   let opened = session::open(profile, config_dir).await.map_err(session_error)?;
   let outcome = async {
-    let params = vec![Value::String(database); usize::from(obj_queries.object_parameter_count)];
+    let params =
+      vec![Value::String(database.clone()); usize::from(obj_queries.object_parameter_count)];
     let rows = opened.select(obj_queries.objects, params).await.map_err(session_error)?;
-    let mut tables = Vec::new();
+    let mut table_list = Vec::new();
     for row in rows {
       let kind = row["object_kind"].as_str().unwrap_or_default().to_ascii_lowercase();
       if !kind.contains("table") {
@@ -1655,6 +1729,23 @@ async fn load_diff_snapshot(
       }
       let schema =
         row["object_schema"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+      table_list.push((schema, name));
+    }
+
+    // MySQL / PostgreSQL 走整库 3 条批量查询（常量往返），避免大库经 SSH 隧道做逐表 N+1 超时
+    if let Some(bulk) = diff::bulk_diff_queries(&profile.db_type) {
+      let bulk_params =
+        if bulk.parameter_count == 0 { Vec::new() } else { vec![Value::String(database)] };
+      let col_rows =
+        opened.select(bulk.columns, bulk_params.clone()).await.map_err(session_error)?;
+      let idx_rows =
+        opened.select(bulk.indexes, bulk_params.clone()).await.map_err(session_error)?;
+      let fk_rows = opened.select(bulk.foreign_keys, bulk_params).await.map_err(session_error)?;
+      return Ok(diff::build_bulk_tables(table_list, col_rows, idx_rows, fk_rows, truthy));
+    }
+
+    let mut tables = Vec::with_capacity(table_list.len());
+    for (schema, name) in table_list {
       let meta_params = if meta_queries.parameter_count == 1 {
         vec![Value::from(name.as_str())]
       } else {
@@ -1667,29 +1758,7 @@ async fn load_diff_snapshot(
       let fk_rows =
         opened.select(meta_queries.foreign_keys, meta_params).await.map_err(session_error)?;
 
-      let mut columns = Vec::with_capacity(col_rows.len());
-      let mut primary_key = Vec::new();
-      for col in col_rows {
-        let col_name = col["column_name"].as_str().unwrap_or_default().to_string();
-        let data_type = col["data_type"].as_str().unwrap_or_default().to_string();
-        let nullable = truthy(&col["is_nullable"]);
-        let is_pk = truthy(&col["is_primary_key"]);
-        let default = match &col["column_default"] {
-          Value::Null => None,
-          Value::String(text) => Some(text.clone()),
-          other => Some(other.to_string()),
-        };
-        if is_pk {
-          primary_key.push(col_name.clone());
-        }
-        columns.push(diff::DiffColumn {
-          name: col_name,
-          data_type,
-          nullable,
-          primary_key: is_pk,
-          default,
-        });
-      }
+      let (columns, primary_key) = diff::columns_and_pk_from_rows(&col_rows, truthy);
       let indexes = diff::indexes_from_rows(&idx_rows, truthy);
       let foreign_keys = diff::foreign_keys_from_rows(&fk_rows);
       tables.push(diff::DiffTable { schema, name, columns, primary_key, indexes, foreign_keys });
@@ -3186,5 +3255,54 @@ mod tests {
       json_of(&enriched_schema)["semantics"],
       json!("- `name` is the customer-facing SKU label.")
     );
+  }
+
+  #[test]
+  fn connections_prints_static_hint_on_stderr_only_for_empty_tty_output() {
+    let dir = ConfigDir::with(&[
+      profile("hidden-1", "dev-closed", "development", "off"),
+      profile("prod-1", "prod-secret-db", "production", "read"),
+    ]);
+    let dirs = Dirs { config: Some(dir.0.clone()), log: None };
+    let args = vec!["connections".to_string()];
+
+    // 交互终端 + 空列表：stdout 保持纯 JSON，stderr 打印静态引导提示
+    let (mut out_tty, mut err_tty) = (Vec::new(), Vec::new());
+    let code = run_with_tty(&args, &dirs, &mut out_tty, &mut err_tty, true);
+    assert_eq!(code, 0);
+    assert_eq!(json_of(&String::from_utf8_lossy(&out_tty))["connections"], json!([]));
+    let stderr_tty = String::from_utf8_lossy(&err_tty);
+    assert!(stderr_tty.contains("Read-only"), "{stderr_tty}");
+    assert!(!stderr_tty.contains("dev-closed") && !stderr_tty.contains("prod-secret-db"));
+
+    // 管道（非 TTY）+ 空列表：stderr 保持静默，不干扰脚本/Agent
+    let (mut out_pipe, mut err_pipe) = (Vec::new(), Vec::new());
+    let code = run_with_tty(&args, &dirs, &mut out_pipe, &mut err_pipe, false);
+    assert_eq!(code, 0);
+    assert!(err_pipe.is_empty());
+
+    // 交互终端 + 有开放连接：不打印空列表提示
+    let open_dir = ConfigDir::with(&[profile("open-1", "dev-open", "development", "read")]);
+    let open_dirs = Dirs { config: Some(open_dir.0.clone()), log: None };
+    let (mut out_open, mut err_open) = (Vec::new(), Vec::new());
+    let code = run_with_tty(&args, &open_dirs, &mut out_open, &mut err_open, true);
+    assert_eq!(code, 0);
+    assert_eq!(
+      json_of(&String::from_utf8_lossy(&out_open))["connections"][0]["name"],
+      json!("dev-open")
+    );
+    assert!(err_open.is_empty());
+  }
+
+  #[test]
+  fn mcp_session_guard_exposes_shared_tunnels_and_clears_on_drop() {
+    assert!(shared_mcp_tunnels().is_none());
+    {
+      let _guard = McpSessionGuard::enter().expect("mcp guard");
+      let first = shared_mcp_tunnels().expect("shared tunnels active");
+      let second = shared_mcp_tunnels().expect("same shared tunnels");
+      assert!(Arc::ptr_eq(&first, &second));
+    }
+    assert!(shared_mcp_tunnels().is_none());
   }
 }

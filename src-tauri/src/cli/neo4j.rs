@@ -94,14 +94,15 @@ pub(super) async fn run(
     Ok::<_, String>((tunnels, Arc::new(pool)))
   };
   let deadline = session::CONNECT_DEADLINE;
-  let (_tunnels, pool) = tokio::time::timeout(deadline, connect)
+  let (tunnels, pool) = tokio::time::timeout(deadline, connect)
     .await
     .map_err(|_| {
       CliError::unavailable("connect", format!("could not connect within {} s", deadline.as_secs()))
     })?
     .map_err(|error| CliError::unavailable("connect", error))?;
   let timeout = arguments.timeout;
-  match &arguments.request {
+  let outcome: Result<Value, CliError> = async {
+    match &arguments.request {
     Request::Labels => {
       let objects = neo4j::list_objects(pool, timeout).await.map_err(database_error)?;
       let objects: Vec<Value> = objects
@@ -133,7 +134,11 @@ pub(super) async fn run(
       let result = neo4j::run(pool, request).await.map_err(database_error)?;
       Ok(json!({ "result": result }))
     }
+    }
   }
+  .await;
+  tunnels.close().await;
+  outcome
 }
 
 fn database_error(message: String) -> CliError {
