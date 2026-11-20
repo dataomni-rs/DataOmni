@@ -12,6 +12,7 @@ mod audit;
 mod dictionary;
 mod diff;
 mod elasticsearch;
+mod format;
 mod mcp;
 mod mongo;
 mod neo4j;
@@ -177,6 +178,9 @@ Commands:
   help               Print this help
 
 Output is JSON on stdout (dictionary prints Markdown); errors are JSON on stderr.
+When writing to an interactive terminal, JSON is pretty-printed and syntax-highlighted
+automatically (compact plain JSON when piped). Global display flags: --pretty,
+--compact (-c), --color auto|always|never, --no-color (also respects NO_COLOR).
 Exit codes: 0 ok, 1 database error, 2 usage error, 3 refused by the access rules,
 4 unavailable (cannot connect, missing credentials, keychain waiting for approval).
 
@@ -278,8 +282,18 @@ pub fn run(args: &[String]) -> i32 {
   let stdout = std::io::stdout();
   let stdout_is_tty = stdout.is_terminal();
   let stderr = std::io::stderr();
+  let stderr_is_tty = stderr.is_terminal();
+  let env = format::TermEnv::from_process();
   let dirs = Dirs { config: app_config_dir(), log: app_log_dir() };
-  run_with_tty(args, &dirs, &mut stdout.lock(), &mut stderr.lock(), stdout_is_tty)
+  run_with_io(
+    args,
+    &dirs,
+    &mut stdout.lock(),
+    &mut stderr.lock(),
+    stdout_is_tty,
+    stderr_is_tty,
+    &env,
+  )
 }
 
 /// `dataomni mcp`：stdio 上的 MCP 服务（`rfcs/mcp-server.md`）。工具调用拼成参数后走同一个
@@ -321,9 +335,10 @@ connection and set \"Command line & agent access\" to \"Read-only\" \
 
 #[cfg(test)]
 fn run_with(args: &[String], dirs: &Dirs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-  run_with_tty(args, dirs, out, err, false)
+  run_with_io(args, dirs, out, err, false, false, &format::TermEnv::default())
 }
 
+#[cfg(test)]
 fn run_with_tty(
   args: &[String],
   dirs: &Dirs,
@@ -331,14 +346,40 @@ fn run_with_tty(
   err: &mut dyn Write,
   stdout_is_tty: bool,
 ) -> i32 {
-  let result = dispatch(args, dirs);
+  run_with_io(args, dirs, out, err, stdout_is_tty, stdout_is_tty, &format::TermEnv::default())
+}
+
+fn run_with_io(
+  args: &[String],
+  dirs: &Dirs,
+  out: &mut dyn Write,
+  err: &mut dyn Write,
+  stdout_is_tty: bool,
+  stderr_is_tty: bool,
+  env: &format::TermEnv,
+) -> i32 {
+  let (options, clean_args) = match format::extract_output_options(args) {
+    Ok(parsed) => parsed,
+    Err(error) => {
+      let err_style = format::OutputOptions::default().resolve(stderr_is_tty, env);
+      let _ = format::write_json_line(err, &error_body(&error), err_style);
+      return error.exit as i32;
+    }
+  };
+  let out_style = options.resolve(stdout_is_tty, env);
+  let err_style = options.resolve(stderr_is_tty, env);
+  let result = dispatch(&clean_args, dirs);
   // 写不进 stdout / stderr（管道被关了）时也没有别处可说，退出码照样给
   match result {
     Ok(Output::Json(value)) => {
-      let _ = writeln!(out, "{value}");
-      if stdout_is_tty && is_empty_connections_response(args, &value) {
-        let _ = writeln!(err, "{EMPTY_CONNECTIONS_TTY_HINT}");
+      let _ = format::write_json_line(out, &value, out_style);
+      if stdout_is_tty && is_empty_connections_response(&clean_args, &value) {
+        let _ = format::write_hint_line(err, EMPTY_CONNECTIONS_TTY_HINT, err_style.color);
       }
+      Exit::Ok as i32
+    }
+    Ok(Output::Markdown(text)) => {
+      let _ = format::write_markdown(out, &text, out_style.color);
       Exit::Ok as i32
     }
     Ok(Output::Text(text)) => {
@@ -346,7 +387,7 @@ fn run_with_tty(
       Exit::Ok as i32
     }
     Err(error) => {
-      let _ = writeln!(err, "{}", error_body(&error));
+      let _ = format::write_json_line(err, &error_body(&error), err_style);
       error.exit as i32
     }
   }
@@ -373,6 +414,7 @@ fn error_body(error: &CliError) -> Value {
 
 enum Output {
   Json(Value),
+  Markdown(String),
   Text(String),
 }
 
@@ -431,7 +473,7 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
     "schema" => schema(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "explain" => explain(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "test" => test(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
-    "dictionary" => dictionary(rest, config_dir, dirs.log.as_deref()).map(Output::Text),
+    "dictionary" => dictionary(rest, config_dir, dirs.log.as_deref()).map(Output::Markdown),
     "mongo" => mongo(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "redis" => redis(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
     "neo4j" => neo4j(rest, config_dir, dirs.log.as_deref()).map(Output::Json),
@@ -1651,9 +1693,11 @@ fn diff_command(
   audit::record(log_dir, "diff", &label, "", &outcome, started.elapsed());
   let report = outcome?;
   match arguments.format {
-    DiffFormat::Markdown => {
-      Ok(Output::Text(diff::render_markdown(&source_profile.name, &target_profile.name, &report)))
-    }
+    DiffFormat::Markdown => Ok(Output::Markdown(diff::render_markdown(
+      &source_profile.name,
+      &target_profile.name,
+      &report,
+    ))),
     DiffFormat::Json => Ok(Output::Json(json!({
       "schema": OUTPUT_SCHEMA,
       "source": source_profile.name,
@@ -3266,19 +3310,25 @@ mod tests {
     let dirs = Dirs { config: Some(dir.0.clone()), log: None };
     let args = vec!["connections".to_string()];
 
-    // 交互终端 + 空列表：stdout 保持纯 JSON，stderr 打印静态引导提示
+    // 交互终端 + 空列表：stdout 默认美化并高亮 JSON（去 ANSI 后可解析），stderr 打印静态引导提示
     let (mut out_tty, mut err_tty) = (Vec::new(), Vec::new());
     let code = run_with_tty(&args, &dirs, &mut out_tty, &mut err_tty, true);
     assert_eq!(code, 0);
-    assert_eq!(json_of(&String::from_utf8_lossy(&out_tty))["connections"], json!([]));
-    let stderr_tty = String::from_utf8_lossy(&err_tty);
+    let stdout_tty = String::from_utf8_lossy(&out_tty);
+    assert!(stdout_tty.contains("\x1b["), "expected ANSI highlight on TTY: {stdout_tty}");
+    assert!(stdout_tty.lines().count() > 1, "expected pretty JSON on TTY: {stdout_tty}");
+    assert_eq!(json_of(&format::strip_ansi(&stdout_tty))["connections"], json!([]));
+    let stderr_tty = format::strip_ansi(&String::from_utf8_lossy(&err_tty));
     assert!(stderr_tty.contains("Read-only"), "{stderr_tty}");
     assert!(!stderr_tty.contains("dev-closed") && !stderr_tty.contains("prod-secret-db"));
 
-    // 管道（非 TTY）+ 空列表：stderr 保持静默，不干扰脚本/Agent
+    // 管道（非 TTY）+ 空列表：stdout 保持紧凑纯 JSON（零 ANSI），stderr 保持静默
     let (mut out_pipe, mut err_pipe) = (Vec::new(), Vec::new());
     let code = run_with_tty(&args, &dirs, &mut out_pipe, &mut err_pipe, false);
     assert_eq!(code, 0);
+    let stdout_pipe = String::from_utf8_lossy(&out_pipe);
+    assert!(!stdout_pipe.contains("\x1b["), "{stdout_pipe}");
+    assert_eq!(stdout_pipe.lines().count(), 1, "{stdout_pipe}");
     assert!(err_pipe.is_empty());
 
     // 交互终端 + 有开放连接：不打印空列表提示
@@ -3288,10 +3338,51 @@ mod tests {
     let code = run_with_tty(&args, &open_dirs, &mut out_open, &mut err_open, true);
     assert_eq!(code, 0);
     assert_eq!(
-      json_of(&String::from_utf8_lossy(&out_open))["connections"][0]["name"],
+      json_of(&format::strip_ansi(&String::from_utf8_lossy(&out_open)))["connections"][0]["name"],
       json!("dev-open")
     );
     assert!(err_open.is_empty());
+  }
+
+  #[test]
+  fn cli_output_flags_override_tty_and_pipe_defaults() {
+    let dir = ConfigDir::with(&[profile("open-1", "dev-open", "development", "read")]);
+    let dirs = Dirs { config: Some(dir.0.clone()), log: None };
+
+    // 终端下 --compact --no-color 强制紧凑无色
+    let args = vec!["connections".to_string(), "--compact".to_string(), "--no-color".to_string()];
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_with_tty(&args, &dirs, &mut out, &mut err, true), 0);
+    let text = String::from_utf8_lossy(&out);
+    assert!(!text.contains("\x1b["), "{text}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert_eq!(json_of(&text)["connections"][0]["name"], json!("dev-open"));
+
+    // 管道下 --pretty --color always 强制美化高亮（便于 `| less -R`）
+    let args = vec![
+      "connections".to_string(),
+      "--pretty".to_string(),
+      "--color".to_string(),
+      "always".to_string(),
+    ];
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_with_tty(&args, &dirs, &mut out, &mut err, false), 0);
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("\x1b[1;36m\"connections\"\x1b[0m"), "{text}");
+    assert!(text.lines().count() > 5, "{text}");
+    assert_eq!(json_of(&format::strip_ansi(&text))["connections"][0]["name"], json!("dev-open"));
+
+    // 终端下错误 JSON 同样美化高亮；管道下紧凑无色
+    let bad_args = vec!["unknown-cmd".to_string()];
+    let (mut out_tty, mut err_tty) = (Vec::new(), Vec::new());
+    assert_eq!(
+      run_with_tty(&bad_args, &dirs, &mut out_tty, &mut err_tty, true),
+      Exit::Usage as i32
+    );
+    let err_tty_text = String::from_utf8_lossy(&err_tty);
+    assert!(err_tty_text.contains("\x1b["), "{err_tty_text}");
+    assert!(err_tty_text.lines().count() > 2, "{err_tty_text}");
+    assert_eq!(json_of(&format::strip_ansi(&err_tty_text))["error"]["kind"], json!("usage"));
   }
 
   #[test]
