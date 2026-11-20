@@ -25,8 +25,8 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
-| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、Keychain 覆盖修复、官网 CLI/MCP 文档与托管 `SKILL.md` 均已合入 `main`（PR `#59`–`#62`），`1.3.0` 版本与 README 准备就绪，待合并本 PR 后按需完成 `V1` 跨平台实机验收并打 `v1.3.0` 标签发版 |
-| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [ ] 规划已完成（`AN0–AN6`），待 `v1.3.0` 发版后按 `P0 → P1 → P2/P3` 推进 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已合入 `main`（PR `#59`–`#63`），`v1.3.0` 标签已推送触发发版（`V1` 跨平台实机验收继续跟踪） |
+| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [-] `AN0` 边界与安全门实验已完成，按 `AN1 → AN6` 持续推进 |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -134,12 +134,12 @@
 
 ### 前置实验（AN0）
 
-- [ ] AN0 多引擎分析边界与安全门实验（E1–E5，实测结果写回 [`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md) §3）
-  - E1 7 类关系方言带过滤条件的表级抽样 SQL 执行计划与取消行为（绝不触发 `ORDER BY RAND()`）；
-  - E2 Redis 单机/Cluster 10,000 Key `SCAN` + pipeline 耗时与禁用 `MEMORY USAGE` 降级实测；
-  - E3 MongoDB 5,000 条 12 层嵌套/动态键 BSON 展平截断（深 8 / 300 路径）耗时与视图/权限降级实测；
-  - E4 ES 8 / OpenSearch `size: 0` 原生 `aggs` 兼容与 `_cat/indices` 返回 `403` 权限降级实测；
-  - E5 `LocalAnalyticsRegistry` 多表附加（结果集 + 本地文件）后的沙盒逃逸反向验证门。
+- [x] AN0 多引擎分析边界与安全门实验（E1–E5，5 条集成实验全通含 E2 ACL 降级与 E5 沙盒逃逸反向门，实测数据已写回 [`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md) §3）
+  - E1：200k 行 `WHERE ... LIMIT 5000`（无排序 `14.42ms`）vs `ORDER BY random()`（全扫 `Top N` `77.12ms`），拍板 7 方言无排序限流抽样；
+  - E2：踩出真实陷阱——`redis-rs` pipeline 任一命令报 `NOPERM` 会丢弃整批 `TYPE`/`PTTL`，拍板首键独立探测 1 次 `MEMORY USAGE`（10k Key 允许 `225.75ms` / 禁止仅 1 次探测即降级 `153.70ms`）；
+  - E3：5,000 条 12 层嵌套 + 1,200 动态键 BSON 纯内存展平 `87.46ms`，严控 `max_depth=8` / `max_paths=300`（截断 `8,656` 路径）；
+  - E4：mock HTTP（`.no_proxy()`）验证 1,053 字段 Mapping 膨胀预警、`size: 0` 聚合与 `_cat/indices` `403` 独立降级；
+  - E5：瞬态读连接物化 + `Appender` 向已锁沙盒附加 10k CSV（`202.26ms`）并跑 `LEFT JOIN`/`EXCEPT`（`55.88ms`），4 类逃逸全拒且反向门证实未锁连接可 `read_text`。
 
 ### 阶段 1（P0）：结构化数据深度分析升级
 
