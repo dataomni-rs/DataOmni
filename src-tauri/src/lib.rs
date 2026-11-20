@@ -84,6 +84,8 @@ pub fn run() {
       update_connection,
       delete_connection,
       get_connections,
+      get_connection_semantics,
+      save_connection_semantics,
       diagnostics,
       agent_cli_info,
       read_agent_audit_log,

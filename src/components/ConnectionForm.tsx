@@ -241,6 +241,34 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   const [compiledDrivers, setCompiledDrivers] = useState<ReadonlySet<DatabaseType>>(
     () => getCachedCompiledDrivers() ?? SUPPORTED_DATABASE_TYPES,
   );
+  // 连接级本地业务语义备注（semantics/<id>.md，上限 32 KB，不进 connections.json，CM4）
+  const [semanticNotes, setSemanticNotes] = useState('');
+  const [semanticDirty, setSemanticDirty] = useState(false);
+  const [semanticError, setSemanticError] = useState<string | null>(null);
+  const semanticBytes = new TextEncoder().encode(semanticNotes).length;
+  const MAX_SEMANTIC_BYTES = 32 * 1024;
+
+  useEffect(() => {
+    if (mode !== 'edit' || !connection?.id) {
+      return;
+    }
+    let cancelled = false;
+    void invoke<string>('get_connection_semantics', { id: connection.id })
+      .then((content) => {
+        if (!cancelled && typeof content === 'string') {
+          setSemanticNotes(content);
+          setSemanticDirty(false);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setSemanticError(describeError(caught));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, connection?.id]);
 
   useEffect(() => {
     if (getCachedCompiledDrivers() !== null) {
@@ -489,20 +517,33 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   // 保存连接
   const handleSave = async () => {
     if (!validateForm()) return;
+    if (semanticBytes > MAX_SEMANTIC_BYTES) {
+      setSemanticError(t('form.semanticsTooLarge'));
+      return;
+    }
 
+    setSemanticError(null);
     setPendingAction('save');
     try {
+      let savedId: string | null = null;
       if (mode === 'create') {
-        await createConnection(
+        savedId = await createConnection(
           submittableConfig() as Omit<ConnectionConfig, 'id' | 'created_at' | 'updated_at'>
         );
       } else if (connection) {
         await updateConnection(connection.id, submittableConfig());
+        savedId = connection.id;
+      }
+      if (savedId && semanticDirty) {
+        await invoke('save_connection_semantics', { id: savedId, content: semanticNotes });
       }
       onClose();
       void onSaved?.();
-    } catch {
-      // 错误已在store中处理
+    } catch (caught) {
+      if (semanticDirty) {
+        setSemanticError(describeError(caught));
+      }
+      // 连接保存错误已在 store 中处理
     } finally {
       setPendingAction(null);
     }
@@ -1475,6 +1516,38 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
 
               </>
             )}
+
+            {/* 连接级本地业务语义备注（CM4）：独立存于 semantics/<id>.md，自动注入 cli dictionary 与 MCP schema */}
+            <div className="border-t border-line pt-4">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <label htmlFor="connection-semantic-notes" className="text-sm font-medium text-fg">
+                  {t('form.semanticsLabel')}
+                </label>
+                <span
+                  className={clsx(
+                    'font-mono text-[11px]',
+                    semanticBytes > MAX_SEMANTIC_BYTES ? 'text-danger' : 'text-fg-subtle'
+                  )}
+                >
+                  {(semanticBytes / 1024).toFixed(1)} / 32 KB
+                </span>
+              </div>
+              <textarea
+                id="connection-semantic-notes"
+                rows={4}
+                value={semanticNotes}
+                onChange={(event) => {
+                  setSemanticNotes(event.target.value);
+                  setSemanticDirty(true);
+                  setSemanticError(null);
+                }}
+                placeholder={t('form.semanticsPlaceholder')}
+                {...PLAIN_TEXT_INPUT}
+                className="w-full rounded-control border border-line-strong bg-surface px-3 py-2 font-mono text-xs text-fg placeholder:text-fg-subtle focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+              <p className="mt-1 text-xs text-fg-subtle">{t('form.semanticsHint')}</p>
+              {semanticError && <p className="mt-1 text-xs text-danger">{semanticError}</p>}
+            </div>
           </div>
         </div>
 

@@ -4,6 +4,7 @@ pub mod backup;
 pub mod clickhouse;
 pub mod completion_catalog;
 pub mod connection_probe;
+pub mod connection_semantics;
 pub mod connection_service;
 pub mod csv_import;
 pub mod duckdb;

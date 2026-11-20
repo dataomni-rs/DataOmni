@@ -546,6 +546,10 @@ impl ConnectionService {
       self.connections.insert(id.to_string(), connection);
       return Err(format!("{CONFIG_SAVE_FAILED}: {error}"));
     }
+    // 顺带清理该连接对应的本地语义备注侧文件 `semantics/<id>.md`（CM4）
+    if let Some(config_dir) = self.config_path.parent() {
+      crate::services::connection_semantics::delete_semantics(config_dir, id);
+    }
     // 连接已经没了，留下的凭证什么也证明不了；删不掉也不必让删除失败
     let _ = self.credential_store.delete_password(&agent_grant_id(id));
 

@@ -87,6 +87,39 @@ pub async fn get_connections(
   with_service(&service_state, &app_handle, |service| Ok(service.get_connections()))
 }
 
+/// 读取连接级本地业务语义备注（`semantics/<id>.md`，CM4）
+#[tauri::command]
+pub async fn get_connection_semantics(id: String, app_handle: AppHandle) -> Result<String, String> {
+  use tauri::Manager;
+  let config_dir = app_handle
+    .path()
+    .app_config_dir()
+    .map_err(|error| format!("DATAOMNI_CONFIG_DIR_UNAVAILABLE: {error}"))?;
+  Ok(crate::services::connection_semantics::read_semantics(&config_dir, &id)?.unwrap_or_default())
+}
+
+/// 保存连接级本地业务语义备注（上限 32 KB，不修改 `connections.json` 与 `<id>#agent` 指纹，CM4）
+#[tauri::command]
+pub async fn save_connection_semantics(
+  id: String,
+  content: String,
+  app_handle: AppHandle,
+  service_state: State<'_, ConnectionServiceState>,
+) -> Result<(), String> {
+  use tauri::Manager;
+  with_service(&service_state, &app_handle, |service| {
+    if service.get_connection(&id).is_none() {
+      return Err(crate::services::connection_service::CONNECTION_NOT_FOUND.to_string());
+    }
+    Ok(())
+  })?;
+  let config_dir = app_handle
+    .path()
+    .app_config_dir()
+    .map_err(|error| format!("DATAOMNI_CONFIG_DIR_UNAVAILABLE: {error}"))?;
+  crate::services::connection_semantics::save_semantics(&config_dir, &id, &content)
+}
+
 /// 把所有连接导出到 `path`（不含口令，见 `ConnectionService::export_document`），返回导出了几个
 #[tauri::command]
 pub async fn export_connections(

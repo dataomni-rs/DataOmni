@@ -613,7 +613,17 @@ fn run_dictionary(
   let date = chrono::Local::now().format("%Y-%m-%d").to_string();
   let tables = dictionary::tables_from_rows(&columns);
   let links = dictionary::links_from_rows(&foreign_keys);
-  Ok(dictionary::render(&profile.name, dictionary::dialect(profile), &date, &tables, &links))
+  let semantics = config_dir.and_then(|dir| {
+    crate::services::connection_semantics::read_semantics_for_agent(dir, &profile.id)
+  });
+  Ok(dictionary::render_with_semantics(
+    &profile.name,
+    dictionary::dialect(profile),
+    &date,
+    &tables,
+    &links,
+    semantics.as_deref(),
+  ))
 }
 
 fn mongo(
@@ -1638,6 +1648,22 @@ fn run_schema(
   let mut output = json!({ "schema": OUTPUT_SCHEMA, "connection": profile.name });
   if let (Value::Object(output), Value::Object(body)) = (&mut output, body) {
     output.extend(body);
+  }
+  if let Some(table) = arguments.table.as_deref() {
+    if let Some(table_semantics) = config_dir
+      .and_then(|dir| {
+        crate::services::connection_semantics::read_semantics_for_agent(dir, &profile.id)
+      })
+      .and_then(|notes| {
+        crate::services::connection_semantics::extract_table_section(
+          &notes,
+          table,
+          arguments.schema.as_deref(),
+        )
+      })
+    {
+      output["semantics"] = Value::String(table_semantics);
+    }
   }
   Ok(output)
 }
@@ -2959,5 +2985,50 @@ mod tests {
     }
     assert_eq!(json_of(&e1)["error"]["message"], json_of(&e2)["error"]["message"]);
     assert_eq!(json_of(&e1)["error"]["message"], json_of(&e3)["error"]["message"]);
+  }
+
+  /// CM4 语义备注无侵入门：无侧文件时 dictionary/schema 输出不变；有侧文件时注入备注段与表级说明
+  #[test]
+  fn connection_semantics_injects_into_dictionary_and_schema_without_breaking_baseline() {
+    let dir = ConfigDir::with(&[]);
+    let db = seeded_sqlite(&dir.0);
+    std::fs::write(
+      dir.0.join("connections.json"),
+      Value::from(vec![file_profile("conn-sem", "local", "sqlite", &db, "development")])
+        .to_string(),
+    )
+    .expect("config");
+
+    // 1. 无侧文件：dictionary 不含语义块，schema 不含 semantics 字段
+    let (code, baseline_dict, stderr) = run_in(&dir, &["dictionary", "local"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!baseline_dict.contains("## Business Semantics & Notes"), "{baseline_dict}");
+
+    let (code, baseline_schema, stderr) = run_in(&dir, &["schema", "local", "items"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(json_of(&baseline_schema).get("semantics").is_none(), "{baseline_schema}");
+
+    // 2. 写入 semantics/conn-sem.md 后：dictionary 在物理表之前注入，schema 附带对应表小节
+    crate::services::connection_semantics::save_semantics(
+      &dir.0,
+      "conn-sem",
+      "All amounts are in cents.\n\n### items\n- `name` is the customer-facing SKU label.\n",
+    )
+    .expect("save semantics");
+
+    let (code, enriched_dict, stderr) = run_in(&dir, &["dictionary", "local"]);
+    assert_eq!(code, 0, "{stderr}");
+    let sem_pos =
+      enriched_dict.find("## Business Semantics & Notes").expect("semantics heading in dictionary");
+    let table_pos = enriched_dict.find("## items").expect("table heading in dictionary");
+    assert!(sem_pos < table_pos, "semantics must appear before physical tables");
+    assert!(enriched_dict.contains("All amounts are in cents."));
+
+    let (code, enriched_schema, stderr) = run_in(&dir, &["schema", "local", "items"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+      json_of(&enriched_schema)["semantics"],
+      json!("- `name` is the customer-facing SKU label.")
+    );
   }
 }
