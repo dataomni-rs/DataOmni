@@ -104,8 +104,8 @@
 
 严守既有只读、`PROD` 物理不可见与 `<id>#agent` 凭证校验红线；MCP 严禁暴露任意本机文件读写路径。
 
-- [ ] CM1 GUI 内 MCP / CLI 一键接入引导与只读审计日志查看器
-  - 后端新增 `agent_cli_info()` 与 `read_agent_audit_log()`（直接只读解析现有 `dataomni-cli.log`）；前端提供 Claude Code / Claude Desktop / Cursor 一键复制配置、导出 `SKILL.md` 及按结果筛选的只读审计记录视图。
+- [x] CM1 GUI 内 MCP / CLI 一键接入引导与只读审计日志查看器（`9610f20`，`cargo test --lib` 470 条含 4 条审计日志解析与 PATH 探测单测、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + 200 文件 2361 条全绿）
+  - 后端新增 `agent_cli_info()`（返回真实可执行路径、PATH 可见性、已开放非生产连接数、审计日志路径与内置 `guide.md`，零口令返回）与 `read_agent_audit_log(limit?)`（只读倒序解析 `dataomni-cli.log` 及其 `.1` 轮转文件，含双引号/转义/Unicode 连接名与截断行容错）；前端落地 `agentConfigSnippets` 纯函数、`AgentCliSection` 设置小节（Claude Code 一键命令、Claude Desktop / Cursor `mcpServers` JSON、复制/导出 `SKILL.md` 及按结果与关键字筛选的不可篡改审计视图）以及连接表单「开放只读访问」下方的直达入口。
 - [ ] CM2 CLI / MCP 接入内置 DuckDB 能力（`export --format parquet` 与 `profile` 画像）
   - 复用 `services/local_analytics.rs`：CLI 新增 `export --format parquet` 与 `profile <conn> "<sql>"` / `profile --file <path>`；MCP 新增只读 `profile` 工具（仅接开放连接 + SQL，显式拒绝 `file` 参数），帮外部 Agent 在不拉原始行的前提下掌握数据分布。
 - [ ] CM3 `cli query --param` 参数化查询与 `cli diff` 只读结构差异报告
