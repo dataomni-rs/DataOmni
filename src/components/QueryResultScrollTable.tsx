@@ -12,7 +12,8 @@ import {
   BarChart3,
   Database,
   Lock,
-  Undo2
+  Undo2,
+  ArrowUpRight
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
@@ -61,6 +62,14 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { SHORTCUTS, formatShortcut } from '../utils/shortcuts';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
 import { rowKeyFromColumns } from '../utils/rowIdentity';
+import { DatabaseType } from '../contracts';
+import { useAppStore } from '../stores/appStore';
+import { useWorkspaceStore } from '../stores/workspaceStore';
+import {
+  buildCellJump,
+  resolveQueryColumnJumps,
+  type ResolvedCellJump
+} from '../utils/foreignKeyJump';
 
 /**
  * 结果区底边要留出的余量。
@@ -93,6 +102,13 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const commitRowChanges = useQueryStore((state) => state.commitRowChanges);
   const connectionId = useQueryStore((state) => state.connectionId);
   const dialect = useQueryStore(selectSqlDialect);
+  const activeConnection = useAppStore((state) => state.activeConnection);
+  const effectiveConnectionId = connectionId ?? activeConnection?.config.id ?? null;
+  const completionRelations = useAppStore((state) =>
+    effectiveConnectionId ? state.completionCatalogs[effectiveConnectionId]?.relations : undefined
+  );
+  const tableStructures = useAppStore((state) => state.tableStructures);
+  const jumpToTableData = useWorkspaceStore((state) => state.jumpToTableData);
   
   // 分页状态
   const [currentPage, setCurrentPage] = useState(1);
@@ -146,6 +162,73 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const datasetKey = `${statementId}|${sort?.column ?? ''}:${sort?.direction ?? ''}|${currentPage}|${pageSize}`;
   const cells = useCellSelection(currentRows, result.columns, datasetKey);
   const [contextTarget, setContextTarget] = useState<GridContextTarget | null>(null);
+
+  const columnJumpMap = useMemo(() => {
+    if (!effectiveConnectionId) {
+      return new Map<number, ReturnType<typeof resolveQueryColumnJumps> extends Map<number, infer V> ? V : never>();
+    }
+    const dbType = activeConnection?.config.db_type
+      ?? (dialect === 'postgresql'
+        ? DatabaseType.PostgreSQL
+        : dialect === 'sqlite'
+          ? DatabaseType.SQLite
+          : dialect === 'sqlserver'
+            ? DatabaseType.SqlServer
+            : dialect === 'oracle'
+              ? DatabaseType.Oracle
+              : dialect === 'duckdb'
+                ? DatabaseType.DuckDB
+                : dialect === 'clickhouse'
+                  ? DatabaseType.ClickHouse
+                  : DatabaseType.MySQL);
+    return resolveQueryColumnJumps({
+      sql: resultSql,
+      columns: result.columns,
+      dialect,
+      dbType,
+      currentDatabase: activeConnection?.config.database,
+      connectionId: effectiveConnectionId,
+      relations: completionRelations,
+      tableStructures
+    });
+  }, [
+    effectiveConnectionId,
+    activeConnection?.config.db_type,
+    activeConnection?.config.database,
+    dialect,
+    resultSql,
+    result.columns,
+    completionRelations,
+    tableStructures
+  ]);
+
+  const handleJump = (jump: ResolvedCellJump) => {
+    if (!effectiveConnectionId) {
+      return;
+    }
+    jumpToTableData(effectiveConnectionId, { schema: jump.schema, table: jump.table }, jump.filters);
+  };
+
+  const resolveCellJumps = (row: readonly SerializedResultValue[], colIndex: number): ResolvedCellJump[] => {
+    const targets = columnJumpMap.get(colIndex);
+    if (!targets || targets.length === 0) {
+      return [];
+    }
+    const getByName = (name: string): SerializedResultValue => {
+      const idx = result.columns.findIndex((c) => c.toLowerCase() === name.toLowerCase());
+      return idx >= 0 ? (row[idx] ?? null) : null;
+    };
+    const resolved: ResolvedCellJump[] = [];
+    for (const target of targets) {
+      const built = buildCellJump(target, (col) =>
+        target.sourceColumns.length === 1 ? (row[colIndex] ?? null) : getByName(col)
+      );
+      if (built) {
+        resolved.push(built);
+      }
+    }
+    return resolved;
+  };
 
   // 选中的部分单独成一档。选区的行号是**当前页**里的行号，所以取数据要从
   // currentRows 取，而不是导出对话框拿到的那份排过序的全部结果
@@ -746,6 +829,18 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                 >
                   {row.map((cell, cellIndex) => {
                     const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.columnIndex === cellIndex;
+                    const inlineTarget = !isEditing
+                      ? columnJumpMap.get(cellIndex)?.find((item) => item.inline)
+                      : undefined;
+                    const inlineJump = inlineTarget
+                      ? buildCellJump(inlineTarget, (col) => {
+                          if (inlineTarget.sourceColumns.length === 1) {
+                            return cell ?? null;
+                          }
+                          const idx = result.columns.findIndex((c) => c.toLowerCase() === col.toLowerCase());
+                          return idx >= 0 ? (row[idx] ?? null) : null;
+                        })
+                      : null;
                     return (
                       <td
                         key={cellIndex}
@@ -753,11 +848,19 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                           'relative border-r border-line font-mono text-[13px]',
                           densityClass,
                           alignments[cellIndex] === 'right' && 'text-right',
+                          inlineJump && 'group/cell',
                           cells.isSelected(rowIndex, cellIndex) && 'bg-accent-soft',
                           cells.isFocused(rowIndex, cellIndex) && 'outline outline-1 -outline-offset-1 outline-accent',
                           canEdit && !isEditing && !generatedColumns.has(result.columns[cellIndex]) && 'cursor-pointer'
                         )}
-                        onClick={(event) => cells.selectCell(rowIndex, cellIndex, event.shiftKey)}
+                        onClick={(event) => {
+                          if ((event.metaKey || event.ctrlKey) && inlineJump) {
+                            event.preventDefault();
+                            handleJump(inlineJump);
+                            return;
+                          }
+                          cells.selectCell(rowIndex, cellIndex, event.shiftKey);
+                        }}
                         onContextMenu={(event) => {
                           event.preventDefault();
                           // 右击选区外的格子先选上它：菜单里那几条都作用于选区
@@ -786,6 +889,24 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                             onCommit={saveEdit}
                             onCancel={cancelEditing}
                           />
+                        ) : inlineJump ? (
+                          <div className={clsx('flex min-w-0 items-center gap-1', alignments[cellIndex] === 'right' && 'justify-end')}>
+                            <div className="min-w-0 flex-1 truncate">
+                              <StagedCellValue value={cell} pending={pending} column={result.columns[cellIndex]} />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleJump(inlineJump);
+                              }}
+                              title={t('grid.jumpToTableTitle', { target: inlineJump.targetLabel })}
+                              aria-label={t('grid.jumpToTable', { target: inlineJump.targetLabel })}
+                              className="shrink-0 rounded p-0.5 text-accent opacity-0 transition-opacity hover:bg-accent-soft focus:opacity-100 group-hover/cell:opacity-100"
+                            >
+                              <ArrowUpRight size={12} />
+                            </button>
+                          </div>
                         ) : (
                           // 每格再挂一个类型标签是重复——表头已经写了 BIGINT · NOT NULL，
                           // 而且标签会占掉列宽，让本来放得下的值反而被截断
@@ -899,6 +1020,12 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
           onCopyColumn={(column) => cells.copyColumn(column, true)}
+          jumpTargets={
+            currentRows[contextTarget.row]
+              ? resolveCellJumps(currentRows[contextTarget.row], contextTarget.column)
+              : []
+          }
+          onJump={handleJump}
           onClose={() => setContextTarget(null)}
         />
       )}

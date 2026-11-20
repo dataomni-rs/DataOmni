@@ -1,7 +1,9 @@
 import { create } from 'zustand';
 import {
+  createTableWorkspaceTab,
   markWorkspaceTabProfileDeleted,
   renameProfileInTabs,
+  workspaceTabId,
   type ClosedWorkspaceTab,
   type WorkspaceTab
 } from '../contracts/workspace';
@@ -10,12 +12,22 @@ import { tabTitleFromSqlPath, type SqlFileLink } from '../utils/sqlFile';
 /** 保留多少个最近关闭的标签。超出的最旧的一个被挤掉 */
 export const CLOSED_TAB_LIMIT = 10;
 
+export interface PendingTableJump {
+  /** 单调递增令牌，确保连续跳到同一张表（含自引用外键）也能触发筛选更新 */
+  token: number;
+  filters: Array<{ column: string; value: string }>;
+}
+
+let tableJumpTokenSeq = 0;
+
 interface WorkspaceState {
   sidebarProfileId: string | null;
   tabs: WorkspaceTab[];
   activeTabId: string | null;
   /** 最近关闭且要求保留的标签，最新的在前 */
   closedTabs: ClosedWorkspaceTab[];
+  /** 仅存内存、不落盘的表数据页待执行跳转筛选（按 table-data tabId 索引） */
+  pendingTableJumps: Record<string, PendingTableJump>;
 }
 
 interface WorkspaceActions {
@@ -31,6 +43,14 @@ interface WorkspaceActions {
   /** 取回最近关闭的标签；没有可取回的返回 null */
   reopenLastClosedTab: () => ClosedWorkspaceTab | null;
   registerTab: (tab: WorkspaceTab) => void;
+  /** 打开（或切换到）目标表的数据页并预填等值筛选条件 */
+  jumpToTableData: (
+    profileId: string,
+    object: { schema: string | null; table: string },
+    filters: Array<{ column: string; value: string }>
+  ) => void;
+  /** 取出并消费某个表数据页的待执行跳转筛选 */
+  consumePendingTableJump: (tabId: string) => PendingTableJump | null;
   activateTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   /** SQL 标签存到了某个文件：记下它，标题换成文件名 */
@@ -47,6 +67,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   tabs: [],
   activeTabId: null,
   closedTabs: [],
+  pendingTableJumps: {},
 
   selectSidebarProfile: (profileId) => {
     set({ sidebarProfileId: profileId });
@@ -108,6 +129,50 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     });
   },
 
+  jumpToTableData: (profileId, object, filters) => {
+    const normalized = { schema: object.schema ?? null, table: object.table };
+    const tabId = workspaceTabId(profileId, 'table-data', normalized);
+    const qualified = normalized.schema ? `${normalized.schema}.${normalized.table}` : normalized.table;
+    tableJumpTokenSeq += 1;
+    const token = tableJumpTokenSeq;
+
+    set((state) => {
+      const existingTab = state.tabs.find((candidate) => candidate.id === tabId);
+      const nextTabs = existingTab
+        ? state.tabs
+        : [
+            ...state.tabs,
+            createTableWorkspaceTab(profileId, normalized.table, {
+              id: tabId,
+              kind: 'table-data',
+              schema: normalized.schema,
+              title: qualified
+            })
+          ];
+      return {
+        tabs: nextTabs,
+        activeTabId: tabId,
+        pendingTableJumps: {
+          ...state.pendingTableJumps,
+          [tabId]: { token, filters }
+        }
+      };
+    });
+  },
+
+  consumePendingTableJump: (tabId) => {
+    const pending = get().pendingTableJumps[tabId] ?? null;
+    if (!pending) {
+      return null;
+    }
+    set((state) => {
+      const next = { ...state.pendingTableJumps };
+      delete next[tabId];
+      return { pendingTableJumps: next };
+    });
+    return pending;
+  },
+
   linkSqlTabFile: (tabId, file) => {
     set((state) => ({
       tabs: state.tabs.map((tab) => tab.id === tabId && tab.kind === 'sql'
@@ -151,7 +216,9 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         activeTabId = tabs[Math.min(tabIndex, tabs.length - 1)]?.id ?? null;
       }
 
-      return { tabs, activeTabId };
+      const nextPending = { ...state.pendingTableJumps };
+      delete nextPending[tabId];
+      return { tabs, activeTabId, pendingTableJumps: nextPending };
     });
   },
 
@@ -180,12 +247,21 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         ? state.activeTabId
         : tabs[0]?.id ?? null;
 
+      const remainingPending: Record<string, PendingTableJump> = {};
+      const prefix = `${profileId}:`;
+      for (const [key, value] of Object.entries(state.pendingTableJumps)) {
+        if (!key.startsWith(prefix)) {
+          remainingPending[key] = value;
+        }
+      }
+
       return {
         sidebarProfileId: state.sidebarProfileId === profileId
           ? null
           : state.sidebarProfileId,
         tabs,
-        activeTabId
+        activeTabId,
+        pendingTableJumps: remainingPending
       };
     });
   }

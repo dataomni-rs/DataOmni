@@ -6,6 +6,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueryResult } from '../contracts/query';
 import { useLanguageStore } from '../stores/languageStore';
+import { useQueryStore } from '../stores/queryStore';
+import { useWorkspaceStore } from '../stores/workspaceStore';
+import { workspaceTabId } from '../contracts/workspace';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), Channel: class {} }));
 
@@ -121,5 +124,41 @@ describe('表头的列类型', () => {
     await render(mariadbJson);
 
     expect(container.textContent).toContain('LONGBLOB');
+  });
+});
+
+describe('外键与来源表点击跳转', () => {
+  it('点击 JOIN 结果里的关联列跳转按钮，打开目标表并预填等值筛选', async () => {
+    useQueryStore.setState({ connectionId: 'conn-1' });
+    useWorkspaceStore.setState({ tabs: [], activeTabId: null, closedTabs: [], pendingTableJumps: {} });
+
+    await act(async () => {
+      root.render(
+        <QueryResultScrollTable
+          result={{
+            columns: ['skill_id', 'global_skill_id'],
+            rows: [[7, 'smart-ring-analyst']],
+            affected_rows: 1,
+            execution_time: 4
+          }}
+          statementId="s-join"
+          resultSql="SELECT us.skill_id, s.global_skill_id FROM claw_user_skill us JOIN claw_skill_hub s ON s.id = us.skill_id"
+          formatExecutionTime={(ms) => `${ms}ms`}
+        />
+      );
+    });
+
+    const jumpBtn = container.querySelector('button[aria-label="Jump to claw_skill_hub (id)"]') as HTMLButtonElement | null;
+    expect(jumpBtn).not.toBeNull();
+
+    await act(async () => {
+      jumpBtn?.click();
+    });
+
+    const tabId = workspaceTabId('conn-1', 'table-data', { schema: null, table: 'claw_skill_hub' });
+    expect(useWorkspaceStore.getState().activeTabId).toBe(tabId);
+    expect(useWorkspaceStore.getState().pendingTableJumps[tabId]?.filters).toEqual([
+      { column: 'id', value: '7' }
+    ]);
   });
 });

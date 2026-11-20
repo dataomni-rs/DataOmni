@@ -1,6 +1,8 @@
+import { ArrowUpRight } from 'lucide-react';
 import { useLanguageStore } from '../stores/languageStore';
 import { useContextMenu } from '../hooks/useContextMenu';
 import { SHORTCUTS, formatShortcut } from '../utils/shortcuts';
+import type { ResolvedCellJump } from '../utils/foreignKeyJump';
 
 export interface GridContextTarget {
   row: number;
@@ -16,6 +18,9 @@ interface GridContextMenuProps {
   onCopyColumn: (column: number) => void;
   /** 只有这一行此刻能改时才给：表数据页的操作列在最右边，列一多就看不见 */
   onEditRow?: (row: number) => void;
+  /** 右键所在单元格可跳转的目标表（物理外键 / SQL JOIN / 目录匹配） */
+  jumpTargets?: readonly ResolvedCellJump[];
+  onJump?: (jump: ResolvedCellJump) => void;
   onClose: () => void;
 }
 
@@ -31,6 +36,8 @@ export function GridContextMenu({
   onCopyRow,
   onCopyColumn,
   onEditRow,
+  jumpTargets,
+  onJump,
   onClose
 }: GridContextMenuProps) {
   const t = useLanguageStore((state) => state.t);
@@ -44,6 +51,8 @@ export function GridContextMenu({
     { label: t('grid.copyColumn'), hint: hint(SHORTCUTS.copyColumn), run: () => onCopyColumn(target.column) },
     ...(onEditRow ? [{ label: t('grid.editRow'), run: () => onEditRow(target.row) }] : [])
   ];
+
+  const jumps = onJump && jumpTargets && jumpTargets.length > 0 ? jumpTargets : [];
 
   return (
     <div
@@ -65,6 +74,25 @@ export function GridContextMenu({
           {item.hint && <span className="text-fg-subtle">{item.hint}</span>}
         </button>
       ))}
+      {jumps.length > 0 && onJump && (
+        <>
+          <div className="my-1 border-t border-line" />
+          {jumps.map((jump) => (
+            <button
+              key={`${jump.schema ?? ''}.${jump.table}:${jump.targetLabel}`}
+              type="button"
+              onClick={() => {
+                onJump(jump);
+                onClose();
+              }}
+              className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left text-xs text-accent hover:bg-surface-hover"
+            >
+              <span className="truncate">{t('grid.jumpToTable', { target: jump.targetLabel })}</span>
+              <ArrowUpRight size={12} className="shrink-0" />
+            </button>
+          ))}
+        </>
+      )}
     </div>
   );
 }

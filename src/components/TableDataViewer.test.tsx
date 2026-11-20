@@ -9,6 +9,8 @@ import { useLanguageStore } from '../stores/languageStore';
 import { useQueryStore } from '../stores/queryStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useTableEditStore } from '../stores/tableEditStore';
+import { useWorkspaceStore } from '../stores/workspaceStore';
+import { workspaceTabId } from '../contracts/workspace';
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args), Channel: class {} }));
@@ -326,5 +328,41 @@ describe('TableDataViewer（CockroachDB 的触发器）', () => {
 
     expect(container.textContent).toContain('CREATE TRIGGER audit BEFORE INSERT ON db.public.t');
     expect(container.textContent).not.toContain('pg_get_triggerdef');
+  });
+});
+
+describe('TableDataViewer（外键跳转预填筛选）', () => {
+  it('消费待执行跳转筛选并在首次查询时直接带上 WHERE 条件', async () => {
+    const pgConn = { ...connection, id: 'pg-jump', name: 'pg-jump', db_type: DatabaseType.PostgreSQL };
+    useWorkspaceStore.setState({ tabs: [], activeTabId: null, closedTabs: [], pendingTableJumps: {} });
+    useWorkspaceStore.getState().jumpToTableData(
+      'pg-jump',
+      { schema: 'public', table: 'users' },
+      [{ column: 'id', value: '42' }]
+    );
+
+    const pgColumns = [
+      { column_name: 'id', data_type: 'integer', is_nullable: false, is_primary_key: true, primary_key_ordinal: 1 },
+      { column_name: 'note', data_type: 'text', is_nullable: true, is_primary_key: false }
+    ];
+    const select = vi.fn(async (sql: string) => (sql === 'COLUMNS' ? pgColumns : []));
+    useQueryStore.setState({ connectionId: 'pg-jump', database: { select } as never });
+    const sent: string[] = [];
+    readQuery.mockImplementation(async (sql: string) => {
+      sent.push(sql);
+      return sql.startsWith('SELECT COUNT(*)') ? [{ total: 1 }] : [{ id: 42, fs: 'a', note: 'ok' }];
+    });
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={pgConn} tableName="users" schema="public" initialTab="data" />);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const tabId = workspaceTabId('pg-jump', 'table-data', { schema: 'public', table: 'users' });
+    expect(useWorkspaceStore.getState().pendingTableJumps[tabId]).toBeUndefined();
+    expect(sent.join('\n')).toContain('WHERE');
+    expect(sent.join('\n')).toContain('"id" = 42');
   });
 });
