@@ -1,6 +1,6 @@
 # 内置 DuckDB 统一结果集分析、列级画像与可视化升级（DA）
 
-> 立项日期：2026-11-20。当前状态：**设计稿（未开始实现）**。任务状态维护在根目录 `TODOs.md`「v1.4 夯实根基路线 · 第一阶段（DA）」。
+> 立项日期：2026-11-20。当前状态：**DA0 实验已完成（2026-11-20），进入实现阶段**。任务状态维护在根目录 `TODOs.md`「v1.4 夯实根基路线 · 第一阶段（DA）」。
 > 原则不变：先跑 §3 的基准与边界实验，结果填回本文再动手；结论限定在当前版本（`v1.2.2`）；不做重型 BI 仪表盘，只做对个人开发者与日常排障高频有用的确定性能力。
 
 ## 1. 要回答的问题
@@ -36,17 +36,17 @@
 | 已有带行内计算样式的 SVG 序列化与 2× 高清 PNG 导出 | `src/utils/svgExport.ts` | 图表导出 SVG/PNG 直接复用 `serializeSvgWithInlineStyles` |
 | 前端表格有意不做虚拟滚动（每页 ≤ 200 行），后端流式查询默认有行/字节上限 | `AGENTS.md`、`src/utils/gridPagination.ts` | 二次 SQL 结果同样走分页网格，不打破既有渲染基线 |
 
-## 3. 动手前先做的实验（DA0）
+## 3. 动手前先做的实验（DA0，2026-11-20 实测完成）
 
-每条实验跑出实测数据并填回本节后再写正式实现；实验脚本或 `#[ignore]` 基准放单测/临时工具，不污染生产路径。
+每条实验均在内置 `duckdb = "1.20000.1"`（macOS ARM64，`test` 未优化 debug 构建）上跑完并反向验证，实测数据与拍板结论如下：
 
-| 编号 | 要验证的问题 | 怎么验 | 结果决定什么 |
-| --- | --- | --- | --- |
-| E1 | 10 万行 × 20 列混合类型结果集（整数、小数、长文本、时间戳、NULL、BigInt）经 DuckDB `Appender` 装载进内存表并执行列画像（`SUMMARIZE` + 直方图 + Top-5）耗时与峰值 RSS 是多少？ | Rust 集成基准测试，记录 1 万 / 5 万 / 10 万行三档装载耗时、画像耗时、峰值内存 | 定默认装载上限（行上限、内存 `memory_limit`）与是否需要异步进度/取消 |
-| E2 | 5,000 条异构嵌套的 MongoDB / Elasticsearch JSON 文档（含字段缺失、嵌套对象、数组、同字段类型漂移）直接喂给内存 DuckDB `read_json_auto` 时，Schema 推断行为与缺失率计算是否稳定？ | 构造 5 组脏 JSON 样本在内存 DuckDB 实跑 | 决定 MongoDB/ES 走内存 JSON 文本流还是临时只读管道，以及类型冲突列的降级规则（降为 `VARCHAR`） |
-| E3 | 内存沙盒设置 `enable_external_access = false` + `lock_configuration = true` 后，用户在二次 SQL 里执行 `read_text('/etc/hosts')`、`COPY result_set TO '/tmp/x'`、`ATTACH '/tmp/x.db'` 是否全部被拒？ | 单元测试反向验证（删掉配置时用例必红） | 确认二次 SQL 无法逃逸到本地文件系统（本地文件探索模式另开明确只读绑定路径，不开放任意路径写入） |
-| E4 | 对内存 DuckDB 执行 CPU 密集型二次 SQL（如大表自连接）时，调用 `interrupt()` 能否在 1 秒内中止且沙盒表仍可继续查询？ | 单元测试验证中止后再次 `SELECT count(*) FROM result_set` 成功 | 确认前端「取消分析」按钮的交互契约 |
-| E5 | `SerializedResultValue` 中的超大 `bigint`（> `2^53`）、高精度 `decimal`（38 位）、`binary` 装进 DuckDB 后，二次查询回传是否保持无损或有明确标注？ | 边界值单测 | 决定映射列类型：`bigint` → `HUGEINT`/`BIGINT`，`decimal` 溢出回退 `VARCHAR` 并标记不可数值统计，`binary` 仅统计非空率与字节长 |
+| 编号 | 实测结果（debug 构建） | 拍板结论 |
+| --- | --- | --- |
+| E1 | 20 列混合类型 `Appender` 装载 + 完整画像（`SUMMARIZE` + 9 列 10 桶直方图 + 8 列 Top-5）：<br>• 1 万行：装载 `180 ms`、画像 `1,105 ms`（`SUMMARIZE 586` + 直方图 `381` + Top-5 `137`），DuckDB 内存 `6.5 MiB`<br>• 5 万行：装载 `766 ms`、画像 `1,749 ms`，DuckDB 内存 `28.0 MiB`<br>• 10 万行：装载 `1,500 ms`、画像 `2,593 ms`（`SUMMARIZE 1,426` + 直方图 `657` + Top-5 `508`），DuckDB 内存 `54.5 MiB` | 默认装载上限取 `100,000` 行，单会话 `SET memory_limit = '512MB'`、`SET threads = 4` 充裕安全；画像耗时在 1–2.6 秒区间，必须走异步 `spawn_blocking` 并提供取消按钮 |
+| E2 | 5,000 条 5 组异构嵌套 JSON（缺失键 vs 显式 `null`、对象/数组漂移、同字段 5 种类型漂移、空文档、Unicode）：<br>• 临时 NDJSON + `read_json_auto`：`481 ms`，需落盘临时文件，且无法区分「字段缺失」与「值为 `null`」<br>• 纯内存 Rust 单遍扫键 + `Appender`：**`120 ms`（快 4 倍）**、零临时文件，精确统计 `presentCount = 2000` / `explicitNullCount = 1000`（缺失 `3000`），类型漂移列稳定降级为 `VARCHAR` | MongoDB / Elasticsearch 文档统一走**纯内存单遍扫键 + `Appender`**，不落临时文件；保留精确 `presentRatio`，嵌套对象/数组序列化为 JSON 文本入 `VARCHAR` |
+| E3 | 正向：`SET enable_external_access = false; SET lock_configuration = true;` 挡住全部 6 类逃逸（`read_text`、`read_csv_auto`、`glob`、`COPY TO`、`ATTACH`、重开 `enable_external_access`）；反向：撤掉锁后 `read_text('/etc/hosts')` 与 `COPY TO` 均成功。<br>本地文件模式实测：`CREATE VIEW` 在锁死外部访问后查询期报 `Permission Error`；`allowed_paths` 在 1.2 配置项接口报错；**先物化 `CREATE TABLE result_set AS SELECT * FROM ... LIMIT 100000` 再锁死外部访问**查询正常且彻底封死逃逸 | 两类模式均在物化建表后立即执行 `SET enable_external_access = false; SET lock_configuration = true;`；导出 Parquet 时由后端在沙盒内执行只读 SQL 取回结果，再经独立瞬态内存连接写目标文件，用户 SQL 永不接触未锁连接 |
+| E4 | 20,000 行自连接（4 亿次组合）运行 120 ms 后调 `interrupt()`：**0 ms 延迟即中止**（`INTERRUPT Error`），紧接着同一连接 `SELECT COUNT(*) FROM result_set` 返回 `20000` | `analytics_cancel` 直接复用 `InterruptHandle::interrupt()`，中止后会话保持可用无需重建 |
+| E5 | `Appender` 直接接受 `Value::BigInt`/`Value::HugeInt`/`Value::Blob` 及 `Value::Text` 写入 `DECIMAL(38,8)`/`DATE`/`TIME`/`TIMESTAMP`，`9007199254740993`、`i128::MAX`、`38` 位 `DECIMAL` 精确回读无损；超 `i128`/`DECIMAL(38,s)` 退回 `VARCHAR` 后 `SUMMARIZE` 照常运行不报错 | 映射规则定型：`bigint` 按范围选 `BIGINT` / `HUGEINT` / 超限退 `VARCHAR`；`decimal` 按最大标度拟合 `DECIMAL(38, scale)`，超限退 `VARCHAR`；`binary` 入 `BLOB` 仅算非空率与字节长 |
 
 ## 4. 架构设计：内存 DuckDB 沙盒（`services/local_analytics.rs`）
 
@@ -56,9 +56,9 @@
   - 单会话 DuckDB 设 `SET memory_limit = '512MB'`、`SET threads = 4`；
   - 默认允许同时存活最多 8 个分析会话，超限时按 LRU 淘汰最久未使用的非活跃会话；
   - 前端标签页关闭、切换连接或关闭分析抽屉/对话框时主动调用 `analytics_close(analytics_id)` 释放内存。
-- **两类明确隔离的打开模式**：
-  1. **结果集模式**（`analytics_load_result` / `analytics_load_json_docs`）：装完表后立即执行 `SET enable_external_access = false; SET lock_configuration = true;`，用户二次 SQL 只能访问内存表 `result_set`（及只读系统函数），物理杜绝读写磁盘。
-  2. **本地文件只读探索模式**（`analytics_open_file`）：仅允许用户经系统文件选择器显式选中的 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件，后端按只读视图 `CREATE VIEW result_set AS SELECT * FROM ...` 绑定后即锁死外部访问（或在 `read_only_gate` 中禁止 `COPY` / `ATTACH` / `EXPORT` / `read_*` 访问其他路径，具体由 DA0 E3 实测确认）。
+- **两类明确隔离的打开模式**（已由 DA0 E2/E3 实测拍板）：
+  1. **结果集模式**（`analytics_load_result` / `analytics_load_json_docs`）：通过 `Appender` 写入内存表 `result_set`（MongoDB/ES 走纯内存单遍扫键，保留精确 `presentCount` 与 `explicitNullCount`，零临时文件），建表后立即执行 `SET enable_external_access = false; SET lock_configuration = true;`，用户二次 SQL 只能访问内存表 `result_set`，物理杜绝读写磁盘。
+  2. **本地文件只读探索模式**（`analytics_open_file`）：仅允许用户经系统文件选择器显式选中的 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件，后端以 `CREATE TABLE result_set AS SELECT * FROM ... LIMIT <max_rows + 1>` 物化到内存（超出上限时截断并标记 `truncated = true`）后，**立即**执行 `SET enable_external_access = false; SET lock_configuration = true;` 锁死沙盒；导出 Parquet 时在沙盒内执行只读 SQL 取回数据，再由独立的瞬态内存连接写目标文件，用户 SQL 永不接触未锁连接。
 
 ### 4.2 Tauri 命令清单（最小集合）
 1. `analytics_load_result(columns, rows)` → `{ analyticsId, rowCount, columnCount, truncated }`
