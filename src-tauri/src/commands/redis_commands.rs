@@ -4,8 +4,10 @@
 
 use crate::commands::database_commands::TIMEOUT_OUT_OF_RANGE;
 use crate::services::redis::{
-  self, ElementChange, KeyChange, KeyspaceEntry, NewKey, RedisPool, RedisRegistry, RedisReply,
-  RedisValue, ScanPage, ScanRequest, ValueRequest, REDIS_NOT_CONNECTED,
+  self, ElementChange, KeyChange, KeyspaceEntry, NewKey, RedisAnalysisState, RedisKeyspaceAnalysis,
+  RedisKeyspaceAnalysisRequest, RedisPool, RedisRegistry, RedisReply, RedisValue, ScanPage,
+  ScanRequest, ValueRequest, DEFAULT_REDIS_ANALYSIS_SAMPLE, MAX_REDIS_ANALYSIS_SAMPLE,
+  REDIS_NOT_CONNECTED,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,6 +60,55 @@ pub async fn redis_scan(
   };
   let pool = pool(&registry, &connection_string)?;
   redis::scan(&pool, request).await
+}
+
+/// 非阻塞抽样体检（AN3）：返回受时间与样本数双重保护的 Key 列表（类型、TTL、内存与元素长度）
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn redis_analyze_keyspace(
+  connection_string: String,
+  database: i64,
+  pattern: Option<String>,
+  sample_limit: Option<usize>,
+  timeout_ms: Option<u64>,
+  request_id: Option<String>,
+  registry: State<'_, RedisRegistry>,
+  analysis_state: State<'_, RedisAnalysisState>,
+) -> Result<RedisKeyspaceAnalysis, String> {
+  let pool = pool(&registry, &connection_string)?;
+  let timeout_dur = timeout(timeout_ms.unwrap_or(15_000))?;
+  let limit =
+    sample_limit.unwrap_or(DEFAULT_REDIS_ANALYSIS_SAMPLE).clamp(1, MAX_REDIS_ANALYSIS_SAMPLE);
+  let req_id = request_id.unwrap_or_default();
+  let cancel = if req_id.is_empty() {
+    Arc::new(std::sync::atomic::AtomicBool::new(false))
+  } else {
+    analysis_state.register(&req_id)
+  };
+  let result = redis::analyze_keyspace(
+    &pool,
+    RedisKeyspaceAnalysisRequest {
+      database,
+      pattern: pattern.unwrap_or_else(|| "*".to_string()),
+      sample_limit: limit,
+      timeout: timeout_dur,
+    },
+    cancel,
+  )
+  .await;
+  if !req_id.is_empty() {
+    analysis_state.finish(&req_id);
+  }
+  result
+}
+
+/// 协作取消正在进行的 Redis 空间抽样体检
+#[tauri::command]
+pub fn redis_cancel_analysis(
+  request_id: String,
+  analysis_state: State<'_, RedisAnalysisState>,
+) -> bool {
+  analysis_state.cancel(&request_id)
 }
 
 #[tauri::command]

@@ -152,9 +152,9 @@
 
 ### 阶段 2（P1）：Redis 与 MongoDB 引擎专属分析
 
-- [ ] AN3 Redis 非阻塞 Keyspace 内存、TTL 与 BigKey 体检
-  - `services/redis.rs` 新增受时间（15s）与样本数（默认 5,000 / 上限 20,000）双重保护且支持协作取消的抽样分析器（复用 `scan_node` / `scan_cluster`，严禁 `KEYS *`；`MEMORY USAGE` 被 ACL 禁用时平滑降级为元素数/长度口径）；
-  - 纯函数 `src/utils/redisAnalytics.ts` 与 `RedisKeyBrowser` 空间体检视图：可配分隔符前缀树内存占比、TTL 5 档健康度分布、BigKey Top 50 点击直达 Key 详情，支持大型 Hash/ZSet 样本桥接至 DuckDB。
+- [x] AN3 Redis 非阻塞 Keyspace 内存、TTL 与 BigKey 体检（Rust `services::redis::tests` 16 条全通含 mock RESP2 `MEMORY USAGE` ACL 降级与取消门 + 前端 `redisAnalytics`/`RedisKeyspaceAnalyticsDialog`/`RedisKeyBrowser`/`catalog` 32 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `services/redis.rs`、`commands/redis_commands.rs` 与 `lib.rs` 新增 `redis_analyze_keyspace` / `redis_cancel_analysis` 与 `RedisAnalysisState` 协作取消登记表（复用 `SCAN` 单机/Cluster 游标，严禁 `KEYS *`；遵循 `AN0-E2` 首键单次探测 `MEMORY USAGE`，ACL 禁用时平滑降级为元素数/长度估算，受 15s 与 20,000 键双上限保护）；
+  - 落地纯函数 `src/utils/redisAnalytics.ts`、`RedisKeyspaceAnalyticsDialog` 与 `RedisKeyBrowser` 入口：可配分隔符（`:` / `/` / `.`）前缀树内存占比、TTL 5 档健康度分布与点击下钻、BigKey Top 50 点击直达 Key 详情，并为 Hash/ZSet 单键值提供一键桥接至 DuckDB 二次分析。
 - [ ] AN4 MongoDB `$sample` 递归嵌套 Schema 漂移与索引体检
   - `services/mongodb.rs` 新增基于 `$sample`（支持前置当前 `filter`，默认 1,000 / 上限 10,000，深 8 / 300 路径防爆炸截断）的递归嵌套路径分析（存在率区分缺失与 `null`、BSON 混合类型漂移占比、数组长度分位数）及 `$collStats` / `$indexStats` 僵尸索引体检（视图与低权限局部降级）；
   - `MongoCollectionViewer` 接入「Schema 与索引分析」视图，点击异常类型一键生成 `{ "path": { "$type": "..." } }` 过滤条件，聚合管道结果接入 `ResultChartDialog` 一键出图。

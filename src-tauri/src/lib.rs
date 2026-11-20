@@ -62,6 +62,7 @@ pub fn run() {
     .manage(services::oracle::OracleRegistry::default())
     .manage(services::mongodb::MongoRegistry::default())
     .manage(services::redis::RedisRegistry::default())
+    .manage(services::redis::RedisAnalysisState::default())
     .manage(services::neo4j::Neo4jRegistry::default())
     .manage(services::elasticsearch::EsRegistry::default())
     .manage(services::duckdb::DuckDbRegistry::default())
@@ -138,6 +139,8 @@ pub fn run() {
       mongodb_explain,
       redis_list_keyspaces,
       redis_scan,
+      redis_analyze_keyspace,
+      redis_cancel_analysis,
       redis_read_value,
       redis_execute,
       redis_change_key,
