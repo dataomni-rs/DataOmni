@@ -8,6 +8,7 @@ import {
   isLocalAiEndpoint,
   loadAiSettings,
   resolveAiEndpointForEnvironment,
+  resolveDefaultAiEndpoint,
   saveAiSettings,
   type AiSettings
 } from './aiSettings';
@@ -140,5 +141,29 @@ describe('aiSettings', () => {
       ok: false,
       reason: 'blocked-production'
     });
+  });
+
+  it('仅配置合法本机预设时 aiConfigured 与默认端点解析保持一致，拒绝非本机地址', () => {
+    const localOnly: AiSettings = {
+      ...DEFAULT_AI_SETTINGS,
+      enabled: true,
+      baseUrl: '',
+      model: '',
+      localPreset: { protocol: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b' }
+    };
+    expect(aiConfigured(localOnly)).toBe(true);
+    expect(resolveDefaultAiEndpoint(localOnly)).toEqual({
+      protocol: 'openai',
+      baseUrl: 'http://localhost:11434/v1',
+      model: 'qwen2.5-coder:7b',
+      profileId: 'local'
+    });
+
+    const spoofedLocal: AiSettings = {
+      ...localOnly,
+      localPreset: { protocol: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' }
+    };
+    expect(aiConfigured(spoofedLocal)).toBe(false);
+    expect(resolveDefaultAiEndpoint(spoofedLocal)).toBeNull();
   });
 });

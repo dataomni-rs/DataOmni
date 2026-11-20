@@ -83,18 +83,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
   );
 
   const handleOpenLocalDataFile = async () => {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        {
-          name: t('analytics.fileFilterName'),
-          extensions: [...LOCAL_DATA_FILE_EXTENSIONS]
-        }
-      ]
-    });
-    if (typeof selected === 'string' && selected.trim() !== '') {
-      setLocalDataFile(selected);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: t('analytics.fileFilterName'),
+            extensions: [...LOCAL_DATA_FILE_EXTENSIONS]
+          }
+        ]
+      });
+      if (typeof selected === 'string' && selected.trim() !== '') {
+        setLocalDataFile(selected);
+      }
+    } catch (err) {
+      setConnectionError(describeError(err));
     }
   };
   const { ask, prompt: confirmPrompt } = useConfirmPrompt();

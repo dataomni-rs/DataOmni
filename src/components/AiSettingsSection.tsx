@@ -256,7 +256,7 @@ export function AiSettingsSection() {
           </label>
           <p className="px-2 text-[11px] text-fg-subtle">{t('settings.ai.environmentPolicyHint')}</p>
 
-          <div className="mt-2 rounded-control border border-line bg-surface-subtle p-2.5 space-y-1.5">
+          <div className="mt-2 rounded-control border border-line bg-surface-sunken p-2.5 space-y-1.5">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-fg">{t('settings.ai.localPresetTitle')}</span>
               <span className="text-[11px] text-fg-subtle">{t('settings.ai.keyOptionalLocal')}</span>

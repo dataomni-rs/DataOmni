@@ -395,7 +395,7 @@ export function QueryPlanDialog({
                 </div>
               )}
               {aiAnalysis && (
-                <div className="space-y-2 rounded-control border border-line bg-surface-subtle p-3">
+                <div className="space-y-2 rounded-control border border-line bg-surface-sunken p-3">
                   <p className="text-fg">{aiAnalysis.summary}</p>
                   {aiAnalysis.bottlenecks.length > 0 && (
                     <div>

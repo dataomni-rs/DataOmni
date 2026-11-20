@@ -310,17 +310,17 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     if (!id || exportingParquet) {
       return;
     }
-    const chosen = await save({
-      defaultPath: defaultParquetFileName(titleLabel),
-      filters: [{ name: t('analytics.parquetFilterName'), extensions: ['parquet'] }]
-    });
-    if (!chosen) {
-      return;
-    }
-    setExportingParquet(true);
     setQueryError(null);
     setParquetNotice(null);
     try {
+      const chosen = await save({
+        defaultPath: defaultParquetFileName(titleLabel),
+        filters: [{ name: t('analytics.parquetFilterName'), extensions: ['parquet'] }]
+      });
+      if (!chosen || !mountedRef.current) {
+        return;
+      }
+      setExportingParquet(true);
       const res = await invoke<ParquetExportSummary>('analytics_export_parquet', {
         analyticsId: id,
         sql: lastExecutedSql,
@@ -535,7 +535,7 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                     <button
                       type="button"
                       onClick={handleCancel}
-                      className="flex items-center gap-1.5 rounded-control bg-danger px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                      className="flex items-center gap-1.5 rounded-control bg-danger-solid px-3 py-1.5 text-xs font-medium text-fg-on-solid hover:opacity-90"
                     >
                       <Square size={12} />
                       <span>{t('analytics.cancel')}</span>
@@ -545,7 +545,7 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                       type="button"
                       onClick={handleRunCurrentSql}
                       disabled={sql.trim() === ''}
-                      className="flex items-center gap-1.5 rounded-control bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                      className="flex items-center gap-1.5 rounded-control bg-accent px-3 py-1.5 text-xs font-medium text-fg-on-accent hover:opacity-90 disabled:opacity-50"
                     >
                       <Play size={12} />
                       <span>{t('analytics.run')}</span>

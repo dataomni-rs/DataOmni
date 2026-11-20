@@ -340,7 +340,7 @@ export function AiSqlAssistDialog({
                       {...PLAIN_TEXT_INPUT}
                       className="w-full rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg placeholder:text-fg-subtle"
                     />
-                    <div className="flex max-h-28 flex-wrap gap-1.5 overflow-auto rounded-control border border-line bg-surface-subtle p-2">
+                    <div className="flex max-h-28 flex-wrap gap-1.5 overflow-auto rounded-control border border-line bg-surface-sunken p-2">
                       {filteredRelations.slice(0, 60).map((rel) => {
                         const key = relationKey(rel);
                         const checked = selectedRelationSet.has(key);
@@ -367,7 +367,7 @@ export function AiSqlAssistDialog({
               </div>
             </>
           ) : (
-            <div className="space-y-2 rounded-control border border-line bg-surface-subtle p-3 text-xs">
+            <div className="space-y-2 rounded-control border border-line bg-surface-sunken p-3 text-xs">
               <div>
                 <span className="font-medium text-danger">{t('queryError.message')}: </span>
                 <span className="break-words text-fg">{mode.errorMessage}</span>
@@ -427,7 +427,7 @@ export function AiSqlAssistDialog({
           )}
 
           {nlDraft && (
-            <div className="space-y-2 rounded-control border border-line bg-surface-subtle p-3">
+            <div className="space-y-2 rounded-control border border-line bg-surface-sunken p-3">
               {nlDraft.explanation && <p className="text-xs text-fg">{nlDraft.explanation}</p>}
               <pre className="max-h-56 overflow-auto rounded-control border border-line bg-surface p-2.5 font-mono text-xs text-fg select-text">
                 {nlDraft.sql}
@@ -468,7 +468,7 @@ export function AiSqlAssistDialog({
           )}
 
           {errorDiagnosis && (
-            <div className="space-y-2 rounded-control border border-line bg-surface-subtle p-3">
+            <div className="space-y-2 rounded-control border border-line bg-surface-sunken p-3">
               <p className="text-xs font-medium text-fg">{errorDiagnosis.cause}</p>
               {errorDiagnosis.fixedSql ? (
                 <>

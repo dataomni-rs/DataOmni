@@ -74,6 +74,19 @@ interface ResultChartDialogProps {
 export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogProps) {
   const t = useLanguageStore((state) => state.t);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const mountedRef = useRef(true);
+  const activeAggSessionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const activeId = activeAggSessionRef.current;
+      if (activeId) {
+        void invoke('analytics_cancel', { analyticsId: activeId }).catch(() => {});
+      }
+    };
+  }, []);
 
   const [type, setType] = useState<ChartType>('bar');
   /** null 表示还没动过，用推荐的那一组 */
@@ -146,6 +159,10 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
         rows
       });
       sessionId = loaded.analyticsId;
+      activeAggSessionRef.current = sessionId;
+      if (!mountedRef.current) {
+        return;
+      }
       const metricCol = aggFn === 'COUNT' || aggMetric === '' ? null : aggMetric;
       const sql = buildChartAggregationSql({
         groupColumn: aggGroup,
@@ -159,6 +176,9 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
         limit: MAX_CHART_POINTS,
         timeoutSeconds: 30
       });
+      if (!mountedRef.current) {
+        return;
+      }
       setAggregated({
         columns: res.columns,
         rows: res.rows,
@@ -171,12 +191,19 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
       setChosenValues(null);
       setType('bar');
     } catch (err) {
-      setAggError(describeError(err));
+      if (mountedRef.current) {
+        setAggError(describeError(err));
+      }
     } finally {
       if (sessionId) {
+        if (activeAggSessionRef.current === sessionId) {
+          activeAggSessionRef.current = null;
+        }
         void invoke('analytics_close', { analyticsId: sessionId }).catch(() => {});
       }
-      setAggregating(false);
+      if (mountedRef.current) {
+        setAggregating(false);
+      }
     }
   };
 
@@ -260,7 +287,7 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
                   type="button"
                   onClick={() => void handleRunDuckDbAggregate()}
                   disabled={aggregating || (aggFn !== 'COUNT' && aggMetric === '')}
-                  className="flex items-center gap-1.5 rounded-control bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-control bg-accent px-3 py-1.5 text-xs font-medium text-fg-on-accent hover:opacity-90 disabled:opacity-50"
                 >
                   {aggregating && <Loader2 size={12} className="animate-spin" />}
                   <span>{t('chart.aggregateRun')}</span>
@@ -346,22 +373,22 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
     if (!svgEl || exporting) {
       return;
     }
-    const chosen = await save({
-      defaultPath: `chart.${format}`,
-      filters: [
-        {
-          name: format === 'svg' ? t('chart.svgFilterName') : t('chart.pngFilterName'),
-          extensions: [format]
-        }
-      ]
-    });
-    if (!chosen) {
-      return;
-    }
-    setExporting(true);
     setExportError(null);
     setExportNotice(null);
     try {
+      const chosen = await save({
+        defaultPath: `chart.${format}`,
+        filters: [
+          {
+            name: format === 'svg' ? t('chart.svgFilterName') : t('chart.pngFilterName'),
+            extensions: [format]
+          }
+        ]
+      });
+      if (!chosen || !mountedRef.current) {
+        return;
+      }
+      setExporting(true);
       const markup = serializeSvgWithInlineStyles(svgEl, {
         background: readCssColor('--dm-surface-raised', '#ffffff'),
         width: PLOT.width,
@@ -378,12 +405,22 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
         );
         await invoke('write_binary_file', { path: chosen, contentsBase64 });
       }
-      setExportNotice(t('chart.exportedNotice'));
-      window.setTimeout(() => setExportNotice(null), 2000);
+      if (mountedRef.current) {
+        setExportNotice(t('chart.exportedNotice'));
+        window.setTimeout(() => {
+          if (mountedRef.current) {
+            setExportNotice(null);
+          }
+        }, 2000);
+      }
     } catch (err) {
-      setExportError(describeError(err));
+      if (mountedRef.current) {
+        setExportError(describeError(err));
+      }
     } finally {
-      setExporting(false);
+      if (mountedRef.current) {
+        setExporting(false);
+      }
     }
   };
 

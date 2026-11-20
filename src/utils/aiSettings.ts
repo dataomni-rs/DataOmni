@@ -129,15 +129,37 @@ export function isLocalAiEndpoint(baseUrl: string): boolean {
   }
 }
 
-/** 能不能发请求：开着、填了地址和模型（或已配置本地预设）。Key 在钥匙串里，本机端点免 Key */
-export function aiConfigured(settings: AiSettings): boolean {
+/** 解析不带连接环境上下文时的默认可用端点（优先主配置，主配置未填时回落合法的本地预设） */
+export function resolveDefaultAiEndpoint(settings: AiSettings): AiEndpointConfig | null {
   if (!settings.enabled) {
-    return false;
+    return null;
   }
-  const primaryReady = settings.baseUrl.trim() !== '' && settings.model.trim() !== '';
-  const localReady =
-    settings.localPreset.baseUrl.trim() !== '' && settings.localPreset.model.trim() !== '';
-  return primaryReady || localReady;
+  if (settings.baseUrl.trim() !== '' && settings.model.trim() !== '') {
+    return {
+      protocol: settings.protocol,
+      baseUrl: settings.baseUrl.trim(),
+      model: settings.model.trim(),
+      profileId: 'default'
+    };
+  }
+  if (
+    settings.localPreset.baseUrl.trim() !== ''
+    && settings.localPreset.model.trim() !== ''
+    && isLocalAiEndpoint(settings.localPreset.baseUrl)
+  ) {
+    return {
+      protocol: settings.localPreset.protocol,
+      baseUrl: settings.localPreset.baseUrl.trim(),
+      model: settings.localPreset.model.trim(),
+      profileId: 'local'
+    };
+  }
+  return null;
+}
+
+/** 能不能发请求：开着、填了地址和模型（或已配置合法本机预设）。Key 在钥匙串里，本机端点免 Key */
+export function aiConfigured(settings: AiSettings): boolean {
+  return resolveDefaultAiEndpoint(settings) !== null;
 }
 
 export type AiEnvironmentResolution =
@@ -243,12 +265,15 @@ export function completeWithAi(
   messages: { system: string; user: string },
   options?: AiCompleteOptions
 ): Promise<string> {
-  const target: AiEndpointConfig = options?.endpoint ?? {
-    protocol: settings.protocol,
-    baseUrl: settings.baseUrl,
-    model: settings.model,
-    profileId: 'default'
-  };
+  const target: AiEndpointConfig =
+    options?.endpoint
+    ?? resolveDefaultAiEndpoint(settings)
+    ?? {
+      protocol: settings.protocol,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      profileId: 'default'
+    };
   return invoke<string>('ai_complete', {
     request: {
       protocol: target.protocol,

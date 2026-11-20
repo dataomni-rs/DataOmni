@@ -164,7 +164,7 @@ export function AgentCliSection({ sectionRef }: AgentCliSectionProps) {
 
       {info && (
         <div className="mt-3 space-y-3">
-          <div className="rounded-control border border-line bg-surface-subtle p-2.5 text-xs">
+          <div className="rounded-control border border-line bg-surface-sunken p-2.5 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-medium text-fg">{t('settings.agent.binaryPath')}</span>
               <div className="flex items-center gap-1.5">
@@ -199,7 +199,7 @@ export function AgentCliSection({ sectionRef }: AgentCliSectionProps) {
                 {copiedTarget === 'claudeCode' ? t('settings.about.copied') : t('settings.agent.copyCommand')}
               </button>
             </div>
-            <pre className="overflow-x-auto rounded-control border border-line bg-surface-subtle px-2.5 py-2 font-mono text-[11px] text-fg select-text">
+            <pre className="overflow-x-auto rounded-control border border-line bg-surface-sunken px-2.5 py-2 font-mono text-[11px] text-fg select-text">
               {claudeCodeCommand}
             </pre>
           </div>
@@ -216,12 +216,12 @@ export function AgentCliSection({ sectionRef }: AgentCliSectionProps) {
                 {copiedTarget === 'mcpJson' ? t('settings.about.copied') : t('settings.agent.copyJson')}
               </button>
             </div>
-            <pre className="overflow-x-auto rounded-control border border-line bg-surface-subtle px-2.5 py-2 font-mono text-[11px] text-fg select-text">
+            <pre className="overflow-x-auto rounded-control border border-line bg-surface-sunken px-2.5 py-2 font-mono text-[11px] text-fg select-text">
               {mcpServersJson}
             </pre>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-control border border-line bg-surface-subtle px-2.5 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-control border border-line bg-surface-sunken px-2.5 py-2">
             <div className="min-w-0">
               <p className="text-xs font-medium text-fg">{t('settings.agent.skillTitle')}</p>
               <p className="text-[11px] text-fg-subtle">{t('settings.agent.skillHint')}</p>
@@ -304,7 +304,7 @@ export function AgentCliSection({ sectionRef }: AgentCliSectionProps) {
             </p>
           ) : (
             <table className="w-full border-collapse text-left text-[11px]">
-              <thead className="sticky top-0 bg-surface-subtle text-fg-muted">
+              <thead className="sticky top-0 bg-surface-sunken text-fg-muted">
                 <tr className="border-b border-line">
                   <th className="px-2 py-1.5 font-medium">{t('settings.agent.auditColTime')}</th>
                   <th className="px-2 py-1.5 font-medium">{t('settings.agent.auditColCommand')}</th>
