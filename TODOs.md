@@ -108,8 +108,8 @@
   - 后端新增 `agent_cli_info()`（返回真实可执行路径、PATH 可见性、已开放非生产连接数、审计日志路径与内置 `guide.md`，零口令返回）与 `read_agent_audit_log(limit?)`（只读倒序解析 `dataomni-cli.log` 及其 `.1` 轮转文件，含双引号/转义/Unicode 连接名与截断行容错）；前端落地 `agentConfigSnippets` 纯函数、`AgentCliSection` 设置小节（Claude Code 一键命令、Claude Desktop / Cursor `mcpServers` JSON、复制/导出 `SKILL.md` 及按结果与关键字筛选的不可篡改审计视图）以及连接表单「开放只读访问」下方的直达入口。
 - [x] CM2 CLI / MCP 接入内置 DuckDB 能力（`export --format parquet` 与 `profile` 画像）（`10b7e39`，`cargo test --lib cli::` 57 条全通含 Parquet 导出/画像往返与 MCP `file` 参数隔离反向门、`clippy` 默认与 `--no-default-features` 零告警）
   - 直接复用 `services/local_analytics.rs`：CLI 新增 `export --format parquet`（沿用只读事务与绝不覆盖已有文件规则）及 `profile <conn> "<sql>" [--limit N]`（默认 10,000 行、最高 100,000 行，写审计日志且不记 SQL 原文）与 `profile --file <path>`（仅 CLI 可用，不碰连接）；MCP 新增只读 `profile` 工具，schema 显式关闭 `additionalProperties` 且无 `file` 参数，反向验证传 `file` 或偷渡 `--file` 均报 `usage`。
-- [ ] CM3 `cli query --param` 参数化查询与 `cli diff` 只读结构差异报告
-  - 移植 `:name` 参数扫描/改写至后端并新增 `fixtures/bind-parameters-conformance.json` 钉住前后端一致（参数值严禁入审计日志），MCP `query` 同步支持 `params`；新增 `cli diff <src> <dst>` 与 MCP `diff`（双边均须通过 Agent 权限校验，只出差异报告不执行 DDL）。
+- [x] CM3 `cli query --param` 参数化查询与 `cli diff` 只读结构差异报告（`7d1e38f`，`cargo test --lib -- named_parameters cli::` 63 条全通 + 前端 `queryParameters.test.ts` 16 条含共用语料双测、`clippy` 默认与 `--no-default-features` 零告警）
+  - 将 `:name` 扫描与各方言占位符改写沉淀至 `services/named_parameters.rs` 并新增共用语料 `fixtures/bind-parameters-conformance.json` 钉住前后端一致；`cli query` 新增 `--param` / `--param-null` / `--params-json`、MCP `query` 新增 `params`（单测验证参数哨兵值绝不落盘 `dataomni-cli.log`，并顺带修复 `duckdb-rs` 读取 `SQLNULL` 绑定列时的内部 panic）；新增 `cli/diff.rs`、`cli diff <src> <dst> [--format json|markdown]` 与 MCP `diff`（双边均经 Agent 权限与 `<id>#agent` 校验，任一侧为 `PROD` 或未开放统一返回相同 `not_found` 文案，只出差异报告绝不执行 DDL）。
 - [ ] CM4 连接级本地业务语义备注（Glossary）注入 `dictionary` / MCP
   - 按连接存储独立侧文件 `semantics/<id>.md`（上限 32 KB，不影响 `connections.json` 与 `<id>#agent` 指纹）；无备注时输出逐字节兼容 `fixtures/dictionary-conformance.json`，有备注时自动附入 `cli dictionary` 与 MCP `dictionary` / `schema`。
 
