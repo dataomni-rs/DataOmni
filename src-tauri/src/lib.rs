@@ -85,6 +85,8 @@ pub fn run() {
       delete_connection,
       get_connections,
       diagnostics,
+      agent_cli_info,
+      read_agent_audit_log,
       compiled_drivers,
       install_channel,
       check_app_update,

@@ -431,9 +431,122 @@ pub fn install_app_update(
   }
 }
 
+/// GUI「命令行与 Agent」接入引导信息。绝不返回任何连接口令或密钥。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCliInfo {
+  pub executable_path: String,
+  pub on_path: bool,
+  pub os: &'static str,
+  pub open_connection_count: usize,
+  pub audit_log_path: Option<String>,
+  pub guide_markdown: &'static str,
+}
+
+fn is_binary_on_path_in(path_env: Option<&std::ffi::OsStr>, os: &str) -> bool {
+  let Some(path_env) = path_env else {
+    return false;
+  };
+  let names: &[&str] = if os == "windows" { &["dataomni.exe", "dataomni"] } else { &["dataomni"] };
+  std::env::split_paths(path_env).any(|dir| names.iter().any(|name| dir.join(name).is_file()))
+}
+
+fn resolve_cli_executable_path(os: &str) -> String {
+  if let Ok(exe) = std::env::current_exe() {
+    let resolved = exe.canonicalize().unwrap_or(exe);
+    return resolved.display().to_string();
+  }
+  match os {
+    "macos" => "/Applications/DataOmni.app/Contents/MacOS/dataomni".to_string(),
+    "windows" => "C:\\Program Files\\DataOmni\\dataomni.exe".to_string(),
+    _ => "/usr/bin/dataomni".to_string(),
+  }
+}
+
+/// 返回当前 DataOmni 二进制路径、PATH 可见性、已开放给 Agent 的非生产连接数与内置 `SKILL.md` 文本。
+#[tauri::command]
+pub fn agent_cli_info(
+  app: AppHandle,
+  service_state: tauri::State<'_, crate::commands::connection_commands::ConnectionServiceState>,
+) -> Result<AgentCliInfo, String> {
+  use crate::models::{AgentAccess, ConnectionEnvironment};
+
+  let os = std::env::consts::OS;
+  let executable_path = resolve_cli_executable_path(os);
+  let on_path = is_binary_on_path_in(std::env::var_os("PATH").as_deref(), os);
+  let audit_log_path =
+    app.path().app_log_dir().ok().map(|dir| dir.join(crate::cli::AUDIT_FILE).display().to_string());
+
+  let open_connection_count = {
+    let mut guard = service_state
+      .lock()
+      .map_err(|error| format!("{}: {error}", crate::commands::SERVICE_STATE_UNAVAILABLE))?;
+    let service = match &mut *guard {
+      Some(service) => service,
+      slot => slot.insert(
+        crate::services::ConnectionService::new(&app)
+          .map_err(|error| format!("{}: {error}", crate::commands::SERVICE_INIT_FAILED))?,
+      ),
+    };
+    service
+      .get_connections()
+      .iter()
+      .filter(|conn| {
+        conn.environment != ConnectionEnvironment::Production
+          && conn.agent_access == AgentAccess::Read
+      })
+      .count()
+  };
+
+  Ok(AgentCliInfo {
+    executable_path,
+    on_path,
+    os,
+    open_connection_count,
+    audit_log_path,
+    guide_markdown: crate::cli::GUIDE,
+  })
+}
+
+/// 只读读取 `dataomni-cli.log` 中最近的 CLI / MCP 审计摘要（倒序，最多 200 条）。
+#[tauri::command]
+pub fn read_agent_audit_log(
+  app: AppHandle,
+  limit: Option<usize>,
+) -> Result<Vec<crate::cli::AuditLogEntry>, String> {
+  let Ok(log_dir) = app.path().app_log_dir() else {
+    return Ok(Vec::new());
+  };
+  crate::cli::read_audit_log_from(&log_dir, limit.unwrap_or(crate::cli::MAX_AUDIT_ENTRIES))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn detects_dataomni_binary_on_path_per_platform() {
+    let base = std::env::temp_dir().join(format!("dataomni-path-test-{}", uuid::Uuid::new_v4()));
+    let unix_dir = base.join("unix");
+    let win_dir = base.join("win");
+    std::fs::create_dir_all(&unix_dir).expect("create unix temp dir");
+    std::fs::create_dir_all(&win_dir).expect("create win temp dir");
+
+    let joined = std::env::join_paths([&unix_dir]).expect("join paths");
+    assert!(!is_binary_on_path_in(Some(joined.as_os_str()), "macos"));
+    assert!(!is_binary_on_path_in(None, "linux"));
+
+    std::fs::write(unix_dir.join("dataomni"), b"").expect("create unix bin");
+    assert!(is_binary_on_path_in(Some(joined.as_os_str()), "macos"));
+    assert!(is_binary_on_path_in(Some(joined.as_os_str()), "linux"));
+
+    let win_joined = std::env::join_paths([&win_dir]).expect("join win paths");
+    assert!(!is_binary_on_path_in(Some(win_joined.as_os_str()), "windows"));
+    std::fs::write(win_dir.join("dataomni.exe"), b"").expect("create win bin");
+    assert!(is_binary_on_path_in(Some(win_joined.as_os_str()), "windows"));
+
+    let _ = std::fs::remove_dir_all(&base);
+  }
 
   #[test]
   fn project_links_map_only_to_fixed_official_https_destinations() {

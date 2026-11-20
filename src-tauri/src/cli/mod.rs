@@ -165,7 +165,9 @@ Nothing on this command line can widen that.
 ";
 
 /// 给 Agent 读的说明，格式是 Claude Code 的 Skill（`SKILL.md`），存下来就能用（设计文档 §7）
-const GUIDE: &str = include_str!("guide.md");
+pub(crate) const GUIDE: &str = include_str!("guide.md");
+
+pub(crate) use audit::{read_audit_log_from, AuditLogEntry, AUDIT_FILE, MAX_AUDIT_ENTRIES};
 
 /// 命令行读写的两个目录。测试换成临时目录，不碰本机真实的配置与日志
 struct Dirs {

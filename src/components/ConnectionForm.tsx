@@ -84,6 +84,7 @@ interface ConnectionFormProps {
   onClose: () => void;
   /** 保存成功、表单关掉之后调用 */
   onSaved?: () => Promise<unknown>;
+  onOpenAgentGuide?: () => void;
   mode: 'create' | 'edit';
 }
 
@@ -196,6 +197,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   connection, 
   onClose, 
   onSaved,
+  onOpenAgentGuide,
   mode 
 }) => {
   const t = useLanguageStore((state) => state.t);
@@ -604,6 +606,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
               {formData.environment !== 'production' && formData.agent_access === 'read'
                 && formData.save_password === false && !isFileDatabase(formData.db_type) && (
                 <p className="mt-1 text-xs text-warning">{t('form.agentAccessNeedsSavedPassword')}</p>
+              )}
+              {formData.environment !== 'production' && formData.agent_access === 'read' && onOpenAgentGuide && (
+                <button
+                  type="button"
+                  onClick={onOpenAgentGuide}
+                  className="mt-1.5 text-xs font-medium text-accent hover:underline"
+                >
+                  {t('form.agentAccessOpenGuide')}
+                </button>
               )}
             </div>
 

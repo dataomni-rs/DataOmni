@@ -75,6 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // 只装本组件自己产生的错误（加载列表、删除连接）；连接过程的错误由 connector 持有
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<'agent' | undefined>(undefined);
   const [localDataFile, setLocalDataFile] = useState<string | null>(null);
   const localFileSource = useMemo<LocalAnalyticsSource | null>(
     () => (localDataFile ? { kind: 'localFile', filePath: localDataFile } : null),
@@ -374,7 +375,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
         <button
           type="button"
-          onClick={() => setShowSettings(true)}
+          onClick={() => {
+            setSettingsSection(undefined);
+            setShowSettings(true);
+          }}
           className="flex w-full items-center gap-2 rounded-control px-1 py-1 text-xs text-fg-subtle hover:bg-surface-hover hover:text-fg"
         >
           <SlidersHorizontal size={13} />
@@ -382,7 +386,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
       </div>
 
-      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
       {localFileSource && (
         <LocalAnalyticsDialog
           source={localFileSource}
@@ -397,6 +400,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           connection={connectionForm.mode === 'edit' ? connectionForm.connection : undefined}
           mode={connectionForm.mode}
           onSaved={connectionForm.mode === 'edit' ? connectionForm.onSaved : undefined}
+          onOpenAgentGuide={() => {
+            setSettingsSection('agent');
+            setShowSettings(true);
+          }}
           onClose={() => {
             closeConnectionForm();
             // 重新加载连接列表
@@ -404,6 +411,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
               console.error('加载连接列表失败:', err);
               setConnectionError(describeError(err, t('connection.loadListFailed')));
             });
+          }}
+        />
+      )}
+      {showSettings && (
+        <SettingsDialog
+          initialSection={settingsSection}
+          onClose={() => {
+            setShowSettings(false);
+            setSettingsSection(undefined);
           }}
         />
       )}

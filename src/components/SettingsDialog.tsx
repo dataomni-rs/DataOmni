@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { ENVIRONMENTS, ENVIRONMENT_NAME_KEYS } from '../contracts/environment';
 import { EnvironmentBadgeTag } from './EnvironmentBadge';
@@ -17,6 +17,7 @@ import {
 } from '../utils/queryHistoryStorage';
 import { useLanguageStore } from '../stores/languageStore';
 import { AiSettingsSection } from './AiSettingsSection';
+import { AgentCliSection } from './AgentCliSection';
 import { AboutSection } from './AboutSection';
 import type { TranslationKey } from '../i18n/translate';
 import { isImeKeyEvent } from '../utils/shortcuts';
@@ -24,6 +25,7 @@ import { PLAIN_TEXT_INPUT } from './FormControls';
 
 interface SettingsDialogProps {
   onClose: () => void;
+  initialSection?: 'agent';
 }
 
 const THRESHOLD_LABEL_KEYS: Record<ConfirmationThreshold, TranslationKey> = {
@@ -34,8 +36,9 @@ const THRESHOLD_LABEL_KEYS: Record<ConfirmationThreshold, TranslationKey> = {
   append: 'settings.threshold.append'
 };
 
-export function SettingsDialog({ onClose }: SettingsDialogProps) {
+export function SettingsDialog({ onClose, initialSection }: SettingsDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const agentSectionRef = useRef<HTMLDivElement>(null);
   const confirmationPolicy = useSettingsStore((state) => state.confirmationPolicy);
   const gridDensity = useSettingsStore((state) => state.gridDensity);
   const setGridDensity = useSettingsStore((state) => state.setGridDensity);
@@ -45,6 +48,12 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const retention = useHistoryStore((state) => state.retention);
   const setRetention = useHistoryStore((state) => state.setRetention);
   const historyCount = useHistoryStore((state) => state.entries.length);
+
+  useEffect(() => {
+    if (initialSection === 'agent') {
+      agentSectionRef.current?.scrollIntoView({ block: 'start' });
+    }
+  }, [initialSection]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -280,6 +289,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
           </div>
 
           <AiSettingsSection />
+          <AgentCliSection sectionRef={agentSectionRef} />
           <AboutSection />
         </div>
       </div>
