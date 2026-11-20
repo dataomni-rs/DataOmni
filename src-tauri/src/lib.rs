@@ -126,6 +126,7 @@ pub fn run() {
       mongodb_insert_document,
       mongodb_delete_document,
       mongodb_collection_structure,
+      mongodb_analyze_collection,
       mongodb_export_to_file,
       mongodb_import_file,
       mongodb_create_index,

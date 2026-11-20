@@ -12,7 +12,8 @@ use crate::services::mongo_command::{self, CommandPlan, CommandReply};
 use crate::services::mongo_shell;
 use crate::services::mongodb::{
   self, CollectionEntry, ExtendedJson, FindRequest, ImportMode, MongoAggregatePage,
-  MongoCollectionStructure, MongoFindPage, MongoRegistry, UpdateManyResult, MONGO_NOT_CONNECTED,
+  MongoCollectionAnalysis, MongoCollectionStructure, MongoFindPage, MongoRegistry,
+  UpdateManyResult, DEFAULT_MONGO_SAMPLE_SIZE, MONGO_NOT_CONNECTED,
 };
 use crate::services::query_error::QueryError;
 use ::mongodb::Client;
@@ -84,6 +85,32 @@ pub async fn mongodb_count(
   let timeout = timeout(timeout_ms)?;
   let client = client(&registry, &connection_string)?;
   mongodb::count(&client, &database, &collection, filter, timeout).await
+}
+
+/// 集合级 `$sample` 嵌套 Schema 漂移与存储/索引体检（AN4）
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn mongodb_analyze_collection(
+  connection_string: String,
+  database: String,
+  collection: String,
+  filter: String,
+  sample_size: Option<usize>,
+  timeout_ms: u64,
+  registry: State<'_, MongoRegistry>,
+) -> Result<MongoCollectionAnalysis, String> {
+  let filter_doc = mongo_shell::parse_document(&filter).map_err(|error| error.to_string())?;
+  let timeout = timeout(timeout_ms)?;
+  let client = client(&registry, &connection_string)?;
+  mongodb::analyze_collection(
+    &client,
+    &database,
+    &collection,
+    filter_doc,
+    sample_size.unwrap_or(DEFAULT_MONGO_SAMPLE_SIZE),
+    timeout,
+  )
+  .await
 }
 
 /// 一个文档的完整内容，缩进写法。`id` 是网格那一行带着的 `_id` 写法

@@ -32,6 +32,7 @@ use mongodb::options::{AuthMechanism, ClientOptions, Credential, ServerAddress, 
 use mongodb::results::CollectionType;
 use mongodb::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -686,6 +687,345 @@ pub async fn collection_structure(
     })
   };
   with_deadline(timeout, work).await
+}
+
+pub const DEFAULT_MONGO_SAMPLE_SIZE: usize = 1_000;
+pub const MAX_MONGO_SAMPLE_SIZE: usize = 10_000;
+const MONGO_SCHEMA_MAX_DEPTH: usize = 8;
+const MONGO_SCHEMA_MAX_PATHS: usize = 300;
+const MONGO_SCHEMA_MAX_ARRAY_ELEMENTS: usize = 20;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoTypeShare {
+  pub bson_type: String,
+  pub count: usize,
+  pub ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoArrayLengthStats {
+  pub min: usize,
+  pub p50: usize,
+  pub p95: usize,
+  pub max: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoSchemaPathProfile {
+  pub path: String,
+  pub depth: usize,
+  pub present_count: usize,
+  pub present_ratio: f64,
+  pub missing_count: usize,
+  pub explicit_null_count: usize,
+  pub has_type_drift: bool,
+  pub types: Vec<MongoTypeShare>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub array_len: Option<MongoArrayLengthStats>,
+  pub sample_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoStorageSummary {
+  pub count: u64,
+  pub avg_obj_size: u64,
+  pub storage_size: u64,
+  pub total_index_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoIndexUsageEntry {
+  pub name: String,
+  pub ops: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub since: Option<String>,
+  pub unused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoCollectionAnalysis {
+  pub sampled_docs: usize,
+  pub truncated_paths_count: usize,
+  pub elapsed_ms: u64,
+  pub paths: Vec<MongoSchemaPathProfile>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub storage: Option<MongoStorageSummary>,
+  pub index_usage: Vec<MongoIndexUsageEntry>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stats_unavailable_reason: Option<String>,
+}
+
+#[derive(Default)]
+struct MongoPathAccumulator {
+  depth: usize,
+  present_docs: usize,
+  explicit_nulls: usize,
+  types: BTreeMap<&'static str, usize>,
+  array_lens: Vec<usize>,
+  samples: Vec<String>,
+}
+
+fn bson_type_label(value: &Bson) -> &'static str {
+  match value {
+    Bson::Double(_) => "double",
+    Bson::String(_) => "string",
+    Bson::Array(_) => "array",
+    Bson::Document(_) => "document",
+    Bson::Boolean(_) => "bool",
+    Bson::Null => "null",
+    Bson::Int32(_) => "int32",
+    Bson::Int64(_) => "int64",
+    Bson::DateTime(_) => "date",
+    Bson::ObjectId(_) => "objectId",
+    Bson::Binary(_) => "binary",
+    Bson::Decimal128(_) => "decimal128",
+    _ => "other",
+  }
+}
+
+fn scalar_sample_text(value: &Bson) -> Option<String> {
+  let raw = match value {
+    Bson::String(s) => s.clone(),
+    Bson::Int32(n) => n.to_string(),
+    Bson::Int64(n) => n.to_string(),
+    Bson::Double(n) => n.to_string(),
+    Bson::Boolean(b) => b.to_string(),
+    Bson::ObjectId(oid) => oid.to_hex(),
+    Bson::DateTime(dt) => dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string()),
+    Bson::Decimal128(d) => d.to_string(),
+    _ => return None,
+  };
+  let truncated: String = raw.chars().take(60).collect();
+  Some(truncated)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_bson_doc(
+  doc: &Document,
+  prefix: &str,
+  depth: usize,
+  seen_in_doc: &mut HashSet<String>,
+  paths: &mut IndexMap<String, MongoPathAccumulator>,
+  truncated_paths: &mut usize,
+) {
+  if depth > MONGO_SCHEMA_MAX_DEPTH {
+    *truncated_paths += doc.len();
+    return;
+  }
+  for (key, value) in doc {
+    let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+    if !paths.contains_key(&path) && paths.len() >= MONGO_SCHEMA_MAX_PATHS {
+      *truncated_paths += 1;
+      continue;
+    }
+    let acc = paths
+      .entry(path.clone())
+      .or_insert_with(|| MongoPathAccumulator { depth, ..Default::default() });
+    if seen_in_doc.insert(path.clone()) {
+      acc.present_docs += 1;
+    }
+    if matches!(value, Bson::Null) {
+      acc.explicit_nulls += 1;
+    }
+    *acc.types.entry(bson_type_label(value)).or_insert(0) += 1;
+    if acc.samples.len() < 3 {
+      if let Some(sample) = scalar_sample_text(value) {
+        if !acc.samples.contains(&sample) {
+          acc.samples.push(sample);
+        }
+      }
+    }
+    match value {
+      Bson::Document(child) => {
+        walk_bson_doc(child, &path, depth + 1, seen_in_doc, paths, truncated_paths);
+      }
+      Bson::Array(items) => {
+        acc.array_lens.push(items.len());
+        let item_prefix = format!("{path}[]");
+        for item in items.iter().take(MONGO_SCHEMA_MAX_ARRAY_ELEMENTS) {
+          if let Bson::Document(child) = item {
+            walk_bson_doc(child, &item_prefix, depth + 1, seen_in_doc, paths, truncated_paths);
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
+fn percentile_usize(sorted: &[usize], pct: f64) -> usize {
+  if sorted.is_empty() {
+    return 0;
+  }
+  let idx = ((sorted.len() - 1) as f64 * pct).round() as usize;
+  sorted[idx.min(sorted.len() - 1)]
+}
+
+/// 纯内存分析一组 BSON 文档的递归嵌套路径、类型漂移与数组长度分布（AN0-E3 拍板参数）
+pub fn analyze_bson_documents(docs: &[Document]) -> (Vec<MongoSchemaPathProfile>, usize) {
+  let total = docs.len();
+  let mut paths: IndexMap<String, MongoPathAccumulator> = IndexMap::new();
+  let mut truncated_paths = 0usize;
+  let mut seen = HashSet::new();
+
+  for doc in docs {
+    seen.clear();
+    walk_bson_doc(doc, "", 1, &mut seen, &mut paths, &mut truncated_paths);
+  }
+
+  let profiles = paths
+    .into_iter()
+    .map(|(path, mut acc)| {
+      let type_total: usize = acc.types.values().sum();
+      let non_null_kinds = acc.types.keys().filter(|&&k| k != "null").count();
+      let mut types: Vec<MongoTypeShare> = acc
+        .types
+        .into_iter()
+        .map(|(bson_type, count)| MongoTypeShare {
+          bson_type: bson_type.to_string(),
+          count,
+          ratio: if type_total > 0 { count as f64 / type_total as f64 } else { 0.0 },
+        })
+        .collect();
+      types.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.bson_type.cmp(&b.bson_type)));
+
+      let array_len = if acc.array_lens.is_empty() {
+        None
+      } else {
+        acc.array_lens.sort_unstable();
+        Some(MongoArrayLengthStats {
+          min: acc.array_lens[0],
+          p50: percentile_usize(&acc.array_lens, 0.50),
+          p95: percentile_usize(&acc.array_lens, 0.95),
+          max: acc.array_lens[acc.array_lens.len() - 1],
+        })
+      };
+
+      MongoSchemaPathProfile {
+        path,
+        depth: acc.depth,
+        present_count: acc.present_docs,
+        present_ratio: if total > 0 { acc.present_docs as f64 / total as f64 } else { 0.0 },
+        missing_count: total.saturating_sub(acc.present_docs),
+        explicit_null_count: acc.explicit_nulls,
+        has_type_drift: non_null_kinds >= 2,
+        types,
+        array_len,
+        sample_values: acc.samples,
+      }
+    })
+    .collect();
+
+  (profiles, truncated_paths)
+}
+
+fn bson_to_u64(value: Option<&Bson>) -> u64 {
+  match value {
+    Some(Bson::Int32(n)) if *n >= 0 => *n as u64,
+    Some(Bson::Int64(n)) if *n >= 0 => *n as u64,
+    Some(Bson::Double(n)) if n.is_finite() && *n >= 0.0 => *n as u64,
+    _ => 0,
+  }
+}
+
+/// 集合级 `$sample` 嵌套 Schema 漂移分析 + `$collStats`/`$indexStats` 存储与僵尸索引体检（AN4）
+pub async fn analyze_collection(
+  client: &Client,
+  database: &str,
+  collection: &str,
+  filter: Document,
+  sample_size: usize,
+  timeout: Duration,
+) -> Result<MongoCollectionAnalysis, String> {
+  let started = std::time::Instant::now();
+  let limit = sample_size.clamp(1, MAX_MONGO_SAMPLE_SIZE);
+  let mut pipeline = Vec::with_capacity(2);
+  if !filter.is_empty() {
+    pipeline.push(doc! { "$match": filter });
+  }
+  pipeline.push(doc! { "$sample": { "size": limit as i64 } });
+
+  let (sampled, _) =
+    aggregate_documents(client, database, collection, pipeline, 0, limit as u64, timeout).await?;
+  let sampled_docs = sampled.len();
+  let (paths, truncated_paths_count) = analyze_bson_documents(&sampled);
+
+  // 存储与索引命中统计独立执行：视图或低权限账号失败时局部降级，不影响 Schema 漂移结果
+  let coll = client.database(database).collection::<Document>(collection);
+  let mut stats_errors: Vec<String> = Vec::new();
+  let mut storage: Option<MongoStorageSummary> = None;
+  let mut index_usage: Vec<MongoIndexUsageEntry> = Vec::new();
+
+  let stats_budget = timeout.min(Duration::from_secs(10));
+  match with_deadline(stats_budget, async {
+    let mut cursor = coll
+      .aggregate(vec![doc! { "$collStats": { "storageStats": {} } }])
+      .max_time(stats_budget)
+      .await
+      .map_err(describe_error)?;
+    let doc_opt = cursor.try_next().await.map_err(describe_error)?;
+    Ok::<Option<Document>, String>(doc_opt)
+  })
+  .await
+  {
+    Ok(Some(doc)) => {
+      if let Ok(s) = doc.get_document("storageStats") {
+        storage = Some(MongoStorageSummary {
+          count: bson_to_u64(s.get("count")),
+          avg_obj_size: bson_to_u64(s.get("avgObjSize")),
+          storage_size: bson_to_u64(s.get("storageSize")),
+          total_index_size: bson_to_u64(s.get("totalIndexSize")),
+        });
+      }
+    }
+    Ok(None) => {}
+    Err(err) => stats_errors.push(err),
+  }
+
+  match with_deadline(stats_budget, async {
+    let mut cursor = coll
+      .aggregate(vec![doc! { "$indexStats": {} }])
+      .max_time(stats_budget)
+      .await
+      .map_err(describe_error)?;
+    let mut entries = Vec::new();
+    while let Some(doc) = cursor.try_next().await.map_err(describe_error)? {
+      let name = doc.get_str("name").unwrap_or_default().to_string();
+      let accesses = doc.get_document("accesses").ok();
+      let ops = accesses.map(|a| bson_to_u64(a.get("ops"))).unwrap_or(0);
+      let since = accesses
+        .and_then(|a| a.get_datetime("since").ok())
+        .and_then(|dt| dt.try_to_rfc3339_string().ok());
+      let unused = ops == 0 && name != "_id_";
+      entries.push(MongoIndexUsageEntry { name, ops, since, unused });
+    }
+    Ok::<Vec<MongoIndexUsageEntry>, String>(entries)
+  })
+  .await
+  {
+    Ok(entries) => index_usage = entries,
+    Err(err) => stats_errors.push(err),
+  }
+
+  Ok(MongoCollectionAnalysis {
+    sampled_docs,
+    truncated_paths_count,
+    elapsed_ms: started.elapsed().as_millis() as u64,
+    paths,
+    storage,
+    index_usage,
+    stats_unavailable_reason: if stats_errors.is_empty() {
+      None
+    } else {
+      Some(stats_errors.join(" | "))
+    },
+  })
 }
 
 /// 命令结果里 `cursor.firstBatch` 那一批。索引与单个集合的说明都装得进第一批
@@ -1544,5 +1884,52 @@ mod tests {
     };
     assert_eq!(source("").await.as_deref(), Some("admin"));
     assert_eq!(source("app").await.as_deref(), Some("app"));
+  }
+
+  #[test]
+  fn analyze_bson_documents_detects_type_drift_arrays_and_caps_path_explosion() {
+    let mut docs = Vec::new();
+    for i in 0..400usize {
+      let mut deep = doc! { "leaf": i as i32 };
+      for lvl in (0..11).rev() {
+        deep = doc! { format!("l{lvl}"): deep };
+      }
+      let mut dyn_obj = Document::new();
+      dyn_obj.insert(format!("k_{i}"), i as i32);
+
+      let mut d = doc! {
+        "user": {
+          "age": if i % 4 == 0 { Bson::String("25".into()) } else if i % 10 == 0 { Bson::Null } else { Bson::Int32(25) }
+        },
+        "items": (0..(i % 5)).map(|n| Bson::Document(doc! { "price": (n as f64) * 2.5 })).collect::<Vec<_>>(),
+        "deep": deep,
+        "dyn": dyn_obj,
+      };
+      if i % 2 == 0 {
+        d.insert("optional", "yes");
+      }
+      docs.push(d);
+    }
+
+    let (paths, truncated) = analyze_bson_documents(&docs);
+    assert_eq!(paths.len(), MONGO_SCHEMA_MAX_PATHS);
+    assert!(truncated > 0);
+
+    let age = paths.iter().find(|p| p.path == "user.age").expect("user.age");
+    assert_eq!(age.present_count, 400);
+    assert_eq!(age.missing_count, 0);
+    assert!(age.explicit_null_count > 0);
+    assert!(age.has_type_drift, "int32 + string must flag type drift");
+
+    let opt = paths.iter().find(|p| p.path == "optional").expect("optional");
+    assert_eq!(opt.present_count, 200);
+    assert_eq!(opt.missing_count, 200);
+    assert_eq!(opt.explicit_null_count, 0);
+    assert!(!opt.has_type_drift);
+
+    let items = paths.iter().find(|p| p.path == "items").expect("items");
+    let arr = items.array_len.as_ref().expect("array_len");
+    assert_eq!((arr.min, arr.max), (0, 4));
+    assert!(paths.iter().any(|p| p.path == "items[].price"));
   }
 }

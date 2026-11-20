@@ -155,9 +155,9 @@
 - [x] AN3 Redis 非阻塞 Keyspace 内存、TTL 与 BigKey 体检（Rust `services::redis::tests` 16 条全通含 mock RESP2 `MEMORY USAGE` ACL 降级与取消门 + 前端 `redisAnalytics`/`RedisKeyspaceAnalyticsDialog`/`RedisKeyBrowser`/`catalog` 32 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
   - `services/redis.rs`、`commands/redis_commands.rs` 与 `lib.rs` 新增 `redis_analyze_keyspace` / `redis_cancel_analysis` 与 `RedisAnalysisState` 协作取消登记表（复用 `SCAN` 单机/Cluster 游标，严禁 `KEYS *`；遵循 `AN0-E2` 首键单次探测 `MEMORY USAGE`，ACL 禁用时平滑降级为元素数/长度估算，受 15s 与 20,000 键双上限保护）；
   - 落地纯函数 `src/utils/redisAnalytics.ts`、`RedisKeyspaceAnalyticsDialog` 与 `RedisKeyBrowser` 入口：可配分隔符（`:` / `/` / `.`）前缀树内存占比、TTL 5 档健康度分布与点击下钻、BigKey Top 50 点击直达 Key 详情，并为 Hash/ZSet 单键值提供一键桥接至 DuckDB 二次分析。
-- [ ] AN4 MongoDB `$sample` 递归嵌套 Schema 漂移与索引体检
-  - `services/mongodb.rs` 新增基于 `$sample`（支持前置当前 `filter`，默认 1,000 / 上限 10,000，深 8 / 300 路径防爆炸截断）的递归嵌套路径分析（存在率区分缺失与 `null`、BSON 混合类型漂移占比、数组长度分位数）及 `$collStats` / `$indexStats` 僵尸索引体检（视图与低权限局部降级）；
-  - `MongoCollectionViewer` 接入「Schema 与索引分析」视图，点击异常类型一键生成 `{ "path": { "$type": "..." } }` 过滤条件，聚合管道结果接入 `ResultChartDialog` 一键出图。
+- [x] AN4 MongoDB `$sample` 递归嵌套 Schema 漂移与索引体检（Rust `services::mongodb::tests` 12 条全通含 12 层嵌套+动态键截断与类型漂移单测 + 前端 `mongoAnalytics`/`MongoSchemaAnalyticsDialog`/`catalog` 24 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `services/mongodb.rs`、`commands/mongodb_commands.rs` 与 `lib.rs` 新增 `mongodb_analyze_collection` 与纯内存 `analyze_bson_documents`（基于 `$sample`，支持前置当前 `filter`，默认 1,000 / 上限 10,000，硬限深度 8 / 路径 300 / 单数组抽样 20 防爆炸，精确区分缺失与显式 `null`、识别 BSON 混合类型漂移与数组长度分位数），并行拉取 `$collStats`/`$indexStats` 识别长期 0 命中候选僵尸索引并在视图或权限不足时局部降级；
+  - 落地 `src/utils/mongoAnalytics.ts` 与 `MongoSchemaAnalyticsDialog`，接入 `MongoCollectionViewer`「Schema / 索引」入口（点击异常类型或缺失标签一键生成 `{ "path": { $type / $exists } }` 回填筛选），同时为集合查询与聚合管道结果接入 `ResultChartDialog` 一键出图。
 
 ### 阶段 3（P2–P3）：Elasticsearch 原生聚合分析与 Neo4j 图拓扑体检
 
