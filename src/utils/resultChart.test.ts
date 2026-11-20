@@ -2,13 +2,22 @@ import { describe, expect, it } from 'vitest';
 import type { SerializedResultValue } from '../contracts/resultSet';
 import {
   MAX_CHART_POINTS,
+  MAX_SCATTER_POINTS,
+  buildChartAggregationSql,
   buildChartData,
+  buildHeatmapData,
+  buildScatterData,
+  buildStackedSegments,
+  chartDataToMarkdown,
   chartLabel,
   chartScale,
   chartValue,
+  detectNumericColumnIndexes,
   hasSeriesScaleMismatch,
+  heatmapIntensity,
   isChartRejection,
   labelStride,
+  stackedChartScale,
   suggestChartSpec
 } from './resultChart';
 
@@ -241,5 +250,86 @@ describe('labelStride', () => {
   it('放不下时按比例隔开', () => {
     expect(labelStride(100, 10)).toBe(10);
     expect(labelStride(95, 10)).toBe(10);
+  });
+});
+
+describe('DA3 extended chart types, aggregation SQL, and Markdown export', () => {
+  it('computes stacked segments and stacked scale separating positive and negative values', () => {
+    const data = {
+      categories: ['Q1', 'Q2'],
+      series: [
+        { name: 'a', points: [10, -5] },
+        { name: 'b', points: [25, 15] },
+        { name: 'c', points: [null, -10] }
+      ]
+    };
+    const segments = buildStackedSegments(data);
+    expect(segments.find((s) => s.categoryIndex === 0 && s.seriesName === 'b')).toMatchObject({
+      y0: 10,
+      y1: 35
+    });
+    expect(segments.find((s) => s.categoryIndex === 1 && s.seriesName === 'c')).toMatchObject({
+      y0: -5,
+      y1: -15
+    });
+
+    const scale = stackedChartScale(data);
+    expect(scale.max).toBeGreaterThanOrEqual(35);
+    expect(scale.min).toBeLessThanOrEqual(-15);
+  });
+
+  it('builds scatter data with explicit cap at MAX_SCATTER_POINTS and ignores nulls', () => {
+    const rows: Row[] = Array.from({ length: MAX_SCATTER_POINTS + 5 }, (_, i) => [
+      `p${i}`,
+      i,
+      i === 0 ? null : i * 2
+    ]);
+    const scatter = buildScatterData(['name', 'x', 'y'], rows, 1, 2, 0);
+    expect(scatter.points).toHaveLength(MAX_SCATTER_POINTS);
+    expect(scatter.truncatedByCap).toBe(true);
+    expect(scatter.xScale.min).toBeLessThanOrEqual(1);
+    expect(scatter.yScale.max).toBeGreaterThanOrEqual(MAX_SCATTER_POINTS * 2);
+  });
+
+  it('builds heatmap cross-matrix aggregating duplicate pairs and computes normalized intensity', () => {
+    const rows: Row[] = [
+      ['North', 'Mon', 10],
+      ['North', 'Mon', 5],
+      ['South', 'Tue', 30]
+    ];
+    const heatmap = buildHeatmapData(['region', 'day', 'val'], rows, 0, 1, 2);
+    expect(heatmap.xLabels).toEqual(['North', 'South']);
+    expect(heatmap.yLabels).toEqual(['Mon', 'Tue']);
+    expect(heatmap.cells).toHaveLength(2);
+    expect(heatmap.min).toBe(15);
+    expect(heatmap.max).toBe(30);
+    expect(heatmapIntensity(15, 15, 30)).toBeCloseTo(0.14);
+    expect(heatmapIntensity(30, 15, 30)).toBeCloseTo(0.92);
+  });
+
+  it('detects numeric columns and generates transparent DuckDB aggregation SQL', () => {
+    expect(detectNumericColumnIndexes(['a', 'b', 'c'], [['x', 1, '2.5']])).toEqual([1, 2]);
+    const sql = buildChartAggregationSql({
+      groupColumn: 'dept"name',
+      metricColumn: 'revenue',
+      fn: 'SUM',
+      topN: 20
+    });
+    expect(sql).toContain('GROUP BY "dept""name"');
+    expect(sql).toContain('SUM(CAST("revenue" AS DOUBLE)) AS "sum_revenue"');
+    expect(sql).toContain('LIMIT 20');
+  });
+
+  it('formats chart data as a clean Markdown table escaping pipes and newlines', () => {
+    const md = chartDataToMarkdown(
+      {
+        categories: ['a|b', 'c\nd'],
+        series: [{ name: 'val', points: [10, null] }]
+      },
+      'region'
+    );
+    expect(md).toBe(
+      '| region | val |\n| --- | --- |\n| a\\|b | 10 |\n| c d |  |'
+    );
   });
 });
