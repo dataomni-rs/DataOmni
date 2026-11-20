@@ -182,6 +182,8 @@ pub fn run() {
       analytics_load_result,
       analytics_load_json_docs,
       analytics_open_file,
+      analytics_attach_result,
+      analytics_attach_file,
       analytics_profile,
       analytics_query,
       analytics_export_parquet,

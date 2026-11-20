@@ -40,6 +40,15 @@ export interface AnalyticsSessionSummary {
   readonly columns: readonly AnalyticsColumnMeta[];
 }
 
+export interface AttachedTableSummary {
+  readonly tableName: string;
+  readonly fileKind?: LocalFileKind;
+  readonly rowCount: number;
+  readonly columnCount: number;
+  readonly truncated: boolean;
+  readonly columns: readonly AnalyticsColumnMeta[];
+}
+
 export interface AnalyticsQueryResult {
   readonly columns: readonly string[];
   readonly columnMetadata: readonly DriverQueryColumn[];

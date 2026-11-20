@@ -146,9 +146,9 @@
 - [x] AN1 关系库表级抽样画像与按列语义智能视图（`local_analytics::tests` 10 条全通 + 前端 `tableSampleQuery`/`analyticsProfile`/`DataProfileDialog`/`TableDataViewer`/`catalog`/`shortcuts` 85 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
   - 新增 `src/utils/tableSampleQuery.ts`（7 类关系方言无排序限流抽样 SQL，严禁 `ORDER BY RAND()`）与 `runCancellableSampleQuery`（接入既有 `cancel_query` 驱动级取消）；`TableDataViewer` 与 `DataProfileDialog` 支持「当前页 / 表抽样（1,000 / 5,000 / 20,000 行，继承当前过滤条件、明确标注样本口径）」切换；
   - 后端 `local_analytics.rs` 为 `DATE`/`TIMESTAMP` 列补充自适应粒度 `timeBins`（12 桶时间分布）；`DataProfileDialog` 按列语义分流：默认折叠唯一/高基数 ID 列无意义 Top-5、渲染时间列内联 SVG Sparkline、数值列提供负值/`> P95` 离群值一键下钻，支持原库方言 `WHERE` 复制与直接「回表筛选」。
-- [ ] AN2 DuckDB 工作台多表联动对账（结果集 × 本地文件 / 跨查询结果）
-  - `services/local_analytics.rs` 新增 `analytics_attach_result` / `analytics_attach_file`（本地文件经独立瞬态只读连接物化再 `Appender` 写入，用户 SQL 所在连接全程锁死 `enable_external_access=false` + `lock_configuration=true`，单会话上限 4 张表）；
-  - `LocalAnalyticsDialog` 支持附加本地 CSV/Parquet/JSON 或另一标签结果，CodeMirror 补全同步覆盖多表列名，内置 `LEFT JOIN` 与 `EXCEPT` 对账模板。
+- [x] AN2 DuckDB 工作台多表联动对账（结果集 × 本地文件 / 跨查询结果）（`local_analytics::tests` 11 条全通含 `attach_result_and_local_file_support_reconciliation_while_keeping_sandbox_locked` 沙盒逃逸反向门 + 前端 `analyticsQuery`/`LocalAnalyticsDialog`/`catalog` 27 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `services/local_analytics.rs`、`commands/analytics_commands.rs` 与 `lib.rs` 新增 `analytics_attach_result` / `analytics_attach_file`（本地文件经独立瞬态只读连接物化再 `Appender` 写入已锁沙盒，用户 SQL 连接全程不解锁，单会话上限 4 张表且严格校验合法表名）；
+  - `LocalAnalyticsDialog` 与 `src/utils/analyticsQuery.ts` 支持附加本地 CSV/Parquet/TSV/JSON 或当前工作区另一查询结果，CodeMirror 补全自动纳入所有附加表列名，并内置同名键推断的 `LEFT JOIN 对账` 与 `EXCEPT 找差异` 快捷模板。
 
 ### 阶段 2（P1）：Redis 与 MongoDB 引擎专属分析
 

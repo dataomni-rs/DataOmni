@@ -11,6 +11,7 @@ export const LOCAL_DATA_FILE_EXTENSIONS = [
 ] as const;
 
 export const ANALYTICS_QUERY_LIMIT_OPTIONS = [200, 1000, 10000] as const;
+export const MAX_ATTACHED_TABLES = 4;
 
 export function quoteDuckIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
@@ -109,6 +110,79 @@ export function buildDuplicateCheckTemplate(columns: readonly AnalyticsColumnMet
     `HAVING COUNT(*) > 1 OR ${ident} IS NULL`,
     'ORDER BY duplicate_count DESC',
     'LIMIT 100'
+  ].join('\n');
+}
+
+/** 生成下一个可用的附加对账表名（ref_1 .. ref_4） */
+export function nextAttachTableName(existing: readonly string[]): string {
+  const used = new Set(existing.map((name) => name.toLowerCase()));
+  for (let i = 1; i <= MAX_ATTACHED_TABLES + 1; i += 1) {
+    const candidate = `ref_${i}`;
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+  }
+  return `ref_${existing.length + 1}`;
+}
+
+function findJoinKeyPair(
+  primaryColumns: readonly AnalyticsColumnMeta[],
+  refColumns: readonly AnalyticsColumnMeta[]
+): [string, string] | null {
+  if (primaryColumns.length === 0 || refColumns.length === 0) {
+    return null;
+  }
+  const refByLower = new Map(refColumns.map((col) => [col.name.toLowerCase(), col.name]));
+  // 优先匹配同名列（常见如 id / user_id / order_id）
+  for (const col of primaryColumns) {
+    const matched = refByLower.get(col.name.toLowerCase());
+    if (matched) {
+      return [col.name, matched];
+    }
+  }
+  return [primaryColumns[0].name, refColumns[0].name];
+}
+
+/** 对账模板 1：LEFT JOIN 关联补全 */
+export function buildLeftJoinTemplate(
+  primaryColumns: readonly AnalyticsColumnMeta[],
+  refTableName: string,
+  refColumns: readonly AnalyticsColumnMeta[]
+): string {
+  const pair = findJoinKeyPair(primaryColumns, refColumns);
+  const refIdent = quoteDuckIdentifier(refTableName);
+  if (!pair) {
+    return `SELECT a.*, b.*\nFROM result_set a\nLEFT JOIN ${refIdent} b ON 1 = 0\nLIMIT 200`;
+  }
+  const [leftKey, rightKey] = pair;
+  return [
+    'SELECT a.*, b.*',
+    'FROM result_set a',
+    `LEFT JOIN ${refIdent} b`,
+    `  ON a.${quoteDuckIdentifier(leftKey)} = b.${quoteDuckIdentifier(rightKey)}`,
+    'LIMIT 200'
+  ].join('\n');
+}
+
+/** 对账模板 2：EXCEPT 差异排查（存在于主结果但不在参考表中的键） */
+export function buildExceptDiffTemplate(
+  primaryColumns: readonly AnalyticsColumnMeta[],
+  refTableName: string,
+  refColumns: readonly AnalyticsColumnMeta[]
+): string {
+  const pair = findJoinKeyPair(primaryColumns, refColumns);
+  const refIdent = quoteDuckIdentifier(refTableName);
+  if (!pair) {
+    return `SELECT * FROM result_set\nEXCEPT\nSELECT * FROM ${refIdent}\nLIMIT 200`;
+  }
+  const [leftKey, rightKey] = pair;
+  return [
+    `SELECT ${quoteDuckIdentifier(leftKey)}`,
+    'FROM result_set',
+    'EXCEPT',
+    `SELECT ${quoteDuckIdentifier(rightKey)}`,
+    `FROM ${refIdent}`,
+    'LIMIT 200'
   ].join('\n');
 }
 

@@ -1,6 +1,6 @@
 use crate::services::local_analytics::{
-  AnalyticsColumnInput, AnalyticsQueryResult, AnalyticsSessionSummary, LocalAnalyticsRegistry,
-  ParquetExportSummary, ProfileResult,
+  AnalyticsColumnInput, AnalyticsQueryResult, AnalyticsSessionSummary, AttachedTableSummary,
+  LocalAnalyticsRegistry, ParquetExportSummary, ProfileResult,
 };
 use crate::services::QueryError;
 use serde_json::Value as JsonValue;
@@ -33,6 +33,29 @@ pub async fn analytics_open_file(
   registry: State<'_, LocalAnalyticsRegistry>,
 ) -> Result<AnalyticsSessionSummary, QueryError> {
   registry.open_file(PathBuf::from(path)).await
+}
+
+/// 向既有分析沙盒会话附加一张内存结果表（用于跨查询 LEFT JOIN / EXCEPT 对账）
+#[tauri::command]
+pub async fn analytics_attach_result(
+  analytics_id: String,
+  table_name: String,
+  columns: Vec<AnalyticsColumnInput>,
+  rows: Vec<Vec<JsonValue>>,
+  registry: State<'_, LocalAnalyticsRegistry>,
+) -> Result<AttachedTableSummary, QueryError> {
+  registry.attach_result(&analytics_id, table_name, columns, rows).await
+}
+
+/// 通过瞬态只读连接物化本地数据文件并附加到既有沙盒会话（用户 SQL 会话全程不解锁外部访问）
+#[tauri::command]
+pub async fn analytics_attach_file(
+  analytics_id: String,
+  table_name: String,
+  path: String,
+  registry: State<'_, LocalAnalyticsRegistry>,
+) -> Result<AttachedTableSummary, QueryError> {
+  registry.attach_file(&analytics_id, table_name, PathBuf::from(path)).await
 }
 
 /// 计算指定分析会话的全列数据画像

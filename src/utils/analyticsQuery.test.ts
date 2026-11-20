@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { AnalyticsColumnMeta } from '../contracts/analytics';
 import {
   buildDuplicateCheckTemplate,
+  buildExceptDiffTemplate,
   buildGroupByTemplate,
+  buildLeftJoinTemplate,
   buildPivotTemplate,
   defaultParquetFileName,
-  localFileBasename
+  localFileBasename,
+  nextAttachTableName
 } from './analyticsQuery';
 
 const SAMPLE_COLUMNS: AnalyticsColumnMeta[] = [
@@ -40,5 +43,21 @@ describe('analyticsQuery', () => {
     expect(localFileBasename('C:\\Users\\hal\\data\\events.ndjson')).toBe('events.ndjson');
     expect(defaultParquetFileName('orders.csv')).toBe('orders.parquet');
     expect(defaultParquetFileName('sales report (2026)')).toBe('sales_report_2026.parquet');
+  });
+
+  it('allocates sequential ref table names and builds LEFT JOIN / EXCEPT reconciliation SQL using shared join keys', () => {
+    expect(nextAttachTableName([])).toBe('ref_1');
+    expect(nextAttachTableName(['ref_1', 'REF_2'])).toBe('ref_3');
+
+    const refCols: AnalyticsColumnMeta[] = [
+      { name: 'note', duckdbType: 'VARCHAR', inferredType: 'text', precisionDegraded: false },
+      { name: 'QUARTER', duckdbType: 'VARCHAR', inferredType: 'text', precisionDegraded: false }
+    ];
+    const joinSql = buildLeftJoinTemplate(SAMPLE_COLUMNS, 'ref_1', refCols);
+    expect(joinSql).toContain('LEFT JOIN "ref_1" b');
+    expect(joinSql).toContain('ON a."quarter" = b."QUARTER"');
+
+    const exceptSql = buildExceptDiffTemplate(SAMPLE_COLUMNS, 'ref_1', refCols);
+    expect(exceptSql).toContain('SELECT "quarter"\nFROM result_set\nEXCEPT\nSELECT "QUARTER"\nFROM "ref_1"');
   });
 });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import CodeMirror from '@uiw/react-codemirror';
 import type { Completion } from '@codemirror/autocomplete';
 import { EditorState } from '@codemirror/state';
@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Database,
   Download,
+  FilePlus2,
   FileSpreadsheet,
   Loader2,
   Play,
@@ -27,19 +28,26 @@ import type {
   AnalyticsColumnInput,
   AnalyticsQueryResult,
   AnalyticsSessionSummary,
+  AttachedTableSummary,
   ParquetExportSummary,
   ProfileResult
 } from '../contracts/analytics';
 import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
+import { useQueryStore } from '../stores/queryStore';
 import { useThemeStore } from '../stores/themeStore';
 import {
   ANALYTICS_QUERY_LIMIT_OPTIONS,
   buildDuplicateCheckTemplate,
+  buildExceptDiffTemplate,
   buildGroupByTemplate,
+  buildLeftJoinTemplate,
   buildPivotTemplate,
   defaultParquetFileName,
+  LOCAL_DATA_FILE_EXTENSIONS,
   localFileBasename,
+  MAX_ATTACHED_TABLES,
+  nextAttachTableName,
   quoteDuckIdentifier
 } from '../utils/analyticsQuery';
 import { filterAndSortProfiles, type ProfileSortMode } from '../utils/analyticsProfile';
@@ -116,8 +124,40 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
 
   const [exportingParquet, setExportingParquet] = useState(false);
   const [parquetNotice, setParquetNotice] = useState<string | null>(null);
+  const [attachedTables, setAttachedTables] = useState<
+    Array<AttachedTableSummary & { label: string }>
+  >([]);
+  const [attaching, setAttaching] = useState(false);
   const [showChart, setShowChart] = useState(false);
   const [showExport, setShowExport] = useState(false);
+
+  const queryDocuments = useQueryStore((state) => state.documents);
+  const attachableQueryResults = useMemo(() => {
+    const items: Array<{
+      id: string;
+      label: string;
+      columns: AnalyticsColumnInput[];
+      rows: SerializedResultValue[][];
+    }> = [];
+    for (const [docId, doc] of Object.entries(queryDocuments)) {
+      for (const stmt of doc.statements) {
+        if (stmt.result && stmt.result.columns.length > 0 && stmt.result.rows.length > 0) {
+          const preview = stmt.sql.replace(/\s+/g, ' ').trim().slice(0, 40);
+          items.push({
+            id: `${docId}:${stmt.id}`,
+            label: `${preview || stmt.id} (${stmt.result.rows.length})`,
+            columns: stmt.result.columns.map((name, idx) => ({
+              name,
+              logicalType: stmt.result?.column_metadata?.[idx]?.logical_type ?? null,
+              databaseType: stmt.result?.column_metadata?.[idx]?.database_type ?? null
+            })),
+            rows: stmt.result.rows
+          });
+        }
+      }
+    }
+    return items;
+  }, [queryDocuments]);
 
   const resolvedTheme = useThemeStore((state) => state.resolved);
   const sessionIdRef = useRef<string | null>(null);
@@ -129,35 +169,42 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     source.kind === 'localFile' ? localFileBasename(source.filePath) : source.title;
 
   const editorExtensions = useMemo(() => {
-    const columns: Completion[] = (summary?.columns ?? []).map((col, index) => {
-      const quoted = quoteDuckIdentifier(col.name);
-      const needsQuote = !/^[a-z_][a-z0-9_]*$/.test(col.name);
-      return {
-        label: col.name,
-        ...(needsQuote ? { apply: quoted } : {}),
-        type: 'property',
-        detail: col.duckdbType,
-        boost: Math.max(99 - index, -99)
-      };
-    });
-    const schema: SQLNamespace = {
+    const toCompletions = (cols: readonly { name: string; duckdbType: string }[]): Completion[] =>
+      cols.map((col, index) => {
+        const quoted = quoteDuckIdentifier(col.name);
+        const needsQuote = !/^[a-z_][a-z0-9_]*$/.test(col.name);
+        return {
+          label: col.name,
+          ...(needsQuote ? { apply: quoted } : {}),
+          type: 'property',
+          detail: col.duckdbType,
+          boost: Math.max(99 - index, -99)
+        };
+      });
+    const schema: Record<string, { self: Completion; children: Completion[] }> = {
       result_set: {
         self: { label: 'result_set', type: 'type', detail: 'DuckDB' },
-        children: columns
+        children: toCompletions(summary?.columns ?? [])
       }
     };
+    for (const attached of attachedTables) {
+      schema[attached.tableName] = {
+        self: { label: attached.tableName, type: 'type', detail: attached.label },
+        children: toCompletions(attached.columns)
+      };
+    }
     return [
       runShortcutKeymap(runShortcutsRef),
       sqlLanguage({
         dialect: PostgreSQL,
-        schema,
+        schema: schema as SQLNamespace,
         defaultTable: 'result_set',
         upperCaseKeywords: true
       }),
       EditorState.phrases.of(editorPhrases(t)),
       appEditorTheme
     ];
-  }, [summary?.columns, t]);
+  }, [attachedTables, summary?.columns, t]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -222,6 +269,7 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     setLoadingSession(true);
     setSessionError(null);
     setSummary(null);
+    setAttachedTables([]);
     setQueryResult(null);
     setProfile(null);
     setQueryError(null);
@@ -299,6 +347,84 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     setTab(nextTab);
     if (nextTab === 'profile' && !profile && !profileLoading && sessionIdRef.current) {
       void loadProfile();
+    }
+  };
+
+  const handleAttachFile = async () => {
+    const id = sessionIdRef.current;
+    if (!id || attaching || attachedTables.length >= MAX_ATTACHED_TABLES) {
+      return;
+    }
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          {
+            name: t('analytics.fileFilterName'),
+            extensions: [...LOCAL_DATA_FILE_EXTENSIONS]
+          }
+        ]
+      });
+      if (typeof selected !== 'string' || selected.trim().length === 0) {
+        return;
+      }
+      setAttaching(true);
+      setQueryError(null);
+      const tableName = nextAttachTableName(attachedTables.map((item) => item.tableName));
+      const attached = await invoke<AttachedTableSummary>('analytics_attach_file', {
+        analyticsId: id,
+        tableName,
+        path: selected
+      });
+      if (!mountedRef.current || sessionIdRef.current !== id) {
+        return;
+      }
+      setAttachedTables((current) => [
+        ...current,
+        { ...attached, label: localFileBasename(selected) }
+      ]);
+    } catch (err) {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setQueryError(describeError(err));
+      }
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setAttaching(false);
+      }
+    }
+  };
+
+  const handleAttachQueryResult = async (candidateId: string) => {
+    const id = sessionIdRef.current;
+    const candidate = attachableQueryResults.find((item) => item.id === candidateId);
+    if (!id || !candidate || attaching || attachedTables.length >= MAX_ATTACHED_TABLES) {
+      return;
+    }
+    setAttaching(true);
+    setQueryError(null);
+    try {
+      const tableName = nextAttachTableName(attachedTables.map((item) => item.tableName));
+      const attached = await invoke<AttachedTableSummary>('analytics_attach_result', {
+        analyticsId: id,
+        tableName,
+        columns: candidate.columns,
+        rows: candidate.rows
+      });
+      if (!mountedRef.current || sessionIdRef.current !== id) {
+        return;
+      }
+      setAttachedTables((current) => [
+        ...current,
+        { ...attached, label: candidate.label }
+      ]);
+    } catch (err) {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setQueryError(describeError(err));
+      }
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setAttaching(false);
+      }
     }
   };
 
@@ -543,8 +669,96 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                   >
                     {t('analytics.template.duplicates')}
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleAttachFile}
+                    disabled={attaching || attachedTables.length >= MAX_ATTACHED_TABLES}
+                    title={
+                      attachedTables.length >= MAX_ATTACHED_TABLES
+                        ? t('analytics.attachLimitReached', { count: MAX_ATTACHED_TABLES })
+                        : t('analytics.attachFileTitle')
+                    }
+                    className="flex items-center gap-1 rounded-control border border-line px-2 py-0.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg disabled:opacity-50"
+                  >
+                    <FilePlus2 size={12} />
+                    <span>{attaching ? t('analytics.attaching') : t('analytics.attachFile')}</span>
+                  </button>
+                  {attachableQueryResults.length > 0 && attachedTables.length < MAX_ATTACHED_TABLES && (
+                    <select
+                      aria-label={t('analytics.attachResult')}
+                      value=""
+                      disabled={attaching}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (value) {
+                          void handleAttachQueryResult(value);
+                        }
+                      }}
+                      className="max-w-[180px] rounded-control border border-line bg-surface px-2 py-0.5 text-xs text-fg-muted hover:text-fg"
+                    >
+                      <option value="">{t('analytics.attachResultPlaceholder')}</option>
+                      {attachableQueryResults.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {attachedTables.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const latest = attachedTables[attachedTables.length - 1];
+                          if (latest) {
+                            handleApplyTemplate(
+                              buildLeftJoinTemplate(summary.columns, latest.tableName, latest.columns)
+                            );
+                          }
+                        }}
+                        className="rounded-control border border-accent/40 bg-accent-soft px-2 py-0.5 text-xs text-accent hover:opacity-90"
+                      >
+                        {t('analytics.template.leftJoin')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const latest = attachedTables[attachedTables.length - 1];
+                          if (latest) {
+                            handleApplyTemplate(
+                              buildExceptDiffTemplate(summary.columns, latest.tableName, latest.columns)
+                            );
+                          }
+                        }}
+                        className="rounded-control border border-accent/40 bg-accent-soft px-2 py-0.5 text-xs text-accent hover:opacity-90"
+                      >
+                        {t('analytics.template.exceptDiff')}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
+
+              {/* Attached reconciliation tables */}
+              {attachedTables.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {attachedTables.map((table) => (
+                    <button
+                      key={table.tableName}
+                      type="button"
+                      onClick={() => handleInsertColumn(table.tableName)}
+                      title={table.columns.map((c) => `${c.name}: ${c.duckdbType}`).join(', ')}
+                      className="rounded border border-accent/30 bg-accent-soft px-2 py-0.5 font-mono text-[11px] text-accent hover:opacity-90"
+                    >
+                      {t('analytics.attachedMeta', {
+                        table: table.tableName,
+                        count: table.rowCount,
+                        label: table.label
+                      })}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {/* Column chips */}
               {summary.columns.length > 0 && (
