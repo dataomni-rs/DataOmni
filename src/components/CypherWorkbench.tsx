@@ -7,7 +7,7 @@ import { cypher } from '@codemirror/legacy-modes/mode/cypher';
 import { oneDark } from '@codemirror/theme-one-dark';
 import type { EditorView } from '@codemirror/view';
 import { clsx } from 'clsx';
-import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Play, Plus, X } from 'lucide-react';
+import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Network, Play, Plus, X } from 'lucide-react';
 import type { ConnectionProfile } from '../contracts/connection';
 import { selectActiveSqlDocument, useQueryStore } from '../stores/queryStore';
 import { useLanguageStore } from '../stores/languageStore';
@@ -35,6 +35,7 @@ import { formatCypherValue, type CypherNodeValue, type CypherValue } from '../ut
 import { hasGraphValues } from '../utils/cypherGraph';
 import { CypherGraphView } from './CypherGraphView';
 import { CypherEntityEditor } from './CypherEntityEditor';
+import { Neo4jTopologyAnalyticsDialog } from './Neo4jTopologyAnalyticsDialog';
 import { PlanTree } from './PlanTree';
 import { formatPlanRows, worstEstimate, type QueryPlan } from '../utils/planInsights';
 import {
@@ -137,6 +138,7 @@ export function CypherWorkbench({ connection }: CypherWorkbenchProps) {
   const [pending, setPending] = useState<{ statements: string[]; text: string; risk: StatementRisk } | null>(null);
   const [inspecting, setInspecting] = useState<Inspected | null>(null);
   const [creating, setCreating] = useState(false);
+  const [showTopologyAnalytics, setShowTopologyAnalytics] = useState(false);
   // 建关系：先在节点上点「从这个节点建关系」（`linkFrom`），再在结果里点终点，两头齐了打开编辑框
   const [linkFrom, setLinkFrom] = useState<{ node: CypherNodeValue; database: string | null } | null>(null);
   const [linking, setLinking] = useState<{ ends: RelationshipEnds; database: string | null } | null>(null);
@@ -513,6 +515,16 @@ export function CypherWorkbench({ connection }: CypherWorkbenchProps) {
           </label>
           <button
             type="button"
+            onClick={() => setShowTopologyAnalytics(true)}
+            disabled={!connectionString}
+            title={t('cypher.analytics.buttonTitle')}
+            className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg hover:bg-surface-hover disabled:opacity-50"
+          >
+            <Network size={14} />
+            <span>{t('cypher.analytics.button')}</span>
+          </button>
+          <button
+            type="button"
             onClick={() => {
               setInspecting(null);
               setLinkFrom(null);
@@ -719,6 +731,18 @@ export function CypherWorkbench({ connection }: CypherWorkbenchProps) {
             void execute(statements);
           }}
           onCancel={() => setPending(null)}
+        />
+      )}
+
+      {showTopologyAnalytics && connectionString && (
+        <Neo4jTopologyAnalyticsDialog
+          connectionString={connectionString}
+          timeoutMs={queryTimeoutMs}
+          onRunCypher={(statement) => {
+            setSqlInput(statement);
+            void run([statement]);
+          }}
+          onClose={() => setShowTopologyAnalytics(false)}
         />
       )}
     </div>

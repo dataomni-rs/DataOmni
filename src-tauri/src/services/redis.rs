@@ -962,7 +962,7 @@ async fn inspect_sampled_keys(
   .map_err(describe_error)?;
 
   let mut base: Vec<(Vec<u8>, String, i64, Option<u64>)> = Vec::with_capacity(keys.len());
-  for (key, reply_vec) in keys.into_iter().zip(pass1.into_iter()) {
+  for (key, reply_vec) in keys.into_iter().zip(pass1) {
     let kind = match reply_vec.first() {
       Some(Value::SimpleString(kind)) => kind.clone(),
       Some(Value::BulkString(kind)) => String::from_utf8_lossy(kind).into_owned(),

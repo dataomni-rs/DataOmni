@@ -26,7 +26,7 @@
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已合入 `main`（PR `#59`–`#63`），`v1.3.0` 标签已推送触发发版（`V1` 跨平台实机验收继续跟踪） |
-| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [-] `AN0` 边界与安全门实验已完成，按 `AN1 → AN6` 持续推进 |
+| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6` 全部实现并通过验收（见下方明细，在 `feat/multi-engine-analytics` 分支待合入） |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -164,9 +164,9 @@
 - [x] AN5 Elasticsearch 原生 `aggs` 下推探索与 Mapping / 分片健康诊断（前端 `esAnalytics`/`EsIndexAnalyticsDialog`/`EsConsole`/`catalog` 26 条全绿含 `_cat/indices` `403` 降级与 Mapping 1,000+ 字段膨胀门 + `tsc`/`eslint` 通过）
   - 复用既有 `elasticsearch_run`（零冗余后端代理），落地纯函数 `src/utils/esAnalytics.ts` 与 `EsIndexAnalyticsDialog`，接入 `EsIndexStructureView`「原生聚合分析」入口；
   - 读权限路径自动汇总 `_mapping` 叶子字段数（≥ 800 / 1,000 膨胀预警）、`text + .keyword` 双存计数与 `date`/`keyword`/数值字段清单，下推 `size: 0` 的 `date_histogram` / `terms + missing` / `extended_stats + percentiles` 并直连 `ResultChartDialog` 原生 SVG 出图；监控权限路径独立查 `_cat/indices` 与 `_cat/shards` 检查软删除率及过大/过碎/未分配分片，遇 `403` 局部折叠不阻塞只读聚合。
-- [ ] AN6 Neo4j 图谱拓扑与超级节点（Supernode）体检
-  - `services/neo4j.rs` 分层执行只读 Cypher：O(1) count store 统计各 Label 节点数与 Relationship Type 边数 + 按需受限采样（`LIMIT` 与超时保护）计算节点度分位数、孤立节点率、Top 20 超级节点及属性覆盖率；
-  - `CypherWorkbench` 接入「图谱体检」面板，点击高风险 Label / 超级节点一键生成只读 Cypher 或在 `CypherGraphView` 展开局部邻域。
+- [x] AN6 Neo4j 图谱拓扑与超级节点（Supernode）体检（前端 `neo4jAnalytics`/`Neo4jTopologyAnalyticsDialog`/`CypherWorkbench`/`catalog` 31 条全绿含只读 Cypher 门禁 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `commands/neo4j_commands.rs` `neo4j_run` 开放可选 `read_only` 协议级只读事务标志；落地 `src/utils/neo4jAnalytics.ts` 与 `Neo4jTopologyAnalyticsDialog`，接入 `CypherWorkbench`「图谱体检」入口；
+  - 分层执行：第一层经 O(1) count store 统计各 Label 节点数与 Relationship Type 边数并直连 `ResultChartDialog` 出图；第二层按需受限采样（500 / 1,000 / 5,000 节点，兼容 Neo4j 5 `COUNT { (n)--() }` 与 Neo4j 4 `size()` 回退）统计度分位数（P50 / P95 / Max）、孤立节点占比、Top 20 超级节点与稀疏属性覆盖率，点击超级节点一键载入并执行只读邻域 Cypher 在图视图展开。
 
 ---
 
