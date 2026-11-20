@@ -474,6 +474,8 @@ export const en: Translations = {
   'analytics.emptyResult': 'Query returned no rows.',
   'analytics.applyFilterSql': 'Filter by value',
   'analytics.applyNullSql': 'Filter IS NULL',
+  'analytics.applyGroupBySql': 'Group by this column',
+  'analytics.clickValueToFilter': 'Click to filter',
   'analytics.fileFilterName': 'Data files (Parquet / CSV / TSV / JSON)',
   'analytics.parquetFilterName': 'Parquet file',
 
@@ -508,6 +510,12 @@ export const en: Translations = {
   'profile.histogram': 'Histogram',
   'profile.copyFilterSql': 'Copy filter SQL',
   'profile.copyNullSql': 'Copy IS NULL SQL',
+  'profile.copyGroupBySql': 'Copy GROUP BY SQL',
+  'profile.clickValueToCopy': 'Click to copy SQL',
+  'profile.groupByAction': 'Group',
+  'profile.hint.allNull': 'All NULL',
+  'profile.hint.constant': 'Constant',
+  'profile.hint.uniqueKey': 'Unique',
   'profile.copiedSql': 'SQL copied',
 
   'chart.title': 'Quick chart',

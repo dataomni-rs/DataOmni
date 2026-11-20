@@ -3,6 +3,26 @@ import type { MongoDocumentRow } from './mongoDocuments';
 
 export type ProfileSortMode = 'order' | 'nulls' | 'distinct' | 'drift';
 export type NullSeverity = 'normal' | 'warn' | 'high';
+export type ColumnCardinalityHint = 'all-null' | 'constant' | 'unique-key';
+
+/** 识别列的直觉特征：全空 / 常量列 / 唯一键候选（单行样本不做常量/唯一判断） */
+export function columnCardinalityHint(profile: ColumnProfile): ColumnCardinalityHint | null {
+  if (profile.totalCount <= 0) {
+    return null;
+  }
+  if (profile.nullCount >= profile.totalCount) {
+    return 'all-null';
+  }
+  if (profile.totalCount >= 2 && profile.nullCount === 0) {
+    if (profile.distinctCount === 1) {
+      return 'constant';
+    }
+    if (profile.distinctCount === profile.totalCount) {
+      return 'unique-key';
+    }
+  }
+  return null;
+}
 
 /** 空值率告警分级：<5% 正常，5%–30% 提示，>=30% 高空值 */
 export function nullSeverity(nullRatio: number): NullSeverity {
@@ -124,6 +144,19 @@ export function buildProfileFilterSql(
 /** 生成点击空值告警时的一键查空值 SQL */
 export function buildProfileNullFilterSql(columnName: string): string {
   return `SELECT * FROM result_set WHERE ${quoteDuckIdent(columnName)} IS NULL`;
+}
+
+/** 生成按指定列分组统计频次的 SQL（面向内存表 `result_set`） */
+export function buildProfileGroupBySql(columnName: string): string {
+  const col = quoteDuckIdent(columnName);
+  return [
+    `SELECT ${col},`,
+    '  COUNT(*) AS row_count',
+    'FROM result_set',
+    `GROUP BY ${col}`,
+    'ORDER BY row_count DESC',
+    'LIMIT 50'
+  ].join('\n');
 }
 
 /**

@@ -491,6 +491,8 @@ export const zh = {
   'analytics.emptyResult': '查询未返回任何行。',
   'analytics.applyFilterSql': '按此值过滤',
   'analytics.applyNullSql': '查空值',
+  'analytics.applyGroupBySql': '按此列分组统计',
+  'analytics.clickValueToFilter': '点击筛选',
   'analytics.fileFilterName': '数据文件 (Parquet / CSV / TSV / JSON)',
   'analytics.parquetFilterName': 'Parquet 文件',
 
@@ -525,6 +527,12 @@ export const zh = {
   'profile.histogram': '分布直方图',
   'profile.copyFilterSql': '复制过滤 SQL',
   'profile.copyNullSql': '复制查空值 SQL',
+  'profile.copyGroupBySql': '复制按此列分组 SQL',
+  'profile.clickValueToCopy': '点击复制 SQL',
+  'profile.groupByAction': '分组',
+  'profile.hint.allNull': '全空列',
+  'profile.hint.constant': '常量列',
+  'profile.hint.uniqueKey': '唯一键',
   'profile.copiedSql': '已复制 SQL',
 
   'chart.title': '快速图表',
