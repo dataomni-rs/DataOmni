@@ -294,6 +294,10 @@ pub fn render_page(
     html,
     "  <link rel=\"alternate\" type=\"text/plain\" href=\"/llms.txt\" title=\"DataOmni LLM Documentation\">"
   )?;
+  writeln!(
+    html,
+    "  <link rel=\"alternate\" type=\"text/markdown\" href=\"/SKILL.md\" title=\"DataOmni CLI Agent Skill (SKILL.md)\">"
+  )?;
   writeln!(html, "  <meta property=\"og:type\" content=\"website\">")?;
   writeln!(html, "  <meta property=\"og:site_name\" content=\"DataOmni\">")?;
   writeln!(html, "  <meta property=\"og:locale\" content=\"{}\">", copy.locale.og_locale())?;
@@ -1286,6 +1290,10 @@ pub fn render_doc_page(
     html,
     "  <link rel=\"alternate\" type=\"text/plain\" href=\"/llms.txt\" title=\"DataOmni LLM Documentation\">"
   )?;
+  writeln!(
+    html,
+    "  <link rel=\"alternate\" type=\"text/markdown\" href=\"/SKILL.md\" title=\"DataOmni CLI Agent Skill (SKILL.md)\">"
+  )?;
   writeln!(html, "  <meta property=\"og:type\" content=\"article\">")?;
   writeln!(html, "  <meta property=\"og:site_name\" content=\"DataOmni\">")?;
   writeln!(html, "  <meta property=\"og:locale\" content=\"{}\">", page.locale.og_locale())?;
@@ -1950,6 +1958,10 @@ pub fn render_llms_txt(version: &str, released_at: &str) -> Result<String, std::
   writeln!(
     md,
     "- [Full LLM Reference (Single-File Markdown)]({SITE_ORIGIN}/llms-full.txt): Complete documentation, compatibility matrix, MCP tools, CLI exit codes, and security invariants."
+  )?;
+  writeln!(
+    md,
+    "- [CLI Agent Skill (SKILL.md)]({SITE_ORIGIN}/SKILL.md): Drop-in SKILL.md for Claude Code, Codex, Cursor, and terminal agents covering all read-only dataomni CLI commands, display flags, and exit codes."
   )?;
   writeln!(md)?;
   writeln!(md, "## Direct Release Packages (`v{version}`)")?;

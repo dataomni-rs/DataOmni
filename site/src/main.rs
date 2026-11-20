@@ -255,6 +255,7 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     "href=\"/favicon.ico",
     "href=\"/llms.txt",
     "href=\"/llms-full.txt",
+    "href=\"/SKILL.md",
     "href=\"/assets/",
     "href=\"/images/",
   ] {
@@ -309,6 +310,7 @@ pub fn verify_html_invariants(page_name: &str, html: &str, out_dir: &Path) -> Re
     if !raw_href.starts_with("/favicon.ico")
       && !raw_href.starts_with("/llms.txt")
       && !raw_href.starts_with("/llms-full.txt")
+      && !raw_href.starts_with("/SKILL.md")
       && !raw_href.starts_with("/assets/")
       && !raw_href.starts_with("/images/")
     {
@@ -422,6 +424,7 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
   write_checked(&out_dir.join("sitemap.xml"), &render_sitemap_xml(&released_at))?;
   write_checked(&out_dir.join("llms.txt"), &llms_txt)?;
   write_checked(&out_dir.join("llms-full.txt"), &llms_full_txt)?;
+  copy_checked(&repo_root.join("src-tauri/src/cli/guide.md"), &out_dir.join("SKILL.md"))?;
   write_checked(&out_dir.join(format!("{INDEXNOW_KEY}.txt")), INDEXNOW_KEY)?;
 
   verify_html_invariants("index.html", &en_html, out_dir)?;
@@ -531,6 +534,9 @@ mod tests {
     assert!(temp_dir.join("sitemap.xml").is_file());
     assert!(temp_dir.join("llms.txt").is_file());
     assert!(temp_dir.join("llms-full.txt").is_file());
+    assert!(temp_dir.join("SKILL.md").is_file());
+    let skill_md = fs::read_to_string(temp_dir.join("SKILL.md")).unwrap();
+    assert!(skill_md.starts_with("---\nname: dataomni\ndescription: \""));
     assert!(temp_dir.join(format!("{INDEXNOW_KEY}.txt")).is_file());
     assert!(temp_dir.join("docs/index.html").is_file());
     assert!(temp_dir.join("zh/docs/index.html").is_file());
@@ -559,6 +565,7 @@ mod tests {
     assert!(!sitemap.contains("<lastmod>2026-11-17</lastmod>"));
     assert!(llms.contains(&format!("`v{version}` ({released_at})")));
     assert!(llms.contains("https://dataomni.dev/llms-full.txt"));
+    assert!(llms.contains("https://dataomni.dev/SKILL.md"));
     assert!(llms_full.contains("# Read-only MCP server (`https://dataomni.dev/docs/mcp/`)"));
     assert!(llms_full.contains("brew install --cask dataomni-rs/tap/dataomni"));
     assert!(

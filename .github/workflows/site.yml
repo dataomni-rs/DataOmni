@@ -8,6 +8,7 @@ on:
       - "site/**"
       - "images/**"
       - "src-tauri/icons/**"
+      - "src-tauri/src/cli/guide.md"
       - ".github/workflows/site.yml"
   workflow_dispatch:
 
