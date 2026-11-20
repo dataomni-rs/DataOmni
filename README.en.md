@@ -21,9 +21,9 @@ available in English and Chinese (the language switch is at the bottom of the si
   refused port, a port that accepts and drops the connection, or credentials.
 - **Credentials stay in the system keychain** (macOS Keychain, Windows Credential Manager, Linux
   Secret Service). The configuration file only stores references.
-- **Read-only access for AI agents.** `dataomni cli` and `dataomni mcp` let Claude Code, Claude
-  Desktop, Cursor, Codex and similar agents query the non-production connections you explicitly
-  opened, read-only, without ever seeing a password.
+- **Read-only access for AI agents.** The standalone `dataomni` CLI and `dataomni mcp` server let
+  Claude Code, Claude Desktop, Cursor, Codex and similar agents query the non-production connections
+  you explicitly opened, read-only, without launching the GUI or ever seeing a password.
 
 ## Compatibility
 
@@ -105,7 +105,14 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 - Query templates: save reusable SQL snippets (reusing `:name` bind parameters and an optional dialect
   filter) from the editor toolbar or command palette (`⌘K`), then insert them with Undo history preserved
   or insert and run immediately.
-- Quick bar and line charts of the current result.
+- Built-in sandboxed DuckDB analytics: profile columns (inferred type, null ratio, cardinality,
+  quantiles, top-5 values) across SQL results, table views, MongoDB collections and Elasticsearch hits,
+  run secondary SQL / `PIVOT` queries, export Apache Parquet, and explore local `.parquet` / `.csv` /
+  `.tsv` / `.json` / `.ndjson` files ad-hoc without creating a connection (`enable_external_access = false`
+  + `lock_configuration = true`, capped at 100k rows / 512 MB).
+- Native SVG charts: bar, stacked-bar, line, area, scatter and 24×24 heatmap charts with SVG and 2× PNG
+  export. Never adds a dual Y-axis; beyond 200 rows, offers explicit in-memory DuckDB aggregation
+  (`SUM`/`AVG`/`COUNT`/`MAX`/`MIN` + Top N) instead of silent sampling.
 
 ![Queued edits previewed as SQL](images/en/table-edit.png)
 
@@ -143,33 +150,52 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 
 ### AI (optional, off by default)
 
-- Design new tables from a one-line description: the model returns a multi-table design, which is
-  validated, drawn as an ER diagram, previewed as `CREATE TABLE` statements and only then executed.
-  The model never writes SQL that gets executed; DataOmni generates the statements itself.
+- **Zero table rows ever leave the machine**, every outgoing prompt is inspectable before/during
+  sending, and DataOmni never executes AI-generated SQL automatically.
+- **Table design**: describe what you need in one line → validated multi-table design, ER diagram,
+  editable foreign-key `ON DELETE` rules, and previewed `CREATE TABLE` SQL generated deterministically
+  by DataOmni.
+- **SQL editor assist**: natural-language SQL generation and selection rewrite (incorporating local
+  connection business semantics), one-click error diagnosis and fix, and EXPLAIN plan bottleneck /
+  candidate index interpretation.
+- **ER semantics drafting**: batch-draft table and column business descriptions in the ER view, edit
+  and save them into local `semantics/<id>.md` to enrich human-readable data dictionaries, editor AI,
+  and external CLI / MCP agents.
 - Two interface types cover most providers: Anthropic and OpenAI-compatible (DeepSeek, Qwen, Zhipu,
-  Kimi, a local Ollama, and others). Only the request, existing table names and the current design
-  are sent, never data. API keys are stored in the system keychain.
+  Kimi, local Ollama, and others), with multiple presets, connection testing, mid-flight cancellation,
+  keyless local endpoints (auto-bypassing system proxy), and a "local models only for `STAGING`/`PROD`"
+  guardrail. API keys stay in the system keychain.
 - Builds without AI: `bun tauri build -- --no-default-features` leaves the code that talks to model
   services out of the binary.
 
 ### Command line and agents
 
-`dataomni cli` gives terminals and AI agents read-only access to the connections you configured in
-the app. Passwords are never handed to the caller.
+The standalone `dataomni` CLI (with backward-compatible alias `dataomni cli <command>`) gives
+terminals and AI agents read-only access to the connections you configured in the app, headless,
+without ever handing over a password.
 
 - Access is opt-in per connection (connection form → "Command line & agent access": off or
   read-only; off by default). Production connections are never visible, and no command-line flag changes that.
-- Relational databases: `query`, `explain`, `schema`, `ddl`, `dictionary`, `export`, `backup` and
-  `test`. Only a single read statement is accepted, and it runs inside the database's own read-only
-  transaction, ending in a rollback.
+- Relational databases: `query` (with `:name` bind parameters via `--param` / `--param-null` /
+  `--params-json`), `explain` (never `ANALYZE`), `schema`, `ddl`, `diff` (read-only cross-connection
+  schema diff in JSON or Markdown), `dictionary` (automatically enriched with local business semantics
+  from `semantics/<id>.md`), `profile` (built-in DuckDB column profiling, plus `--file` on CLI),
+  `export` (CSV / JSON / Parquet), `backup` and `test`. Only a single read statement is accepted, and
+  it runs inside the database's own read-only transaction, ending in a rollback.
 - MongoDB, Redis, Neo4j and Elasticsearch each have read-only commands. For example, Redis only runs
   commands the server itself flags as `readonly`.
-- Output is JSON, and exit codes distinguish database errors, bad arguments, refusals and
-  connection failures. `dataomni cli guide` prints instructions written for agents; save it as
-  `SKILL.md` to use it as a Claude Code skill.
+- Interactive terminals get pretty-printed, syntax-highlighted JSON and Markdown automatically, while
+  piped output stays compact plain JSON (`--pretty`, `--compact`/`-c`, `--color`, `--no-color`,
+  `NO_COLOR`). Exit codes distinguish database errors, bad arguments, refusals and connection failures.
+  `dataomni guide` (identical to the hosted [`https://dataomni.dev/SKILL.md`](https://dataomni.dev/SKILL.md))
+  prints an agent skill ready to save as `SKILL.md`.
+- Settings → Command line & Agent provides one-click Claude Code / Claude Desktop / Cursor setup
+  snippets, `SKILL.md` export, and a read-only viewer for the `dataomni-cli.log` audit trail (which
+  records leading keyword, length and SHA-256 only—never raw SQL or bind values).
 - Agents that cannot run a shell (Claude Desktop and the like) can use `dataomni mcp`, the same
-  read-only commands served as an MCP server over stdio, behind the same access rules. `export`,
-  `backup` and `csv-preview` are left out because they read or write local files. Example:
+  read-only commands served as an MCP server over stdio with persistent SSH tunnel reuse, behind the
+  same access rules. Local file tools (`export`, `backup`, `csv-preview`, `profile --file`) are
+  excluded from MCP. Example:
   `claude mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp`.
 
 The real boundary is still a read-only database account: the app blocks writes, but not

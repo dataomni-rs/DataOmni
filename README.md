@@ -298,11 +298,12 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   有外键的表之间按具体字段连线；可搜索表名与列名、缩放平移、自由拖动卡片、
   导出为 SVG / PNG / PDF，或导出成数据字典（Markdown）与 Agent Skill（`SKILL.md`）；执行 DDL 后自动刷新
 
-- AI 设计新表（可选，默认关）：一句话需求 → 模型给出多表设计 → 校验结果、ER 图、
-  每条外键「删除被引用的行时」怎么办（级联删除标红，一格可改）→ 预览建表语句 → 执行。
-  接口只有两种：Anthropic 与 OpenAI 兼容（DeepSeek、通义千问、智谱、Kimi、本地 Ollama 都走后者）；
-  只发需求、已有表名与当前设计，不发数据；发了什么可以展开看；Key 存系统钥匙串。
-  不要 AI 的构建用 `--no-default-features`，那样二进制里没有发往模型服务的代码
+- AI 辅助（可选，默认关；零数据行外发，发包原文全程可展开查看，绝不自动执行 SQL）：
+  - **AI 设计新表**：一句话需求 → 模型给出多表设计 → 校验结果、ER 图、每条外键「删除被引用的行时」怎么办（级联删除标红，一格可改）→ 预览建表语句 → 执行
+  - **SQL 编辑器三把「手术刀」**：自然语言生成 / 选中 SQL 改写（自动融合连接级业务语义备注）、报错面板一键诊断修复、EXPLAIN 执行计划瓶颈与候选索引解读
+  - **数据字典语义草拟**：在 ER 图按批草拟表/字段业务说明，人工审阅后写入本地 `semantics/<id>.md`，反哺数据字典、编辑器 AI 与 CLI / MCP
+  - 接口只有两种：Anthropic 与 OpenAI 兼容（DeepSeek、通义千问、智谱、Kimi、本地 Ollama 等）；支持多预设、连接测试、中途取消、本地无 Key 端点直连及「`STAGING`/`PROD` 仅允许本地模型」路由守卫；API Key 存系统钥匙串
+  - 不要 AI 的构建用 `--no-default-features`，那样二进制里没有发往模型服务的代码
 
 - 表结构编辑：结构页上直接改列名、类型、可空、默认值，加列删列改表名；
   对象树里新建表（填列与主键）。**一律先出预览 SQL 再执行**——预览里分开列出
@@ -341,9 +342,8 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   过滤与搜索是两件事：搜索压暗保住图的形状，过滤直接把表拿掉并重排——
   两百张表的库里，把不相干的压暗仍然什么都看不清
 
-- 快速图表：把当前这份结果（排过序、按可见列）画成柱状图或折线图，看一眼形状。
-  默认只画第一列数值——把量级差很远的两列放到同一根纵轴上，小的那条等于不存在；
-  勾成那样时会明确提示，但绝不开第二根纵轴。超过 200 个点不画，也不悄悄采样
+- 内置 DuckDB 本地分析与数据画像：把任意查询结果、表浏览页、MongoDB 集合或 Elasticsearch 命中结果装入受控内存 DuckDB 沙盒（`enable_external_access = false` + `lock_configuration = true`，上限 10 万行 / 512 MB），一键查看列级分布画像（类型、空值率、基数、分位数、Top 5），并直接执行二次 SQL / `PIVOT` 透视与 Apache Parquet 导出；侧边栏另支持免连接打开本地 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件即席探索（见 `rfcs/duckdb-analytics.md`）
+- 原生 SVG 图表：把当前结果画成柱状图、堆叠柱状图、折线图、面积图、散点图或 24×24 交叉热力图，支持导出带主题底色的 SVG 与 2× PNG。默认只画第一列数值，绝不开第二根纵轴；超过 200 行时不悄悄采样，可在弹窗内显式切入内存 DuckDB 聚合（`SUM`/`AVG`/`COUNT`/`MAX`/`MIN` + Top N）后再绘制
 
 > 尚未实现：筛选的 OR / IN。
 
@@ -384,20 +384,18 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 
 ### 🤖 命令行与 Agent
 
-`dataomni cli` 让终端和 AI Agent（Claude Code 之类）只读地用你在应用里配好的连接，口令不交给调用方：
+`dataomni` 独立无头命令行（兼容旧前缀 `dataomni cli <command>`）让终端和 AI Agent（Claude Code、Codex、Cursor 之类）只读地用你在应用里配好的连接，无需先启动桌面界面，口令绝不交给调用方：
 
 - 哪个连接能用由你在连接设置里定（「命令行与 Agent 访问」：关 / 只读，默认关）；生产连接一律看不见，
   命令行上没有任何参数能放宽。只改 `connections.json` 开不了门：开放凭证绑在连接自己的口令上
-- 关系库（PostgreSQL 系、MySQL 系、SQLite、DuckDB、ClickHouse、Oracle）：`query`、`explain`（不带 ANALYZE）、
-  `schema`、`ddl`、整库的数据字典 `dictionary`、`export`（CSV / JSON）、`backup`、`test`（连不上时带诊断）。
+- 关系库（PostgreSQL 系、MySQL 系、SQLite、DuckDB、ClickHouse、Oracle）：`query`（支持 `--param` / `--param-null` / `--params-json` 绑定 `:name` 参数）、`explain`（不带 ANALYZE）、
+  `schema`、`ddl`、`diff`（跨连接只读结构比对，支持 JSON / Markdown，不执行 DDL）、整库数据字典 `dictionary`（自动附入本地连接级业务语义备注 `semantics/<id>.md`）、`profile`（内置 DuckDB 列画像，CLI 另支持 `--file` 画像本地文件）、`export`（CSV / JSON / Parquet）、`backup`、`test`（连不上时带诊断）。
   只放行一条读语句，并在数据库自己的只读事务 / 只读打开里执行、以回滚结束
 - MongoDB、Redis、Neo4j、Elasticsearch 各有只读的命令：Redis 只跑服务器标了 `readonly` 的命令，
   Neo4j 只跑服务器判为读的查询并在读模式事务里执行，ES 按方法加路径的白名单
-- 输出是 JSON，退出码区分「数据库报错 / 参数错 / 被拒 / 连不上」；`dataomni cli guide` 打印一份
-  给 Agent 读的说明，存成 `SKILL.md` 就能当 Claude Code 的 Skill 用
-- 每次调用留痕（`dataomni-cli.log`），记语句的摘要，不记原文
-- 不能跑 shell 的 Agent（Claude Desktop 之类）用 `dataomni mcp`：同一套只读命令包成 stdio 上的 MCP 服务，
-  工具与命令一一对应，走同一道门；不给 `export`、`backup`、`csv-preview`（会读写本机文件）。
+- 交互终端下 JSON 与 Markdown 自动格式化并着色高亮，管道重定向或指定 `-c` / `--compact` 时回退为紧凑纯 JSON（支持 `--pretty`、`--color`、`--no-color` 与 `NO_COLOR`）；退出码区分「数据库报错 / 参数错 / 被拒 / 连不上」；`dataomni guide`（与官网托管的 [`https://dataomni.dev/SKILL.md`](https://dataomni.dev/SKILL.md) 同源）打印一份给 Agent 读的 Skill 指南
+- 每次调用留痕（`dataomni-cli.log`），记语句的首关键字、长度与 SHA-256，不记 SQL 原文与参数值；设置页「命令行与 Agent」内置 Claude Code / Claude Desktop / Cursor 一键接入配置、`SKILL.md` 导出与不可篡改的只读审计日志查看器
+- 不能跑 shell 的 Agent（Claude Desktop 之类）用 `dataomni mcp`：同一套只读命令包成 stdio 上的 MCP 服务，常驻进程内自动复用 SSH 隧道，工具与命令一一对应、走同一道权限门；严禁暴露本机文件读写（不含 `export`、`backup`、`csv-preview` 与 `profile --file`）。
   例：`claude mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp`
 
 真正的边界仍是给 Agent 用一个只读的数据库账号：应用的门挡得住写，挡不住 `pg_terminate_backend` 这类
@@ -485,7 +483,7 @@ bun tauri build -- --no-default-features
 
 # macOS：构建（带 Oracle Instant Client）并装进 /Applications，装完启动
 # --skip-build 只装上次的产物，--no-open 装完不启动，-y 正开着时不问直接结束它
-# 顺带建 ~/.local/bin/dataomni，指向应用里的二进制（命令行 dataomni cli 就是它）
+# 顺带建 ~/.local/bin/dataomni，指向应用里的二进制（命令行 dataomni 就是它）
 scripts/install-macos.sh
 ```
 
@@ -594,6 +592,13 @@ bun install
 ### 未发布
 
 （暂无）
+
+### v1.3.0（2026-11-20）
+
+- 内置 DuckDB 统一结果集分析与可视化（`rfcs/duckdb-analytics.md`）：新增受控内存 DuckDB 分析沙盒（10 万行 / 512 MB 上限、加载后立即锁死 `enable_external_access = false` 与 `lock_configuration = true`、支持取消与 LRU 淘汰），覆盖 SQL 查询结果、表浏览、MongoDB 集合与 Elasticsearch 命中结果的列级数据画像（Data Profiling）、二次 SQL / `PIVOT` 透视、Apache Parquet 导出及本地数据文件（`.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson`）免连接即席探索；原生 SVG 图表扩展堆叠柱状图、面积图、散点图与 24×24 热力图，超 200 行提供显式内存 DuckDB 聚合，并支持导出带主题底色的 SVG 与 2× PNG。
+- 顶层无头 CLI、TTY 格式化高亮与 MCP 可用性增强（`rfcs/cli-mcp-usability.md`）：CLI 升级为顶层直调 `dataomni <command>`（保留 `dataomni cli <command>` 兼容别名），交互终端自动漂亮缩进与 ANSI 语法高亮 JSON / Markdown，管道重定向自动输出紧凑纯 JSON，新增 `--pretty` / `--compact` / `--color` / `--no-color` 与子命令 `--help`；新增 `profile`（CLI 支持 `--file`、MCP 物理隔离本地文件）、`export --format parquet`、`query --param` / `--param-null` / `--params-json`、`diff` 只读结构比对（MySQL / PostgreSQL 3 次批量元数据查询优化）及连接级本地业务语义备注（`semantics/<id>.md`）；MCP 常驻会话内自动复用 SSH 隧道；设置页新增「命令行与 Agent」一键接入引导与只读审计日志查看器；内置 `dataomni guide` 与官网托管的 `https://dataomni.dev/SKILL.md` 同源同步。
+- 克制型应用内 AI 增强（`rfcs/ai-sql-assist.md`，继续位于 `ai` Cargo feature 后，零数据行外发）：修补 AI 密钥缺失检测，新增请求取消、连接测试、多预设配置、本地 Ollama 无 Key 直连（自动绕过系统代理）与「`STAGING`/`PROD` 仅允许本地模型」路由守卫；SQL 编辑器新增自然语言生成 / 改写、报错诊断修复与 EXPLAIN 瓶颈解读三处克制接入（可展开查看发包原文、绝不自动执行 SQL）；ER 图新增按批草拟业务语义注释并写入 `semantics/<id>.md` 与 CLI / MCP 形成闭环。
+- 连接体验与钥匙串修复：编辑已保存连接时直观标识已保存密码状态（支持保留原密码不重输或显式清除），并修复 macOS Keychain 覆盖旧条目时的 `-25244` 错误。
 
 ### v1.2.2（2026-11-19）
 
