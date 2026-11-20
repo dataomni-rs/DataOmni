@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { invoke } from '@tauri-apps/api/core';
 import { supportsFeature } from '../contracts/databaseSupport';
@@ -26,6 +26,7 @@ import {
   ChevronsRight,
   Download,
   Upload,
+  BarChart2,
   BarChart3 as ChartIcon,
   Lock,
   Filter,
@@ -57,6 +58,7 @@ import { useResizableColumns } from '../hooks/useResizableColumns';
 import { ColumnResizeHandle } from './ColumnResizeHandle';
 import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
 import { ResultChartDialog } from './ResultChartDialog';
+import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
 import { CsvImportDialog } from './CsvImportDialog';
 import { useTaskStore } from '../stores/taskStore';
 import {
@@ -207,6 +209,7 @@ export default function TableDataViewer({
   appliedFiltersRef.current = appliedFilters;
   const [showExport, setShowExport] = useState(false);
   const [showChart, setShowChart] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importTaskId, setImportTaskId] = useState<string | null>(null);
   const [schemaObjects, setSchemaObjects] = useState<SchemaObjects | null>(null);
@@ -713,6 +716,17 @@ export default function TableDataViewer({
   const visibleRows = React.useMemo(
     () => positionalRows.map((row) => visibleIndexes.map((index) => row[index] ?? null)),
     [positionalRows, visibleIndexes]
+  );
+  const profileSource = useMemo<DataProfileSource>(
+    () => ({
+      kind: 'resultSet',
+      columns: visibleIndexes.map((index) => ({
+        name: columnNames[index] ?? '',
+        databaseType: tableSchema?.columns[index]?.data_type ?? null
+      })),
+      rows: visibleRows
+    }),
+    [columnNames, tableSchema?.columns, visibleIndexes, visibleRows]
   );
   // 行编辑时每格多一个「写入方式」下拉，日期时间格还多一个选择器，列宽跟着让出来
   const visibleWidths = visibleIndexes.map((index) => {
@@ -1434,6 +1448,16 @@ export default function TableDataViewer({
                     </button>
 
                     <button
+                      onClick={() => setShowProfile(true)}
+                      disabled={tableData.length === 0}
+                      className="flex items-center space-x-1 px-3 py-1.5 text-sm text-fg border border-line-strong rounded-control hover:bg-surface-hover transition-colors disabled:opacity-50"
+                      title={t('result.profileTitle')}
+                    >
+                      <BarChart2 size={14} />
+                      <span>{t('result.profile')}</span>
+                    </button>
+
+                    <button
                       onClick={() => setShowChart(true)}
                       disabled={tableData.length === 0}
                       className="flex items-center space-x-1 px-3 py-1.5 text-sm text-fg border border-line-strong rounded-control hover:bg-surface-hover transition-colors disabled:opacity-50"
@@ -1967,6 +1991,13 @@ export default function TableDataViewer({
           columns={visibleIndexes.map((index) => columnNames[index] ?? '')}
           rows={visibleRows}
           onClose={() => setShowChart(false)}
+        />
+      )}
+
+      {showProfile && (
+        <DataProfileDialog
+          source={profileSource}
+          onClose={() => setShowProfile(false)}
         />
       )}
     </div>

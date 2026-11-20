@@ -118,6 +118,8 @@ const MESSAGES: Readonly<Record<string, TranslationKey>> = {
   DATAOMNI_PARAMETERS_NEED_PREPARED: 'error.backend.parametersNeedPrepared',
   DATAOMNI_PARAMETERS_TEXT_RESULTS: 'error.backend.parametersTextResults',
   DATAOMNI_PARAMETERS_UNSUPPORTED_DIALECT: 'error.backend.parametersUnsupportedDialect',
+  DATAOMNI_ANALYTICS_NOT_FOUND: 'error.backend.analyticsNotFound',
+  DATAOMNI_ANALYTICS_CANCELLED: 'error.backend.analyticsCancelled',
   DATAOMNI_PARAMETER_TYPE_UNSUPPORTED: 'error.backend.parameterTypeUnsupported',
   DATAOMNI_PARAMETER_NOT_CONVERTIBLE: 'error.backend.parameterNotConvertible',
   DATAOMNI_SQL_SERVER_DRIVER_FAILURE: 'error.backend.sqlServerDriverFailure',

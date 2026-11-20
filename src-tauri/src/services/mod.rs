@@ -12,6 +12,7 @@ pub mod er_diagram;
 pub mod explain;
 pub mod export_writer;
 pub mod http_endpoint;
+pub mod local_analytics;
 pub mod mongo_command;
 pub mod mongo_shell;
 pub mod mongodb;

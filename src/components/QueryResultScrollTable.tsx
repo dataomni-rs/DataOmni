@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useState, useRef } from 'react';
+import React, { useLayoutEffect, useMemo, useState, useRef } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -8,6 +8,7 @@ import {
   Trash2,
   Edit,
   Download,
+  BarChart2,
   BarChart3,
   Lock,
   Undo2
@@ -52,6 +53,7 @@ import { supportsFeature } from '../contracts/databaseSupport';
 import { useLanguageStore } from '../stores/languageStore';
 import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
 import { ResultChartDialog } from './ResultChartDialog';
+import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
 import { DENSITY_CELL_CLASS } from '../utils/gridColumns';
 import { useSettingsStore } from '../stores/settingsStore';
 import { SHORTCUTS, formatShortcut } from '../utils/shortcuts';
@@ -107,6 +109,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const [newRowData, setNewRowData] = useState<Record<string, CellInput>>({});
   const [showExport, setShowExport] = useState(false);
   const [showChart, setShowChart] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   /** 待提交的变更。这张表和表数据视图共用同一套模型与同一个事务命令 */
   const [changes, setChanges] = useState<PendingChange[]>([]);
   const [showChanges, setShowChanges] = useState(false);
@@ -168,6 +171,19 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     }
     return list;
   }, [cells.selection, currentRows, dialect, result.columns, result.truncated, resultSql, t]);
+
+  const profileSource = useMemo<DataProfileSource>(
+    () => ({
+      kind: 'resultSet',
+      columns: result.columns.map((name, index) => ({
+        name,
+        logicalType: result.column_metadata?.[index]?.logical_type ?? null,
+        databaseType: result.column_metadata?.[index]?.database_type ?? null
+      })),
+      rows: sortedRows
+    }),
+    [result.column_metadata, result.columns, sortedRows]
+  );
   
   // 能不能改由 `describeResultEditability` 证明过：认得出是单表 SELECT，
   // 键来自目录，且键列在投影里。这里只读结论，不再自己拼条件判断
@@ -461,6 +477,15 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           {returnsRows && (
             <>
               <button
+                onClick={() => setShowProfile(true)}
+                disabled={totalRows === 0}
+                className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg hover:bg-surface-hover disabled:opacity-50"
+                title={t('result.profileTitle')}
+              >
+                <BarChart2 size={14} />
+                <span>{t('result.profile')}</span>
+              </button>
+              <button
                 onClick={() => setShowChart(true)}
                 disabled={totalRows === 0}
                 className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg hover:bg-surface-hover disabled:opacity-50"
@@ -538,6 +563,13 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           columns={result.columns}
           rows={sortedRows}
           onClose={() => setShowChart(false)}
+        />
+      )}
+
+      {showProfile && (
+        <DataProfileDialog
+          source={profileSource}
+          onClose={() => setShowProfile(false)}
         />
       )}
 

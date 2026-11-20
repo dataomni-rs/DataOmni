@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { clsx } from 'clsx';
 import {
   AlertCircle,
+  BarChart2,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -35,6 +36,8 @@ import { MongoExportDialog } from './MongoExportDialog';
 import { MongoImportDialog } from './MongoImportDialog';
 import { MongoBulkWriteDialog, type MongoBulkWriteMode } from './MongoBulkWriteDialog';
 import { MongoExplainDialog } from './MongoExplainDialog';
+import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
+import { mongoRowsToJsonDocs } from '../utils/analyticsProfile';
 
 interface MongoCollectionViewerProps {
   database: string;
@@ -113,6 +116,7 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
   const [panel, setPanel] = useState<DocumentPanelState>({ kind: 'closed' });
   const [panelDirty, setPanelDirty] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [importing, setImporting] = useState(false);
   const [bulk, setBulk] = useState<MongoBulkWriteMode | null>(null);
   // 执行计划看的是**框里**那一份：它不写库，不必先按查询；问的正是「这样写会怎么走」
@@ -427,6 +431,10 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
   };
 
   const documents = useMemo(() => result?.documents ?? [], [result]);
+  const profileSource = useMemo<DataProfileSource>(
+    () => ({ kind: 'jsonDocuments', documents: mongoRowsToJsonDocs(documents) }),
+    [documents]
+  );
   const columns = useMemo(() => mongoColumns(documents), [documents]);
   const widths = useMemo(
     () => measureColumnWidths(
@@ -494,6 +502,15 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
               <span>{t('mongo.import')}</span>
             </button>
           )}
+          <button
+            onClick={() => setShowProfile(true)}
+            disabled={documents.length === 0}
+            title={t('result.profileTitle')}
+            className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+          >
+            <BarChart2 size={14} />
+            <span>{t('result.profile')}</span>
+          </button>
           <button
             onClick={() => setExporting(true)}
             disabled={!connectionString || aggregating}
@@ -881,6 +898,12 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
           pipeline={explaining.pipeline}
           timeoutMs={timeoutMs}
           onClose={() => setExplaining(null)}
+        />
+      )}
+      {showProfile && (
+        <DataProfileDialog
+          source={profileSource}
+          onClose={() => setShowProfile(false)}
         />
       )}
       {bulk && connectionString && (
