@@ -161,9 +161,9 @@
 
 ### 阶段 3（P2–P3）：Elasticsearch 原生聚合分析与 Neo4j 图拓扑体检
 
-- [ ] AN5 Elasticsearch 原生 `aggs` 下推探索与 Mapping / 分片健康诊断
-  - 读权限路径：`GET /<index>/_mapping` 字段数统计与逼近 1,000 字段膨胀预警 + `POST /<index>/_search`（`size: 0`）下推 `date_histogram` / `terms + missing` / `extended_stats + percentiles`，聚合桶直接喂给 `ResultChartDialog` 原生 SVG 出图；
-  - 监控权限独立路径：`_cat/indices` 与 `_cat/shards` 检查分片过碎/过大与高软删除率，收到 `403` 时优雅折叠卡片不阻塞只读聚合；保留 DuckDB 用于明细二次清洗与导出 Parquet。
+- [x] AN5 Elasticsearch 原生 `aggs` 下推探索与 Mapping / 分片健康诊断（前端 `esAnalytics`/`EsIndexAnalyticsDialog`/`EsConsole`/`catalog` 26 条全绿含 `_cat/indices` `403` 降级与 Mapping 1,000+ 字段膨胀门 + `tsc`/`eslint` 通过）
+  - 复用既有 `elasticsearch_run`（零冗余后端代理），落地纯函数 `src/utils/esAnalytics.ts` 与 `EsIndexAnalyticsDialog`，接入 `EsIndexStructureView`「原生聚合分析」入口；
+  - 读权限路径自动汇总 `_mapping` 叶子字段数（≥ 800 / 1,000 膨胀预警）、`text + .keyword` 双存计数与 `date`/`keyword`/数值字段清单，下推 `size: 0` 的 `date_histogram` / `terms + missing` / `extended_stats + percentiles` 并直连 `ResultChartDialog` 原生 SVG 出图；监控权限路径独立查 `_cat/indices` 与 `_cat/shards` 检查软删除率及过大/过碎/未分配分片，遇 `403` 局部折叠不阻塞只读聚合。
 - [ ] AN6 Neo4j 图谱拓扑与超级节点（Supernode）体检
   - `services/neo4j.rs` 分层执行只读 Cypher：O(1) count store 统计各 Label 节点数与 Relationship Type 边数 + 按需受限采样（`LIMIT` 与超时保护）计算节点度分位数、孤立节点率、Top 20 超级节点及属性覆盖率；
   - `CypherWorkbench` 接入「图谱体检」面板，点击高风险 Label / 超级节点一键生成只读 Cypher 或在 `CypherGraphView` 展开局部邻域。
