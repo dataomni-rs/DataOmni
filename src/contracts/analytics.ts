@@ -61,6 +61,11 @@ export interface HistogramBin {
   readonly count: number;
 }
 
+export interface TimeHistogramBin {
+  readonly label: string;
+  readonly count: number;
+}
+
 export interface TopValueEntry {
   readonly value: string;
   readonly count: number;
@@ -90,6 +95,7 @@ export interface ColumnProfile {
   readonly p75?: number;
   readonly p95?: number;
   readonly bins: readonly HistogramBin[];
+  readonly timeBins?: readonly TimeHistogramBin[];
   readonly minLength?: number;
   readonly maxLength?: number;
   readonly topValues: readonly TopValueEntry[];

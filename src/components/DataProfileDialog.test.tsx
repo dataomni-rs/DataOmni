@@ -210,4 +210,168 @@ describe('DataProfileDialog', () => {
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('supports switching to table sample scope, collapses unique ID top values, renders time sparkline, and applies table filter', async () => {
+    const fetchSample = vi.fn(async () => ({
+      columns: [{ name: 'uid' }, { name: 'created_at' }, { name: 'status' }, { name: 'amount' }],
+      rows: [
+        ['u1', '2026-11-01', 'PAID', -5],
+        ['u2', '2026-11-02', 'PAID', 20],
+        ['u3', '2026-11-03', 'PAID', 30],
+        ['u4', '2026-11-04', 'REFUND', 40],
+        ['u5', '2026-11-05', 'PAID', 50]
+      ],
+      truncated: false
+    }));
+    const onApplyTableFilter = vi.fn();
+    const onClose = vi.fn();
+
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'analytics_load_result') {
+        return {
+          analyticsId: 'sess-sample',
+          sourceKind: 'resultSet',
+          rowCount: 5,
+          columnCount: 4,
+          truncated: false,
+          columns: []
+        };
+      }
+      if (cmd === 'analytics_profile') {
+        return {
+          analyticsId: 'sess-sample',
+          rowCount: 5,
+          columnCount: 4,
+          elapsedMs: 8,
+          columns: [
+            {
+              name: 'uid',
+              inferredType: 'text',
+              duckdbType: 'VARCHAR',
+              precisionDegraded: false,
+              totalCount: 5,
+              nullCount: 0,
+              nullRatio: 0,
+              distinctCount: 5,
+              distinctRatio: 1,
+              bins: [],
+              topValues: [{ value: 'u1', count: 1, ratio: 0.2 }]
+            },
+            {
+              name: 'created_at',
+              inferredType: 'date',
+              duckdbType: 'DATE',
+              precisionDegraded: false,
+              totalCount: 5,
+              nullCount: 0,
+              nullRatio: 0,
+              distinctCount: 5,
+              distinctRatio: 1,
+              min: '2026-11-01',
+              max: '2026-11-05',
+              bins: [],
+              timeBins: [
+                { label: '2026-11-01', count: 1 },
+                { label: '2026-11-03', count: 2 },
+                { label: '2026-11-05', count: 2 }
+              ],
+              topValues: []
+            },
+            {
+              name: 'status',
+              inferredType: 'text',
+              duckdbType: 'VARCHAR',
+              precisionDegraded: false,
+              totalCount: 5,
+              nullCount: 0,
+              nullRatio: 0,
+              distinctCount: 2,
+              distinctRatio: 0.4,
+              bins: [],
+              topValues: [
+                { value: 'PAID', count: 4, ratio: 0.8 },
+                { value: 'REFUND', count: 1, ratio: 0.2 }
+              ]
+            },
+            {
+              name: 'amount',
+              inferredType: 'numeric',
+              duckdbType: 'DOUBLE',
+              precisionDegraded: false,
+              totalCount: 5,
+              nullCount: 0,
+              nullRatio: 0,
+              distinctCount: 5,
+              distinctRatio: 1,
+              min: '-5',
+              max: '50',
+              mean: 27,
+              stddev: 20,
+              p25: 20,
+              p50: 30,
+              p75: 40,
+              p95: 48,
+              bins: [{ lower: -5, upper: 50, count: 5 }],
+              topValues: []
+            }
+          ]
+        };
+      }
+      return true;
+    });
+
+    await act(async () => {
+      root.render(
+        <DataProfileDialog
+          source={{ kind: 'resultSet', columns: [{ name: 'uid' }], rows: [['u1']] }}
+          tableSample={{
+            hasActiveFilters: true,
+            fetchSample,
+            cancelSample: vi.fn()
+          }}
+          sourceDialect="postgresql"
+          onApplyTableFilter={onApplyTableFilter}
+          onClose={onClose}
+        />
+      );
+    });
+    await flush();
+
+    // Switch to table sample scope
+    const sampleBtn = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent?.includes('表抽样')
+    );
+    expect(sampleBtn).toBeTruthy();
+    await act(async () => {
+      sampleBtn?.click();
+    });
+    await flush();
+
+    expect(fetchSample).toHaveBeenCalledWith(5000, expect.any(String));
+    expect(container.textContent).toContain('样本口径 · 继承当前筛选');
+    expect(container.textContent).toContain('已折叠全唯一值示例');
+    expect(container.textContent).toContain('时间分布趋势');
+    expect(container.textContent).toContain('负值 (< 0)');
+    expect(container.querySelector('svg[aria-label="created_at 时间分布趋势"]')).toBeTruthy();
+
+    // Expand collapsed unique values
+    const expandBtn = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent?.includes('已折叠全唯一值示例')
+    );
+    await act(async () => {
+      expandBtn?.click();
+    });
+    expect(container.textContent).toContain('u1');
+
+    // Click apply table filter on status=PAID (second card after expanding uid)
+    const applyBtns = Array.from(container.querySelectorAll('button')).filter(
+      (btn) => btn.textContent === '回表筛选'
+    );
+    expect(applyBtns.length).toBeGreaterThanOrEqual(2);
+    await act(async () => {
+      applyBtns[1]?.click();
+    });
+    expect(onApplyTableFilter).toHaveBeenCalledWith('status', 'eq', 'PAID');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

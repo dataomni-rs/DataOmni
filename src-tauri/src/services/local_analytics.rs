@@ -150,6 +150,13 @@ pub struct HistogramBin {
   pub count: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeHistogramBin {
+  pub label: String,
+  pub count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TopValueEntry {
@@ -193,6 +200,8 @@ pub struct ColumnProfile {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub p95: Option<f64>,
   pub bins: Vec<HistogramBin>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub time_bins: Vec<TimeHistogramBin>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub min_length: Option<u64>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -1732,6 +1741,7 @@ fn profile_single_column(
       p75: None,
       p95: None,
       bins: Vec::new(),
+      time_bins: Vec::new(),
       min_length: None,
       max_length: None,
       top_values: Vec::new(),
@@ -1916,6 +1926,7 @@ fn profile_numeric_column(
     p75: finite_opt(p75),
     p95: finite_opt(p95),
     bins,
+    time_bins: Vec::new(),
     min_length: None,
     max_length: None,
     top_values,
@@ -2013,6 +2024,7 @@ fn profile_binary_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins: Vec::new(),
     min_length: min_len.map(|v| v.max(0) as u64),
     max_length: max_len.map(|v| v.max(0) as u64),
     top_values: Vec::new(),
@@ -2059,6 +2071,7 @@ fn profile_boolean_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins: Vec::new(),
     min_length: None,
     max_length: None,
     top_values,
@@ -2090,6 +2103,14 @@ fn profile_temporal_column(
   let distinct_count = distinct_count.max(0) as u64;
   let non_null = total_rows.saturating_sub(null_count);
   let top_values = if non_null > 0 { query_top_values(conn, col, non_null)? } else { Vec::new() };
+  let time_bins =
+    if matches!(plan.inferred_type, ProfileColumnType::Date | ProfileColumnType::Datetime)
+      && distinct_count >= 2
+    {
+      query_temporal_histogram(conn, col, 12)?
+    } else {
+      Vec::new()
+    };
 
   Ok(ColumnProfile {
     name: plan.name.clone(),
@@ -2113,10 +2134,77 @@ fn profile_temporal_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins,
     min_length: None,
     max_length: None,
     top_values,
   })
+}
+
+fn query_temporal_histogram(
+  conn: &Connection,
+  col: &str,
+  max_bins: usize,
+) -> Result<Vec<TimeHistogramBin>, QueryError> {
+  let bounds_sql = format!(
+    "SELECT MIN(epoch(CAST({col} AS TIMESTAMP))), MAX(epoch(CAST({col} AS TIMESTAMP))) \
+     FROM result_set WHERE {col} IS NOT NULL"
+  );
+  let (lo, hi): (Option<f64>, Option<f64>) =
+    conn.query_row(&bounds_sql, [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(duck_error)?;
+  let (Some(lo), Some(hi)) = (lo, hi) else {
+    return Ok(Vec::new());
+  };
+  let span = hi - lo;
+  if !span.is_finite() || span <= 0.0 || max_bins < 2 {
+    return Ok(Vec::new());
+  }
+
+  let bin_count = max_bins;
+  let max_bucket = (bin_count - 1) as i64;
+  let width = span / bin_count as f64;
+  let label_fmt = if span > 365.0 * 86_400.0 {
+    "%Y-%m"
+  } else if span > 3.0 * 86_400.0 {
+    "%Y-%m-%d"
+  } else if span > 2.0 * 3_600.0 {
+    "%m-%d %H:00"
+  } else {
+    "%H:%M:%S"
+  };
+
+  let bucket_sql = format!(
+    "SELECT \
+       LEAST({max_bucket}, GREATEST(0, CAST(FLOOR((epoch(CAST({col} AS TIMESTAMP)) - $1) / $2 * {bin_count}) AS BIGINT))) AS bucket, \
+       COUNT(*) AS cnt \
+     FROM result_set \
+     WHERE {col} IS NOT NULL \
+     GROUP BY bucket \
+     ORDER BY bucket"
+  );
+  let mut counts = vec![0u64; bin_count];
+  let mut stmt = conn.prepare(&bucket_sql).map_err(duck_error)?;
+  let mut rows = stmt.query([lo, span]).map_err(duck_error)?;
+  while let Some(row) = rows.next().map_err(duck_error)? {
+    let bucket: i64 = row.get(0).map_err(duck_error)?;
+    let cnt: i64 = row.get(1).map_err(duck_error)?;
+    if let Ok(idx) = usize::try_from(bucket) {
+      if idx < bin_count {
+        counts[idx] = cnt.max(0) as u64;
+      }
+    }
+  }
+
+  let label_sql = format!("SELECT strftime(to_timestamp($1), '{label_fmt}')");
+  let mut label_stmt = conn.prepare(&label_sql).map_err(duck_error)?;
+  let mut out = Vec::with_capacity(bin_count);
+  for (idx, count) in counts.into_iter().enumerate() {
+    let ts = lo + width * idx as f64;
+    let label: String =
+      label_stmt.query_row([ts], |r| r.get(0)).unwrap_or_else(|_| format!("#{}", idx + 1));
+    out.push(TimeHistogramBin { label, count });
+  }
+  Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2176,6 +2264,7 @@ fn profile_text_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins: Vec::new(),
     min_length: min_len.map(|v| v.max(0) as u64),
     max_length: max_len.map(|v| v.max(0) as u64),
     top_values,
@@ -2674,5 +2763,51 @@ mod tests {
     let profile = profile_session("utf8-ts", &session).expect("profile");
     assert_eq!(profile.row_count, 1);
     assert_eq!(profile.columns[0].duckdb_type, "VARCHAR");
+  }
+
+  #[test]
+  fn temporal_columns_emit_time_bins_for_multi_point_spans() {
+    let columns = vec![
+      AnalyticsColumnInput {
+        name: "created_at".to_string(),
+        logical_type: Some("datetime".to_string()),
+        database_type: Some("TIMESTAMP".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "same_day".to_string(),
+        logical_type: Some("date".to_string()),
+        database_type: Some("DATE".to_string()),
+      },
+    ];
+    let rows = vec![
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-01 10:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-05 12:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-10 15:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-10 18:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+    ];
+    let session = create_result_session(&columns, &rows, MAX_ANALYTICS_ROWS).expect("load session");
+    let profile = profile_session("time-bins", &session).expect("profile");
+
+    let created = &profile.columns[0];
+    assert_eq!(created.time_bins.len(), 12);
+    let total_binned: u64 = created.time_bins.iter().map(|b| b.count).sum();
+    assert_eq!(total_binned, 4);
+    assert!(created.time_bins[0].label.starts_with("2026-11-01"));
+
+    // Constant date column must not emit redundant time bins
+    let same_day = &profile.columns[1];
+    assert!(same_day.time_bins.is_empty());
   }
 }

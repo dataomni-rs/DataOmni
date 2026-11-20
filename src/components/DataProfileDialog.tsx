@@ -5,7 +5,10 @@ import {
   AlertTriangle,
   BarChart2,
   Check,
+  ChevronDown,
+  ChevronRight,
   Copy,
+  Database,
   Filter,
   Loader2,
   RotateCcw,
@@ -24,6 +27,7 @@ import {
   buildProfileFilterSql,
   buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  buildSourceWhereClause,
   columnCardinalityHint,
   filterAndSortProfiles,
   formatProfileNumber,
@@ -31,11 +35,31 @@ import {
   hasSchemaDrift,
   histogramHeights,
   nullSeverity,
+  numericOutlierFilter,
+  shouldCollapseTopValues,
+  timeSparklinePoints,
   type ProfileSortMode
 } from '../utils/analyticsProfile';
 import { describeError } from '../utils/describeError';
 import { isImeKeyEvent } from '../utils/shortcuts';
+import type { SqlIdentifierDialect } from '../utils/sqlIdentifiers';
+import {
+  DEFAULT_TABLE_SAMPLE_SIZE,
+  TABLE_SAMPLE_SIZE_OPTIONS
+} from '../utils/tableSampleQuery';
 import { PLAIN_TEXT_INPUT } from './FormControls';
+
+export interface TableSampleResult {
+  readonly columns: readonly AnalyticsColumnInput[];
+  readonly rows: ReadonlyArray<readonly SerializedResultValue[]>;
+  readonly truncated: boolean;
+}
+
+export interface TableSampleConfig {
+  readonly hasActiveFilters: boolean;
+  readonly fetchSample: (limit: number, executionId: string) => Promise<TableSampleResult>;
+  readonly cancelSample: (executionId: string) => void;
+}
 
 export type DataProfileSource =
   | {
@@ -50,13 +74,26 @@ export type DataProfileSource =
 
 interface DataProfileDialogProps {
   source: DataProfileSource;
+  tableSample?: TableSampleConfig;
+  sourceDialect?: SqlIdentifierDialect;
+  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
   onClose: () => void;
 }
 
 const SORT_OPTIONS: readonly ProfileSortMode[] = ['order', 'nulls', 'distinct', 'drift'];
 
-export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
+export function DataProfileDialog({
+  source,
+  tableSample,
+  sourceDialect,
+  onApplyTableFilter,
+  onClose
+}: DataProfileDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const [scope, setScope] = useState<'current' | 'sample'>('current');
+  const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
+  const [sampling, setSampling] = useState(false);
+  const [sampledTruncated, setSampledTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [cancelled, setCancelled] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,21 +105,28 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
   const [attempt, setAttempt] = useState(0);
 
   const sessionIdRef = useRef<string | null>(null);
+  const sampleExecutionIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
 
-  const inputRowCount = source.kind === 'resultSet' ? source.rows.length : source.documents.length;
+  const currentRowCount = source.kind === 'resultSet' ? source.rows.length : source.documents.length;
+  const inputRowCount = scope === 'sample' ? sampleSize : currentRowCount;
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      const sampleExecId = sampleExecutionIdRef.current;
+      sampleExecutionIdRef.current = null;
+      if (sampleExecId && tableSample) {
+        tableSample.cancelSample(sampleExecId);
+      }
       const id = sessionIdRef.current;
       sessionIdRef.current = null;
       if (id) {
         void invoke('analytics_close', { analyticsId: id }).catch(() => {});
       }
     };
-  }, []);
+  }, [tableSample]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -96,8 +140,9 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
   }, [onClose]);
 
   useEffect(() => {
-    if (inputRowCount === 0) {
+    if (scope === 'current' && currentRowCount === 0) {
       setLoading(false);
+      setSampling(false);
       setError(null);
       setProfile(null);
       return;
@@ -105,6 +150,8 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
 
     let stale = false;
     setLoading(true);
+    setSampling(scope === 'sample');
+    setSampledTruncated(false);
     setCancelled(false);
     setError(null);
 
@@ -116,15 +163,37 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
       }
 
       try {
-        const loaded =
-          source.kind === 'resultSet'
-            ? await invoke<AnalyticsSessionSummary>('analytics_load_result', {
-                columns: source.columns,
-                rows: source.rows
-              })
-            : await invoke<AnalyticsSessionSummary>('analytics_load_json_docs', {
-                documents: source.documents
-              });
+        let loaded: AnalyticsSessionSummary;
+        if (scope === 'sample' && tableSample) {
+          const execId = crypto.randomUUID();
+          sampleExecutionIdRef.current = execId;
+          const sampled = await tableSample.fetchSample(sampleSize, execId);
+          sampleExecutionIdRef.current = null;
+          if (stale || !mountedRef.current) {
+            return;
+          }
+          setSampling(false);
+          setSampledTruncated(sampled.truncated);
+          if (sampled.rows.length === 0) {
+            setSummary(null);
+            setProfile(null);
+            return;
+          }
+          loaded = await invoke<AnalyticsSessionSummary>('analytics_load_result', {
+            columns: sampled.columns,
+            rows: sampled.rows
+          });
+        } else {
+          loaded =
+            source.kind === 'resultSet'
+              ? await invoke<AnalyticsSessionSummary>('analytics_load_result', {
+                  columns: source.columns,
+                  rows: source.rows
+                })
+              : await invoke<AnalyticsSessionSummary>('analytics_load_json_docs', {
+                  documents: source.documents
+                });
+        }
 
         if (stale || !mountedRef.current) {
           void invoke('analytics_close', { analyticsId: loaded.analyticsId }).catch(() => {});
@@ -151,13 +220,20 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
           err !== null && typeof err === 'object' && 'code' in err
             ? String((err as { code?: unknown }).code ?? '')
             : '';
-        if (code === 'DATAOMNI_ANALYTICS_CANCELLED' || message.includes('DATAOMNI_ANALYTICS_CANCELLED')) {
+        if (
+          code === 'DATAOMNI_ANALYTICS_CANCELLED'
+          || message.includes('DATAOMNI_ANALYTICS_CANCELLED')
+          || code === 'DATAOMNI_QUERY_CANCELLED'
+          || message.includes('DATAOMNI_QUERY_CANCELLED')
+        ) {
           setCancelled(true);
         } else {
           setError(message);
         }
       } finally {
+        sampleExecutionIdRef.current = null;
         if (!stale && mountedRef.current) {
+          setSampling(false);
           setLoading(false);
         }
       }
@@ -166,16 +242,26 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
     void run();
     return () => {
       stale = true;
+      const sampleExecId = sampleExecutionIdRef.current;
+      sampleExecutionIdRef.current = null;
+      if (sampleExecId && tableSample) {
+        tableSample.cancelSample(sampleExecId);
+      }
     };
-  }, [source, inputRowCount, attempt]);
+  }, [source, scope, sampleSize, tableSample, currentRowCount, attempt]);
 
   const handleCancel = useCallback(() => {
+    const sampleExecId = sampleExecutionIdRef.current;
+    if (sampleExecId && tableSample) {
+      sampleExecutionIdRef.current = null;
+      tableSample.cancelSample(sampleExecId);
+    }
     const id = sessionIdRef.current;
     if (id) {
       void invoke('analytics_cancel', { analyticsId: id }).catch(() => {});
     }
     setCancelled(true);
-  }, []);
+  }, [tableSample]);
 
   const handleCopySql = useCallback((key: string, sql: string) => {
     navigator.clipboard
@@ -217,8 +303,8 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
         onClick={(event) => event.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex shrink-0 items-center justify-between border-b border-line px-5 py-3">
-          <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2">
             <BarChart2 size={16} className="text-accent" />
             <h3 id="data-profile-title" className="text-sm font-semibold text-fg">
               {t('profile.title')}
@@ -232,22 +318,74 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
                 })}
               </span>
             )}
+            {scope === 'sample' && profile && tableSample && (
+              <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent">
+                {tableSample.hasActiveFilters
+                  ? t('profile.sampleBadgeFiltered', { count: profile.rowCount.toLocaleString() })
+                  : t('profile.sampleBadge', { count: profile.rowCount.toLocaleString() })}
+              </span>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t('common.close')}
-            className="rounded-control p-1 text-fg-muted transition-colors hover:bg-surface-hover"
-          >
-            <X size={16} />
-          </button>
+          <div className="flex items-center gap-2">
+            {tableSample && (
+              <div className="flex items-center gap-1 rounded-control border border-line-strong bg-surface p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setScope('current')}
+                  className={clsx(
+                    'rounded px-2 py-0.5 transition-colors',
+                    scope === 'current'
+                      ? 'bg-accent-soft font-medium text-accent'
+                      : 'text-fg-muted hover:text-fg'
+                  )}
+                >
+                  {t('profile.scopeCurrentPage', { count: currentRowCount.toLocaleString() })}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScope('sample')}
+                  className={clsx(
+                    'flex items-center gap-1 rounded px-2 py-0.5 transition-colors',
+                    scope === 'sample'
+                      ? 'bg-accent-soft font-medium text-accent'
+                      : 'text-fg-muted hover:text-fg'
+                  )}
+                >
+                  <Database size={11} />
+                  <span>{t('profile.scopeTableSample')}</span>
+                </button>
+                {scope === 'sample' && (
+                  <select
+                    aria-label={t('profile.scopeTableSample')}
+                    value={sampleSize}
+                    onChange={(event) => setSampleSize(Number(event.target.value))}
+                    className="rounded border-l border-line bg-transparent px-1.5 py-0.5 text-xs text-fg focus:outline-none"
+                  >
+                    {TABLE_SAMPLE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>
+                        {t('profile.scopeSampleOption', { count: size.toLocaleString() })}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t('common.close')}
+              className="rounded-control p-1 text-fg-muted transition-colors hover:bg-surface-hover"
+            >
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
         {/* Truncated banner */}
-        {summary?.truncated && (
+        {(summary?.truncated || sampledTruncated) && (
           <div className="flex shrink-0 items-center gap-2 border-b border-warning-line bg-warning-soft px-5 py-2 text-xs text-warning">
             <AlertTriangle size={14} className="shrink-0" />
-            <span>{t('profile.truncatedNotice', { count: summary.rowCount })}</span>
+            <span>{t('profile.truncatedNotice', { count: summary?.rowCount ?? profile?.rowCount ?? 0 })}</span>
           </div>
         )}
 
@@ -286,13 +424,15 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          {inputRowCount === 0 ? (
+          {scope === 'current' && currentRowCount === 0 ? (
             <p className="py-8 text-center text-sm text-fg-muted">{t('profile.empty')}</p>
           ) : loading ? (
             <div className="flex flex-col items-center justify-center gap-3 py-12">
               <Loader2 size={24} className="animate-spin text-accent" />
               <p className="text-sm text-fg-muted">
-                {t('profile.loading', { count: inputRowCount })}
+                {sampling
+                  ? t('profile.samplingRows', { count: sampleSize.toLocaleString() })
+                  : t('profile.loading', { count: inputRowCount })}
               </p>
               <button
                 type="button"
@@ -326,6 +466,8 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
                 <span>{t('profile.retry')}</span>
               </button>
             </div>
+          ) : !profile || profile.rowCount === 0 ? (
+            <p className="py-8 text-center text-sm text-fg-muted">{t('profile.empty')}</p>
           ) : visibleColumns.length === 0 ? (
             <p className="py-8 text-center text-sm text-fg-muted">{t('profile.noMatchingColumns')}</p>
           ) : (
@@ -336,6 +478,15 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
                   column={column}
                   copiedKey={copiedKey}
                   onCopySql={handleCopySql}
+                  sourceDialect={sourceDialect}
+                  onApplyTableFilter={
+                    onApplyTableFilter
+                      ? (col, op, val) => {
+                          onApplyTableFilter(col, op, val);
+                          onClose();
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -352,21 +503,39 @@ export interface ColumnProfileCardProps {
   onCopySql: (key: string, sql: string) => void;
   /** 当宿主工作台支持直接执行二次 SQL 时，点击高频值/空值直接跳转执行而非仅复制 */
   onRunFilterSql?: (sql: string) => void;
+  /** 原库方言（提供时允许一键复制原库 WHERE 条件） */
+  sourceDialect?: SqlIdentifierDialect;
+  /** 表视图回填筛选（提供时允许一键带条件回到原表网格） */
+  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
 }
 
 export function ColumnProfileCard({
   column,
   copiedKey,
   onCopySql,
-  onRunFilterSql
+  onRunFilterSql,
+  sourceDialect,
+  onApplyTableFilter
 }: ColumnProfileCardProps) {
   const t = useLanguageStore((state) => state.t);
   const severity = nullSeverity(column.nullRatio);
   const drift = hasSchemaDrift(column);
   const cardinalityHint = columnCardinalityHint(column);
+  const collapseByDefault = shouldCollapseTopValues(column);
+  const [topValuesExpanded, setTopValuesExpanded] = useState(!collapseByDefault);
+  const outlier = useMemo(() => numericOutlierFilter(column), [column]);
   const heights = useMemo(() => histogramHeights(column.bins), [column.bins]);
+  const sparkline = useMemo(
+    () => timeSparklinePoints(column.timeBins ?? [], 200, 32, 4, 4),
+    [column.timeBins]
+  );
   const nullCopyId = `null:${column.name}`;
   const groupCopyId = `group:${column.name}`;
+  const outlierCopyId = `outlier:${column.name}`;
+
+  useEffect(() => {
+    setTopValuesExpanded(!collapseByDefault);
+  }, [collapseByDefault, column.name]);
 
   const nullBadgeClass =
     severity === 'high'
@@ -574,19 +743,85 @@ export function ColumnProfileCard({
                 </svg>
               </div>
             )}
+            {outlier && (
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onRunFilterSql) {
+                      onRunFilterSql(outlier.sql);
+                    } else {
+                      onCopySql(outlierCopyId, outlier.sql);
+                    }
+                  }}
+                  title={t('profile.outlierTooltip')}
+                  className="flex items-center gap-1 rounded border border-warning-line bg-warning-soft px-2 py-0.5 text-[10px] font-medium text-warning transition-colors hover:opacity-90"
+                >
+                  {copiedKey === outlierCopyId ? (
+                    <Check size={10} className="text-success" />
+                  ) : (
+                    <AlertTriangle size={10} />
+                  )}
+                  <span>
+                    {copiedKey === outlierCopyId
+                      ? t('profile.copiedSql')
+                      : outlier.kind === 'negative'
+                        ? t('profile.outlierNegative')
+                        : t('profile.outlierHigh', { threshold: outlier.threshold })}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
-      {/* Temporal min/max */}
+      {/* Temporal min/max + mini sparkline */}
       {(column.inferredType === 'date'
         || column.inferredType === 'time'
         || column.inferredType === 'datetime')
         && column.min !== undefined && (
-          <div className="text-[11px]">
-            <span className="text-fg-subtle">{t('profile.range')}: </span>
-            <span className="font-mono text-fg">
-              {column.min} → {column.max ?? '—'}
-            </span>
+          <div className="space-y-1.5 text-[11px]">
+            <div>
+              <span className="text-fg-subtle">{t('profile.range')}: </span>
+              <span className="font-mono text-fg">
+                {column.min} → {column.max ?? '—'}
+              </span>
+            </div>
+            {sparkline.length >= 2 && (
+              <div>
+                <p className="mb-0.5 text-[10px] text-fg-subtle">{t('profile.timeTrend')}</p>
+                <svg
+                  viewBox="0 0 200 32"
+                  className="h-8 w-full"
+                  role="img"
+                  aria-label={`${column.name} ${t('profile.timeTrend')}`}
+                >
+                  <polygon
+                    points={`4,28 ${sparkline.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' ')} 196,28`}
+                    fill="var(--dm-accent)"
+                    fillOpacity="0.14"
+                  />
+                  <polyline
+                    points={sparkline.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' ')}
+                    fill="none"
+                    stroke="var(--dm-accent)"
+                    strokeWidth="1.5"
+                    strokeLinejoin="round"
+                  />
+                  {sparkline.map((pt, idx) => (
+                    <circle
+                      key={idx}
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={2.2}
+                      fill="var(--dm-accent)"
+                    >
+                      <title>{`${pt.label}: ${pt.count.toLocaleString()}`}</title>
+                    </circle>
+                  ))}
+                </svg>
+              </div>
+            )}
           </div>
         )}
 
@@ -605,62 +840,121 @@ export function ColumnProfileCard({
         </p>
       )}
 
-      {/* Top 5 values */}
+      {/* Top 5 values (default-collapsed for unique/high-cardinality noise columns) */}
       {column.topValues.length > 0 && (
         <div className="space-y-1">
-          <div className="flex items-center justify-between text-[10px] text-fg-subtle">
-            <span>{t('profile.topValues')}</span>
-            <span>{onRunFilterSql ? t('analytics.clickValueToFilter') : t('profile.clickValueToCopy')}</span>
-          </div>
-          <ul className="space-y-1">
-            {column.topValues.map((entry, idx) => {
-              const copyId = `top:${column.name}:${idx}`;
-              const display = entry.value === '' ? '""' : entry.value;
-              return (
-                <li key={copyId} className="group flex items-center gap-2 text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const sql = buildProfileFilterSql(column.name, column.inferredType, entry.value);
-                      if (onRunFilterSql) {
-                        onRunFilterSql(sql);
-                      } else {
-                        onCopySql(copyId, sql);
-                      }
-                    }}
-                    title={onRunFilterSql ? t('analytics.applyFilterSql') : t('profile.copyFilterSql')}
-                    className="relative flex min-w-0 flex-1 items-center justify-between overflow-hidden rounded border border-transparent bg-surface-sunken px-2 py-0.5 text-left transition-colors hover:border-accent/40 hover:bg-surface-hover"
-                  >
-                    <span
-                      aria-hidden
-                      className="pointer-events-none absolute inset-y-0 left-0 bg-accent-soft opacity-60"
-                      style={{ width: `${Math.max(2, Math.round(entry.ratio * 100))}%` }}
-                    />
-                    <span className="relative truncate font-mono text-fg" title={display}>
-                      {display}
-                    </span>
-                    <span className="relative ml-2 flex shrink-0 items-center gap-1 font-mono text-[10px] text-fg-muted">
-                      {copiedKey === copyId ? (
-                        <>
-                          <Check size={10} className="text-success" />
-                          <span>{t('profile.copiedSql')}</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>{`${entry.count.toLocaleString()} (${formatProfileRatio(entry.ratio)})`}</span>
-                          {onRunFilterSql ? (
-                            <Filter size={10} className="opacity-0 transition-opacity group-hover:opacity-80" />
+          {collapseByDefault && !topValuesExpanded ? (
+            <button
+              type="button"
+              onClick={() => setTopValuesExpanded(true)}
+              className="flex w-full items-center justify-between rounded bg-surface-sunken px-2 py-1 text-[10px] text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg"
+            >
+              <span className="flex items-center gap-1">
+                <ChevronRight size={11} />
+                <span>{t('profile.uniqueValuesCollapsed')}</span>
+              </span>
+              <span className="text-accent">{t('profile.showSampleValues')}</span>
+            </button>
+          ) : (
+            <>
+              <div className="flex items-center justify-between text-[10px] text-fg-subtle">
+                <span className="flex items-center gap-1">
+                  {collapseByDefault && (
+                    <button
+                      type="button"
+                      onClick={() => setTopValuesExpanded(false)}
+                      className="inline-flex items-center gap-0.5 text-fg-subtle hover:text-fg"
+                      title={t('profile.hideSampleValues')}
+                    >
+                      <ChevronDown size={11} />
+                    </button>
+                  )}
+                  <span>{t('profile.topValues')}</span>
+                </span>
+                <span>{onRunFilterSql ? t('analytics.clickValueToFilter') : t('profile.clickValueToCopy')}</span>
+              </div>
+              <ul className="space-y-1">
+                {column.topValues.map((entry, idx) => {
+                  const copyId = `top:${column.name}:${idx}`;
+                  const whereCopyId = `where:${column.name}:${idx}`;
+                  const display = entry.value === '' ? '""' : entry.value;
+                  return (
+                    <li key={copyId} className="group flex items-center gap-1.5 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const sql = buildProfileFilterSql(column.name, column.inferredType, entry.value);
+                          if (onRunFilterSql) {
+                            onRunFilterSql(sql);
+                          } else {
+                            onCopySql(copyId, sql);
+                          }
+                        }}
+                        title={onRunFilterSql ? t('analytics.applyFilterSql') : t('profile.copyFilterSql')}
+                        className="relative flex min-w-0 flex-1 items-center justify-between overflow-hidden rounded border border-transparent bg-surface-sunken px-2 py-0.5 text-left transition-colors hover:border-accent/40 hover:bg-surface-hover"
+                      >
+                        <span
+                          aria-hidden
+                          className="pointer-events-none absolute inset-y-0 left-0 bg-accent-soft opacity-60"
+                          style={{ width: `${Math.max(2, Math.round(entry.ratio * 100))}%` }}
+                        />
+                        <span className="relative truncate font-mono text-fg" title={display}>
+                          {display}
+                        </span>
+                        <span className="relative ml-2 flex shrink-0 items-center gap-1 font-mono text-[10px] text-fg-muted">
+                          {copiedKey === copyId ? (
+                            <>
+                              <Check size={10} className="text-success" />
+                              <span>{t('profile.copiedSql')}</span>
+                            </>
                           ) : (
-                            <Copy size={10} className="opacity-0 transition-opacity group-hover:opacity-80" />
+                            <>
+                              <span>{`${entry.count.toLocaleString()} (${formatProfileRatio(entry.ratio)})`}</span>
+                              {onRunFilterSql ? (
+                                <Filter size={10} className="opacity-0 transition-opacity group-hover:opacity-80" />
+                              ) : (
+                                <Copy size={10} className="opacity-0 transition-opacity group-hover:opacity-80" />
+                              )}
+                            </>
                           )}
-                        </>
+                        </span>
+                      </button>
+                      {onApplyTableFilter && (
+                        <button
+                          type="button"
+                          onClick={() => onApplyTableFilter(column.name, 'eq', entry.value)}
+                          title={t('profile.applyTableFilterTitle')}
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-fg-subtle opacity-0 transition-opacity hover:bg-surface-hover hover:text-accent group-hover:opacity-100 focus:opacity-100"
+                        >
+                          {t('profile.applyTableFilter')}
+                        </button>
                       )}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                      {!onApplyTableFilter && sourceDialect && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onCopySql(
+                              whereCopyId,
+                              buildSourceWhereClause(
+                                column.name,
+                                column.inferredType,
+                                entry.value,
+                                sourceDialect
+                              )
+                            )
+                          }
+                          title={t('profile.copySourceWhereTitle')}
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-fg-subtle opacity-0 transition-opacity hover:bg-surface-hover hover:text-accent group-hover:opacity-100 focus:opacity-100"
+                        >
+                          {copiedKey === whereCopyId ? t('profile.copiedSql') : t('profile.copySourceWhere')}
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
         </div>
       )}
     </section>

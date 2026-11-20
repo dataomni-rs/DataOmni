@@ -143,9 +143,9 @@
 
 ### 阶段 1（P0）：结构化数据深度分析升级
 
-- [ ] AN1 关系库表级抽样画像与按列语义智能视图
-  - `TableDataViewer` 支持「当前页 / 表级抽样（1,000 / 5,000 / 20,000 行，继承当前过滤条件、可取消、标明样本口径）」切换；
-  - `DataProfileDialog` 按列语义分流：高基数/唯一 ID 列默认折叠无意义 Top-5 仅告警重复/空值、时间列补迷你趋势折线（Sparkline）、数值列补离群值一键下钻，支持一键复制原库方言 `WHERE` 或跳回原表筛选。
+- [x] AN1 关系库表级抽样画像与按列语义智能视图（`local_analytics::tests` 10 条全通 + 前端 `tableSampleQuery`/`analyticsProfile`/`DataProfileDialog`/`TableDataViewer`/`catalog`/`shortcuts` 85 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - 新增 `src/utils/tableSampleQuery.ts`（7 类关系方言无排序限流抽样 SQL，严禁 `ORDER BY RAND()`）与 `runCancellableSampleQuery`（接入既有 `cancel_query` 驱动级取消）；`TableDataViewer` 与 `DataProfileDialog` 支持「当前页 / 表抽样（1,000 / 5,000 / 20,000 行，继承当前过滤条件、明确标注样本口径）」切换；
+  - 后端 `local_analytics.rs` 为 `DATE`/`TIMESTAMP` 列补充自适应粒度 `timeBins`（12 桶时间分布）；`DataProfileDialog` 按列语义分流：默认折叠唯一/高基数 ID 列无意义 Top-5、渲染时间列内联 SVG Sparkline、数值列提供负值/`> P95` 离群值一键下钻，支持原库方言 `WHERE` 复制与直接「回表筛选」。
 - [ ] AN2 DuckDB 工作台多表联动对账（结果集 × 本地文件 / 跨查询结果）
   - `services/local_analytics.rs` 新增 `analytics_attach_result` / `analytics_attach_file`（本地文件经独立瞬态只读连接物化再 `Appender` 写入，用户 SQL 所在连接全程锁死 `enable_external_access=false` + `lock_configuration=true`，单会话上限 4 张表）；
   - `LocalAnalyticsDialog` 支持附加本地 CSV/Parquet/JSON 或另一标签结果，CodeMirror 补全同步覆盖多表列名，内置 `LEFT JOIN` 与 `EXCEPT` 对账模板。

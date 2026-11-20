@@ -1,5 +1,11 @@
-import type { ColumnProfile, HistogramBin, ProfileColumnType } from '../contracts/analytics';
+import type {
+  ColumnProfile,
+  HistogramBin,
+  ProfileColumnType,
+  TimeHistogramBin
+} from '../contracts/analytics';
 import type { MongoDocumentRow } from './mongoDocuments';
+import { quoteSqlIdentifier, type SqlIdentifierDialect } from './sqlIdentifiers';
 
 export type ProfileSortMode = 'order' | 'nulls' | 'distinct' | 'drift';
 export type NullSeverity = 'normal' | 'warn' | 'high';
@@ -157,6 +163,117 @@ export function buildProfileGroupBySql(columnName: string): string {
     'ORDER BY row_count DESC',
     'LIMIT 50'
   ].join('\n');
+}
+
+/**
+ * 识别噪音大于信息的高基数唯一列：全唯一（或 >= 5 行且去重率 >= 98% 且 Top-5 全为出现 1 次）时，
+ * 默认折叠 Top-5 示例列表，让用户一眼聚焦在空值率、枚举分布和异常列上。
+ */
+export function shouldCollapseTopValues(profile: ColumnProfile): boolean {
+  if (profile.topValues.length === 0) {
+    return false;
+  }
+  if (columnCardinalityHint(profile) === 'unique-key') {
+    return true;
+  }
+  return (
+    profile.totalCount >= 5
+    && profile.distinctRatio >= 0.98
+    && profile.topValues.every((entry) => entry.count <= 1)
+  );
+}
+
+export interface NumericOutlierSuggestion {
+  readonly kind: 'negative' | 'high';
+  readonly threshold: string;
+  readonly sql: string;
+}
+
+/**
+ * 数值列离群值快速下钻建议：
+ * - 优先抓意外负值（min < 0 且 p25 >= 0，常见于金额/数量/耗时脏数据）；
+ * - 否则在存在显著高位拖尾（max > p95）时给出一键 `> P95` 过滤 SQL。
+ */
+export function numericOutlierFilter(profile: ColumnProfile): NumericOutlierSuggestion | null {
+  if (profile.inferredType !== 'integer' && profile.inferredType !== 'numeric') {
+    return null;
+  }
+  if (profile.totalCount < 5 || profile.min === undefined || profile.max === undefined) {
+    return null;
+  }
+  const col = quoteDuckIdent(profile.name);
+  const minVal = Number(profile.min);
+  const maxVal = Number(profile.max);
+  if (Number.isFinite(minVal) && minVal < 0 && profile.p25 !== undefined && profile.p25 >= 0) {
+    return {
+      kind: 'negative',
+      threshold: '0',
+      sql: `SELECT * FROM result_set WHERE ${col} < 0`
+    };
+  }
+  if (
+    profile.p95 !== undefined
+    && Number.isFinite(profile.p95)
+    && Number.isFinite(maxVal)
+    && maxVal > profile.p95
+  ) {
+    const thresholdNum = Number(profile.p95.toFixed(4));
+    return {
+      kind: 'high',
+      threshold: formatProfileNumber(profile.p95),
+      sql: `SELECT * FROM result_set WHERE ${col} > ${thresholdNum} ORDER BY ${col} DESC`
+    };
+  }
+  return null;
+}
+
+/** 生成可粘贴回原数据库查询框的方言 `WHERE` 条件片段 */
+export function buildSourceWhereClause(
+  columnName: string,
+  inferredType: ProfileColumnType,
+  value: string | null,
+  dialect: SqlIdentifierDialect
+): string {
+  const col = quoteSqlIdentifier(columnName, dialect);
+  if (value === null) {
+    return `${col} IS NULL`;
+  }
+  if ((inferredType === 'integer' || inferredType === 'numeric') && /^-?\d+(\.\d+)?$/.test(value.trim())) {
+    return `${col} = ${value.trim()}`;
+  }
+  if (inferredType === 'boolean' && (value === 'true' || value === 'false')) {
+    return `${col} = ${value.toUpperCase()}`;
+  }
+  return `${col} = ${quoteDuckString(value)}`;
+}
+
+export interface SparklinePoint {
+  readonly x: number;
+  readonly y: number;
+  readonly label: string;
+  readonly count: number;
+}
+
+/** 将时间分桶计数映射为内联 SVG Sparkline 坐标点 */
+export function timeSparklinePoints(
+  bins: readonly TimeHistogramBin[],
+  width = 200,
+  height = 32,
+  padX = 4,
+  padY = 4
+): SparklinePoint[] {
+  if (bins.length < 2) {
+    return [];
+  }
+  const maxCount = bins.reduce((best, bin) => Math.max(best, bin.count), 0);
+  const innerW = Math.max(1, width - padX * 2);
+  const innerH = Math.max(1, height - padY * 2);
+  return bins.map((bin, idx) => {
+    const x = padX + (innerW * idx) / (bins.length - 1);
+    const ratio = maxCount > 0 ? bin.count / maxCount : 0;
+    const y = padY + innerH * (1 - ratio);
+    return { x, y, label: bin.label, count: bin.count };
+  });
 }
 
 /**
