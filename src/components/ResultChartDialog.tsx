@@ -97,11 +97,17 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
   const [heatY, setHeatY] = useState<number | null>(null);
   const [heatValue, setHeatValue] = useState<number | 'count' | null>(null);
 
-  // >200 行时的显式内存 DuckDB 聚合状态
+  const sourceNumericIndexes = useMemo(
+    () => detectNumericColumnIndexes(columns, rows as SerializedResultValue[][]),
+    [columns, rows]
+  );
+  const hasNumericSource = sourceNumericIndexes.length > 0;
+
+  // >200 行或无数值列时的显式内存 DuckDB 聚合状态
   const [aggregated, setAggregated] = useState<AggregatedDataset | null>(null);
   const [aggGroup, setAggGroup] = useState<string>(columns[0] ?? '');
   const [aggMetric, setAggMetric] = useState<string>('');
-  const [aggFn, setAggFn] = useState<ChartAggregateFn>('SUM');
+  const [aggFn, setAggFn] = useState<ChartAggregateFn>(() => (hasNumericSource ? 'SUM' : 'COUNT'));
   const [aggTopN, setAggTopN] = useState<number>(20);
   const [aggregating, setAggregating] = useState(false);
   const [aggError, setAggError] = useState<string | null>(null);
@@ -115,20 +121,19 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
   const activeColumns = aggregated ? aggregated.columns : columns;
   const activeRows = aggregated ? aggregated.rows : rows;
 
-  const sourceNumericIndexes = useMemo(
-    () => detectNumericColumnIndexes(columns, rows as SerializedResultValue[][]),
-    [columns, rows]
-  );
-
   useEffect(() => {
     if (columns.length > 0 && !columns.includes(aggGroup)) {
       const firstNonNumeric = columns.find((_, idx) => !sourceNumericIndexes.includes(idx));
       setAggGroup(firstNonNumeric ?? columns[0]);
     }
-    if (aggMetric === '' && sourceNumericIndexes.length > 0) {
+    if (sourceNumericIndexes.length === 0) {
+      if (aggFn !== 'COUNT') {
+        setAggFn('COUNT');
+      }
+    } else if (aggMetric === '') {
       setAggMetric(columns[sourceNumericIndexes[0]] ?? '');
     }
-  }, [columns, sourceNumericIndexes, aggGroup, aggMetric]);
+  }, [columns, sourceNumericIndexes, aggGroup, aggMetric, aggFn]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -208,7 +213,9 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
   };
 
   if (isChartRejection(suggestion)) {
-    const canAggregate = suggestion === 'too-many-rows' && columns.length > 0;
+    const canAggregate =
+      (suggestion === 'too-many-rows' || suggestion === 'no-numeric-column') && columns.length > 0;
+    const availableAggFns: readonly ChartAggregateFn[] = hasNumericSource ? AGG_FNS : ['COUNT'];
     return (
       <ChartShell onClose={onClose} title={t('chart.title')}>
         <div className="space-y-4 px-5 py-5">
@@ -240,7 +247,7 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
                     onChange={(event) => setAggFn(event.target.value as ChartAggregateFn)}
                     className="rounded-control border border-line-strong bg-surface-raised px-2 py-1 text-xs text-fg"
                   >
-                    {AGG_FNS.map((fn) => (
+                    {availableAggFns.map((fn) => (
                       <option key={fn} value={fn}>
                         {fn}
                       </option>
