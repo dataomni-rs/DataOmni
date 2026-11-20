@@ -93,8 +93,8 @@
 
 - [x] DA0 内存 DuckDB 装载、嵌套 JSON 投影、沙盒逃逸与取消实验（E1–E5）（`b54da35`，5 条集成实验全通含 E3 反向验证）
   - 实测结果与拍板结论已写回 [`rfcs/duckdb-analytics.md`](rfcs/duckdb-analytics.md) §3：10 万行 × 20 列 debug 构建装载 `1.5s` / 画像 `2.59s` / DuckDB 内存 `54.5 MiB`（拍板上限 `100,000` 行 + `512MB`）；5,000 条异构 JSON 纯内存扫键 + `Appender` `120ms`（快 `read_json_auto` 4 倍，零临时文件且精确区分缺键与 `null`）；本地文件模式须先物化建表再锁死 `enable_external_access = false` + `lock_configuration = true`（`VIEW` 锁后查询会被拒）；`interrupt()` `0ms` 中止 4 亿组合自连接并可立即复用连接；`BIGINT`/`HUGEINT`/`DECIMAL(38,s)`/`BLOB` 精度映射与溢出退 `VARCHAR` 验证通过。
-- [ ] DA1 内存 DuckDB 分析沙盒（`services/local_analytics.rs`）与列级数据画像（Data Profiling）
-  - 落地受容量上限保护、关标签即销毁的 `LocalAnalyticsRegistry`；实现 SQL 结果集与 MongoDB/ES JSON 文档的统一列画像（空值率、唯一值、Min/Max/P50/P95、迷你直方图、Top-5、NoSQL 字段覆盖率/Schema 漂移），按需触发，不拖慢普通查询。
+- [x] DA1 内存 DuckDB 分析沙盒（`services/local_analytics.rs`）与列级数据画像（Data Profiling）（`1a9f2b9`，`cargo test --lib` 464 条含 6 条沙盒/精度/取消/NoSQL 漂移门、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + 195 文件 2344 条全绿）
+  - 落地无 `AppHandle` 依赖的 `LocalAnalyticsRegistry`（10 万行上限、512MB 内存上限、8 会话 LRU 淘汰、装载后立即 `enable_external_access=false` + `lock_configuration=true` 反向验证、支持 `interrupt()` 取消恢复与卸载销毁）；实现 SQL 结果集与 MongoDB/ES 异构 JSON 文档（零临时文件、精确 `presentRatio`/`explicitNullCount`）统一列画像，新增 `DataProfileDialog` 并按需接入 SQL 查询结果、表浏览、MongoDB 集合页与 Elasticsearch 控制台。
 - [ ] DA2 结果集二次 SQL / 透视、Parquet 导出与本地文件即席探索
   - 在结果面板提供基于内存表 `result_set` 的二次只读 SQL 与 `GROUP BY` / `PIVOT` 快捷模板，支持导出 CSV / JSON / Parquet；支持直接打开本地 `.parquet` / `.csv` / `.json` 文件进行只读画像、SQL 与图表分析，不污染 `connections.json`。
 - [ ] DA3 原生 SVG 图表扩展、DuckDB 聚合破 200 行上限与 SVG/PNG 导出
