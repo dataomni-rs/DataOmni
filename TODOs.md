@@ -26,7 +26,7 @@
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证与 Homebrew Tap（`rfcs/roadmap-1.2.md`） | [x] `v1.2.0`（2026-11-17）与 `v1.2.1`（2026-11-18）正式发布，`dataomni-rs/homebrew-tap` 已上线；未结验证与渠道项并入 `v1.3` |
 | v1.3 路线 | 流水线提效、跨平台闭环、平滑更新与合规分发（`rfcs/roadmap-1.3.md`） | [-] `P0–P3`、`U1`、`U2`、`M1` 已完成并正式发布 `v1.2.2`（2026-11-19，带 `latest.json` 与 `dataomni-rs/homebrew-tap` 同步）；`P4`、`V1`、`V2`、`U3`、`M2`、`M3` 按实机与外部条件持续推进 |
-| v1.4 夯实根基 | 内置 DuckDB 统一分析与可视化、CLI/MCP 可用性增强、应用内克制型 AI 增强 | [ ] 设计文档已定稿（`rfcs/duckdb-analytics.md`、`rfcs/cli-mcp-usability.md`、`rfcs/ai-sql-assist.md`），按 DA → CM → AI 推进 |
+| v1.4 夯实根基 | 内置 DuckDB 统一分析与可视化、CLI/MCP 可用性增强、应用内克制型 AI 增强 | [-] 设计文档已定稿（`rfcs/duckdb-analytics.md`、`rfcs/cli-mcp-usability.md`、`rfcs/ai-sql-assist.md`），`DA0` 已完成，正按 DA → CM → AI 推进 |
 
 ---
 
@@ -91,8 +91,8 @@
 
 ### 第一阶段（DA）：内置 DuckDB 统一结果集分析与可视化（[`rfcs/duckdb-analytics.md`](rfcs/duckdb-analytics.md)）
 
-- [ ] DA0 内存 DuckDB 装载、嵌套 JSON 投影、沙盒逃逸与取消实验（E1–E5）
-  - 实测 1 万 / 5 万 / 10 万行 SQL 结果集与 5,000 条异构 MongoDB/ES 文档的装载耗时、画像耗时与峰值 RSS；反向验证 `enable_external_access = false` + `lock_configuration = true` 挡住 `read_text` / `COPY TO` / `ATTACH`，验证 `interrupt()` 取消后会话可复用，并将实测数字填回 `rfcs/duckdb-analytics.md` §3。
+- [x] DA0 内存 DuckDB 装载、嵌套 JSON 投影、沙盒逃逸与取消实验（E1–E5）（`b54da35`，5 条集成实验全通含 E3 反向验证）
+  - 实测结果与拍板结论已写回 [`rfcs/duckdb-analytics.md`](rfcs/duckdb-analytics.md) §3：10 万行 × 20 列 debug 构建装载 `1.5s` / 画像 `2.59s` / DuckDB 内存 `54.5 MiB`（拍板上限 `100,000` 行 + `512MB`）；5,000 条异构 JSON 纯内存扫键 + `Appender` `120ms`（快 `read_json_auto` 4 倍，零临时文件且精确区分缺键与 `null`）；本地文件模式须先物化建表再锁死 `enable_external_access = false` + `lock_configuration = true`（`VIEW` 锁后查询会被拒）；`interrupt()` `0ms` 中止 4 亿组合自连接并可立即复用连接；`BIGINT`/`HUGEINT`/`DECIMAL(38,s)`/`BLOB` 精度映射与溢出退 `VARCHAR` 验证通过。
 - [ ] DA1 内存 DuckDB 分析沙盒（`services/local_analytics.rs`）与列级数据画像（Data Profiling）
   - 落地受容量上限保护、关标签即销毁的 `LocalAnalyticsRegistry`；实现 SQL 结果集与 MongoDB/ES JSON 文档的统一列画像（空值率、唯一值、Min/Max/P50/P95、迷你直方图、Top-5、NoSQL 字段覆盖率/Schema 漂移），按需触发，不拖慢普通查询。
 - [ ] DA2 结果集二次 SQL / 透视、Parquet 导出与本地文件即席探索
