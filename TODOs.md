@@ -120,8 +120,8 @@
 - [x] AI0 既有缺陷修补与 AI 配置底座完善（`345b75e`，Rust `ai_commands` + `services::ai` 10 条全通含 500ms 内取消门、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + `aiSettings.test.ts` 7 条全绿）
   - [x] 修补 `src/utils/aiSettings.ts` `isAiKeyMissing` 误查 `DATAOMNI_CREDENTIAL_MISSING` 缺陷，对齐后端 `DATAOMNI_AI_KEY_MISSING` 并补回归单测；
   - [x] 新增 `ai_cancel(requestId)` 中止正在进行的模型请求、设置页「测试连接」按钮、本地无 Key 端点（Ollama / `127.0.0.1` / `::1`，自动绕过系统代理）免拦截支持，以及多预设（`#ai` / `#ai:local`）与「`STAGING`/`PROD` 仅允许本地模型」环境路由守卫（无损兼容旧版 `dataomni.ai-settings`）。
-- [ ] AI1 SQL 编辑器三把「手术刀」（动手前先完成 `rfcs/ai-sql-assist.md` §3 样本实验）
-  - 纯函数 `src/utils/aiSqlAssist.ts` + 透明发包面板，支持：① 自然语言生成/改写 SQL（手动选表上限 15 张，`PROD` 默认 0 表）；② `QueryErrorPanel` 报错一键诊断与修复对比；③ `QueryPlanDialog` EXPLAIN 执行计划瓶颈解读与候选索引建议（只出草稿/复制，绝不直接执行）。
+- [x] AI1 SQL 编辑器三把「手术刀」（`084cd6a`，`eslint` + `tsc` + 202 文件 2372 条全绿，含 `aiSqlAssist.test.ts` 与 `AiSqlAssistDialog.test.tsx`）
+  - 落地纯函数 `src/utils/aiSqlAssist.ts`（类型层拒绝任何表数据行入参；E1–E3 预算与解析门：选表上限 15 张、`PROD` 默认 0 张、报错诊断只抽涉及表列、EXPLAIN 原文截断至 16 KB，容忍裸 JSON / 代码块 / `fixedSql: null`）与 `AiSqlAssistDialog`，在 SQL 编辑器工具栏（NL→SQL / 选中改写，自动融合 `CM4` 连接级语义备注）、`QueryErrorPanel`（报错一键诊断修复）与 `QueryPlanDialog`（EXPLAIN 瓶颈与候选索引解读）三处克制接入，全程支持展开查看 `[system]/[user]` 原文、中途取消、敏感环境守卫拦截，且绝不自动执行 SQL。
 - [ ] AI2 数据字典 AI 业务语义注释草拟（与 `CM4` 闭环）
   - 按表分批草拟带 `[AI 推测]` 标识的业务说明，用户审阅修改后写入 `CM4` 的 `semantics/<id>.md`，反哺人读、编辑器 AI 与 CLI / MCP 外部 Agent。
 
