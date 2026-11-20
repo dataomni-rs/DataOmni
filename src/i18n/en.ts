@@ -826,7 +826,7 @@ export const en: Translations = {
   'grid.copyColumn': 'Copy column with its name',
   'grid.editRow': 'Edit this row',
   'grid.jumpToTable': 'Jump to {target}',
-  'grid.jumpToTableTitle': 'Jump to {target} (filter by value; or ⌘/Ctrl+click cell)',
+  'grid.jumpToTableTitle': 'Jump to {target} (filter by value; or {mod}+click cell)',
 
   // Column control: show/hide, freeze, density (width comes from drag and double-click autofit)
   'columns.title': 'Columns',

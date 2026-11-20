@@ -59,7 +59,7 @@ import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
 import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
 import { DENSITY_CELL_CLASS } from '../utils/gridColumns';
 import { useSettingsStore } from '../stores/settingsStore';
-import { SHORTCUTS, formatShortcut } from '../utils/shortcuts';
+import { SHORTCUTS, commandModifierLabel, formatShortcut, hasCommandModifier } from '../utils/shortcuts';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
 import { rowKeyFromColumns } from '../utils/rowIdentity';
 import { DatabaseType } from '../contracts';
@@ -854,7 +854,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                           canEdit && !isEditing && !generatedColumns.has(result.columns[cellIndex]) && 'cursor-pointer'
                         )}
                         onClick={(event) => {
-                          if ((event.metaKey || event.ctrlKey) && inlineJump) {
+                          if (hasCommandModifier(event) && inlineJump) {
                             event.preventDefault();
                             handleJump(inlineJump);
                             return;
@@ -900,7 +900,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                                 event.stopPropagation();
                                 handleJump(inlineJump);
                               }}
-                              title={t('grid.jumpToTableTitle', { target: inlineJump.targetLabel })}
+                              title={t('grid.jumpToTableTitle', { target: inlineJump.targetLabel, mod: commandModifierLabel() })}
                               aria-label={t('grid.jumpToTable', { target: inlineJump.targetLabel })}
                               className="shrink-0 rounded p-0.5 text-accent opacity-0 transition-opacity hover:bg-accent-soft focus:opacity-100 group-hover/cell:opacity-100"
                             >

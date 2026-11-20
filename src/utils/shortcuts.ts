@@ -110,6 +110,11 @@ export function hasCommandModifier(
   return platform === 'mac' ? event.metaKey : event.ctrlKey;
 }
 
+/** 当前平台的命令键文案（macOS 为 ⌘，其余平台为 Ctrl），用于修饰键+点击提示 */
+export function commandModifierLabel(platform: ShortcutPlatform = currentPlatform()): string {
+  return platform === 'mac' ? '⌘' : 'Ctrl';
+}
+
 /** 不是字母的键在两个平台各有各的写法，差一个就得在这里补一行 */
 const KEY_LABELS: Record<string, { mac: string; other: string }> = {
   enter: { mac: '⏎', other: 'Enter' },

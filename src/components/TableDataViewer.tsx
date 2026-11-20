@@ -136,6 +136,7 @@ import {
   resolveTableColumnJumps,
   type ResolvedCellJump
 } from '../utils/foreignKeyJump';
+import { commandModifierLabel, hasCommandModifier } from '../utils/shortcuts';
 import { buildFilterClause, isCompleteFilter, type ColumnFilter } from '../utils/tableFilters';
 import { serverLabel } from '../utils/serverPresets';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
@@ -1246,7 +1247,7 @@ export default function TableDataViewer({
       return (
         <td
           onClick={(event) => {
-            if ((event.metaKey || event.ctrlKey) && inlineJump && onJump) {
+            if (hasCommandModifier(event) && inlineJump && onJump) {
               event.preventDefault();
               onJump(inlineJump);
               return;
@@ -1282,7 +1283,7 @@ export default function TableDataViewer({
                   event.stopPropagation();
                   onJump(inlineJump);
                 }}
-                title={t('grid.jumpToTableTitle', { target: inlineJump.targetLabel })}
+                title={t('grid.jumpToTableTitle', { target: inlineJump.targetLabel, mod: commandModifierLabel() })}
                 aria-label={t('grid.jumpToTable', { target: inlineJump.targetLabel })}
                 className="shrink-0 rounded p-0.5 text-accent opacity-0 transition-opacity hover:bg-accent-soft focus:opacity-100 group-hover/cell:opacity-100"
               >

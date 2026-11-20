@@ -846,7 +846,7 @@ export const zh = {
   'grid.copyColumn': '复制整列（含列名）',
   'grid.editRow': '编辑这一行',
   'grid.jumpToTable': '跳转到 {target}',
-  'grid.jumpToTableTitle': '跳转到 {target}（按当前值筛选；也可按住 ⌘/Ctrl 点击单元格）',
+  'grid.jumpToTableTitle': '跳转到 {target}（按当前值筛选；也可按住 {mod} 点击单元格）',
 
   // 列控制：显示/隐藏、冻结、密度（列宽由拖拽与双击自适应完成）
   'columns.title': '列',
