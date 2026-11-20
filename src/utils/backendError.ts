@@ -60,6 +60,7 @@ const MESSAGES: Readonly<Record<string, TranslationKey>> = {
   DATAOMNI_AI_NOT_IN_BUILD: 'error.backend.aiNotInBuild',
   DATAOMNI_AI_REQUEST_FAILED: 'error.backend.aiRequestFailed',
   DATAOMNI_AI_BAD_RESPONSE: 'error.backend.aiBadResponse',
+  DATAOMNI_AI_CANCELLED: 'error.backend.aiCancelled',
   DATAOMNI_CREDENTIAL_MIGRATION_FAILED: 'error.backend.credentialMigrationFailed',
   DATAOMNI_CONFIG_DIR_UNAVAILABLE: 'error.backend.configDirUnavailable',
   DATAOMNI_CONFIG_SAVE_FAILED: 'error.backend.configSaveFailed',

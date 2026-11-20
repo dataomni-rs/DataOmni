@@ -67,6 +67,7 @@ pub fn run() {
     .manage(services::duckdb::DuckDbRegistry::default())
     .manage(services::clickhouse::ClickHouseRegistry::default())
     .manage(services::local_analytics::LocalAnalyticsRegistry::default())
+    .manage(commands::ai_commands::AiRequestRegistry::default())
     .setup(|app| {
       // 启动日志留着：窗口起不来时，这一行是唯一能说明进程到底跑没跑的证据
       log::info!("DataOmni {} 启动", app.package_info().version);
@@ -174,6 +175,7 @@ pub fn run() {
       // AI 设计（没编进 `ai` feature 时命令照样在，一律回答「这个构建没有 AI」）
       ai_available,
       ai_complete,
+      ai_cancel,
       ai_save_key,
       ai_has_key,
       // 内置 DuckDB 统一结果集分析、列画像与本地文件探索（DA1–DA2）
