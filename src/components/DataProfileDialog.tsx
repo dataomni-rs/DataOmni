@@ -343,13 +343,20 @@ export function DataProfileDialog({ source, onClose }: DataProfileDialogProps) {
   );
 }
 
-interface ColumnProfileCardProps {
+export interface ColumnProfileCardProps {
   column: ColumnProfile;
   copiedKey: string | null;
   onCopySql: (key: string, sql: string) => void;
+  /** 当宿主工作台支持直接执行二次 SQL 时，点击高频值/空值直接跳转执行而非仅复制 */
+  onRunFilterSql?: (sql: string) => void;
 }
 
-function ColumnProfileCard({ column, copiedKey, onCopySql }: ColumnProfileCardProps) {
+export function ColumnProfileCard({
+  column,
+  copiedKey,
+  onCopySql,
+  onRunFilterSql
+}: ColumnProfileCardProps) {
   const t = useLanguageStore((state) => state.t);
   const severity = nullSeverity(column.nullRatio);
   const drift = hasSchemaDrift(column);
@@ -398,8 +405,15 @@ function ColumnProfileCard({ column, copiedKey, onCopySql }: ColumnProfileCardPr
         {column.nullCount > 0 && (
           <button
             type="button"
-            onClick={() => onCopySql(nullCopyId, buildProfileNullFilterSql(column.name))}
-            title={t('profile.copyNullSql')}
+            onClick={() => {
+              const sql = buildProfileNullFilterSql(column.name);
+              if (onRunFilterSql) {
+                onRunFilterSql(sql);
+              } else {
+                onCopySql(nullCopyId, sql);
+              }
+            }}
+            title={onRunFilterSql ? t('analytics.applyNullSql') : t('profile.copyNullSql')}
             className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg"
           >
             {copiedKey === nullCopyId ? <Check size={11} className="text-success" /> : <Copy size={11} />}
@@ -555,13 +569,15 @@ function ColumnProfileCard({ column, copiedKey, onCopySql }: ColumnProfileCardPr
                 <li key={copyId} className="group flex items-center gap-2 text-[11px]">
                   <button
                     type="button"
-                    onClick={() =>
-                      onCopySql(
-                        copyId,
-                        buildProfileFilterSql(column.name, column.inferredType, entry.value)
-                      )
-                    }
-                    title={t('profile.copyFilterSql')}
+                    onClick={() => {
+                      const sql = buildProfileFilterSql(column.name, column.inferredType, entry.value);
+                      if (onRunFilterSql) {
+                        onRunFilterSql(sql);
+                      } else {
+                        onCopySql(copyId, sql);
+                      }
+                    }}
+                    title={onRunFilterSql ? t('analytics.applyFilterSql') : t('profile.copyFilterSql')}
                     className="relative flex min-w-0 flex-1 items-center justify-between overflow-hidden rounded bg-surface-sunken px-2 py-0.5 text-left transition-colors hover:bg-surface-hover"
                   >
                     <span

@@ -28,6 +28,7 @@ import {
   Upload,
   BarChart2,
   BarChart3 as ChartIcon,
+  Database,
   Lock,
   Filter,
   Columns3,
@@ -59,6 +60,7 @@ import { ColumnResizeHandle } from './ColumnResizeHandle';
 import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
 import { ResultChartDialog } from './ResultChartDialog';
 import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
+import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
 import { CsvImportDialog } from './CsvImportDialog';
 import { useTaskStore } from '../stores/taskStore';
 import {
@@ -210,6 +212,7 @@ export default function TableDataViewer({
   const [showExport, setShowExport] = useState(false);
   const [showChart, setShowChart] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showAnalyze, setShowAnalyze] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importTaskId, setImportTaskId] = useState<string | null>(null);
   const [schemaObjects, setSchemaObjects] = useState<SchemaObjects | null>(null);
@@ -727,6 +730,15 @@ export default function TableDataViewer({
       rows: visibleRows
     }),
     [columnNames, tableSchema?.columns, visibleIndexes, visibleRows]
+  );
+  const analyticsSource = useMemo<LocalAnalyticsSource>(
+    () => ({
+      kind: 'resultSet',
+      title: tableName,
+      columns: profileSource.kind === 'resultSet' ? profileSource.columns : [],
+      rows: visibleRows
+    }),
+    [profileSource, tableName, visibleRows]
   );
   // 行编辑时每格多一个「写入方式」下拉，日期时间格还多一个选择器，列宽跟着让出来
   const visibleWidths = visibleIndexes.map((index) => {
@@ -1458,6 +1470,16 @@ export default function TableDataViewer({
                     </button>
 
                     <button
+                      onClick={() => setShowAnalyze(true)}
+                      disabled={tableData.length === 0}
+                      className="flex items-center space-x-1 px-3 py-1.5 text-sm text-fg border border-line-strong rounded-control hover:bg-surface-hover transition-colors disabled:opacity-50"
+                      title={t('result.analyzeTitle')}
+                    >
+                      <Database size={14} />
+                      <span>{t('result.analyze')}</span>
+                    </button>
+
+                    <button
                       onClick={() => setShowChart(true)}
                       disabled={tableData.length === 0}
                       className="flex items-center space-x-1 px-3 py-1.5 text-sm text-fg border border-line-strong rounded-control hover:bg-surface-hover transition-colors disabled:opacity-50"
@@ -1998,6 +2020,13 @@ export default function TableDataViewer({
         <DataProfileDialog
           source={profileSource}
           onClose={() => setShowProfile(false)}
+        />
+      )}
+
+      {showAnalyze && (
+        <LocalAnalyticsDialog
+          source={analyticsSource}
+          onClose={() => setShowAnalyze(false)}
         />
       )}
     </div>

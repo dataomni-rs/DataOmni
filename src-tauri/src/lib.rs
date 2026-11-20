@@ -172,10 +172,13 @@ pub fn run() {
       ai_complete,
       ai_save_key,
       ai_has_key,
-      // 内置 DuckDB 统一结果集分析与列画像（DA1）
+      // 内置 DuckDB 统一结果集分析、列画像与本地文件探索（DA1–DA2）
       analytics_load_result,
       analytics_load_json_docs,
+      analytics_open_file,
       analytics_profile,
+      analytics_query,
+      analytics_export_parquet,
       analytics_cancel,
       analytics_close,
       // 文件写入

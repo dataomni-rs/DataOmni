@@ -1,4 +1,9 @@
-export type AnalyticsSourceKind = 'resultSet' | 'jsonDocuments';
+import type { DriverQueryColumn } from './query';
+import type { SerializedResultValue } from './resultSet';
+
+export type AnalyticsSourceKind = 'resultSet' | 'jsonDocuments' | 'localFile';
+
+export type LocalFileKind = 'parquet' | 'csv' | 'tsv' | 'json' | 'ndjson';
 
 export type ProfileColumnType =
   | 'integer'
@@ -28,10 +33,26 @@ export interface AnalyticsColumnMeta {
 export interface AnalyticsSessionSummary {
   readonly analyticsId: string;
   readonly sourceKind: AnalyticsSourceKind;
+  readonly fileKind?: LocalFileKind;
   readonly rowCount: number;
   readonly columnCount: number;
   readonly truncated: boolean;
   readonly columns: readonly AnalyticsColumnMeta[];
+}
+
+export interface AnalyticsQueryResult {
+  readonly columns: readonly string[];
+  readonly columnMetadata: readonly DriverQueryColumn[];
+  readonly rows: ReadonlyArray<readonly SerializedResultValue[]>;
+  readonly rowCount: number;
+  readonly truncated: boolean;
+  readonly truncationReason: 'row_limit' | 'byte_limit' | null;
+  readonly elapsedMs: number;
+}
+
+export interface ParquetExportSummary {
+  readonly rowCount: number;
+  readonly bytes: number;
 }
 
 export interface HistogramBin {

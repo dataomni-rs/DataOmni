@@ -637,7 +637,9 @@ fn run_statement(
 }
 
 /// 结果集的列：同名的编上号，元数据与行里的键用的是同一份名字
-fn column_header(statement: &duckdb::Statement<'_>) -> (Vec<QueryColumnMetadata>, Vec<String>) {
+pub(crate) fn column_header(
+  statement: &duckdb::Statement<'_>,
+) -> (Vec<QueryColumnMetadata>, Vec<String>) {
   let names = number_duplicate_columns(statement.column_names().iter().map(String::as_str));
   let metadata = names
     .iter()
@@ -732,7 +734,7 @@ const MAX_SAFE_INTEGER: i128 = (1 << 53) - 1;
 /// 一个单元格。约定和另外几家相同：超出安全整数的、小数、时间与二进制带类型
 /// 标签，以文本传；其余是裸值。嵌套类型（LIST / STRUCT / MAP / UNION）整个写成
 /// 一段 JSON 文本，标成 `json`。
-fn decode(value: &Value, type_id: LogicalTypeId) -> JsonValue {
+pub(crate) fn decode(value: &Value, type_id: LogicalTypeId) -> JsonValue {
   match value {
     Value::Null => JsonValue::Null,
     Value::Boolean(value) => JsonValue::from(*value),

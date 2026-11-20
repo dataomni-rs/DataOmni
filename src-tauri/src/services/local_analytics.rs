@@ -11,20 +11,29 @@
 //! - MongoDB / Elasticsearch 异构 JSON 文档走纯内存单遍扫键 + `Appender`，不落临时文件，
 //!   同时精确统计 `present_count`（字段存在次数）与 `explicit_null_count`（字段存在但值为 `null`）。
 
-use crate::services::query_executor::number_duplicate_columns;
-use crate::services::QueryError;
+use crate::services::duckdb::{column_header as duckdb_column_header, decode as duckdb_decode};
+use crate::services::query_executor::{
+  number_duplicate_columns, QueryColumnMetadata, QueryTruncationReason, DEFAULT_QUERY_BYTE_LIMIT,
+};
+use crate::services::{read_only_gate, QueryError};
+use duckdb::core::LogicalTypeId;
 use duckdb::types::Value;
 use duckdb::{appender_params_from_iter, Connection, InterruptHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// 内存分析单会话默认最大装载行数（DA0 E1：10 万行 × 20 列 DuckDB 内存 54.5 MiB）
 pub const MAX_ANALYTICS_ROWS: usize = 100_000;
+/// 二次 SQL 查询默认返回行数上限
+pub const DEFAULT_ANALYTICS_QUERY_LIMIT: usize = 10_000;
+/// 二次 SQL 查询默认超时（秒）
+pub const DEFAULT_ANALYTICS_TIMEOUT_SECS: u64 = 30;
 /// 允许同时存活的分析会话上限；超出时按 LRU 淘汰最久未使用的非活跃会话
 pub const MAX_ANALYTICS_SESSIONS: usize = 8;
 /// 单会话 DuckDB 内存硬上限
@@ -40,6 +49,12 @@ pub const TOP_VALUES_LIMIT: usize = 5;
 pub const ANALYTICS_NOT_FOUND_CODE: &str = "DATAOMNI_ANALYTICS_NOT_FOUND";
 /// 分析查询已被用户取消
 pub const ANALYTICS_CANCELLED_CODE: &str = "DATAOMNI_ANALYTICS_CANCELLED";
+/// 二次 SQL 违反只读白名单（写关键字、多语句或副作用函数）
+pub const ANALYTICS_READ_ONLY_REFUSED_CODE: &str = "DATAOMNI_ANALYTICS_READ_ONLY_REFUSED";
+/// 二次 SQL 执行超时
+pub const ANALYTICS_TIMEOUT_CODE: &str = "DATAOMNI_ANALYTICS_TIMEOUT";
+/// 本地数据文件格式不受支持或无法打开
+pub const ANALYTICS_UNSUPPORTED_FILE_CODE: &str = "DATAOMNI_ANALYTICS_UNSUPPORTED_FILE";
 
 const LOCK_POISONED: &str = "Analytics session lock poisoned";
 
@@ -48,6 +63,17 @@ const LOCK_POISONED: &str = "Analytics session lock poisoned";
 pub enum AnalyticsSourceKind {
   ResultSet,
   JsonDocuments,
+  LocalFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalFileKind {
+  Parquet,
+  Csv,
+  Tsv,
+  Json,
+  Ndjson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,10 +115,31 @@ pub struct AnalyticsColumnMeta {
 pub struct AnalyticsSessionSummary {
   pub analytics_id: String,
   pub source_kind: AnalyticsSourceKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file_kind: Option<LocalFileKind>,
   pub row_count: usize,
   pub column_count: usize,
   pub truncated: bool,
   pub columns: Vec<AnalyticsColumnMeta>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsQueryResult {
+  pub columns: Vec<String>,
+  pub column_metadata: Vec<QueryColumnMetadata>,
+  pub rows: Vec<Vec<JsonValue>>,
+  pub row_count: usize,
+  pub truncated: bool,
+  pub truncation_reason: Option<QueryTruncationReason>,
+  pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParquetExportSummary {
+  pub row_count: u64,
+  pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +280,7 @@ pub struct AnalyticsSession {
   cancelled: AtomicBool,
   busy: AtomicBool,
   source_kind: AnalyticsSourceKind,
+  file_kind: Option<LocalFileKind>,
   row_count: usize,
   truncated: bool,
   columns: Vec<ColumnPlan>,
@@ -292,11 +340,56 @@ impl LocalAnalyticsRegistry {
     self.insert(session)
   }
 
+  /// 打开本地 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件物化到内存表后锁死沙盒
+  pub async fn open_file(&self, path: PathBuf) -> Result<AnalyticsSessionSummary, QueryError> {
+    let session = blocking(move || open_local_file_session(&path, MAX_ANALYTICS_ROWS)).await?;
+    self.insert(session)
+  }
+
   /// 对指定会话执行列级数据画像（异步在阻塞线程池跑，可被 `cancel` 中止）
   pub async fn profile(&self, analytics_id: &str) -> Result<ProfileResult, QueryError> {
     let session = self.get(analytics_id)?;
     let id = analytics_id.to_string();
     blocking(move || profile_session(&id, &session)).await
+  }
+
+  /// 对内存表 `result_set` 执行单条只读 SQL（`read_only_gate` + 沙盒双保险 + 超时中止）
+  pub async fn query(
+    &self,
+    analytics_id: &str,
+    sql: String,
+    limit: Option<usize>,
+    timeout_seconds: Option<u64>,
+  ) -> Result<AnalyticsQueryResult, QueryError> {
+    let session = self.get(analytics_id)?;
+    let row_limit = limit.unwrap_or(DEFAULT_ANALYTICS_QUERY_LIMIT).clamp(1, MAX_ANALYTICS_ROWS);
+    let timeout_secs = timeout_seconds.unwrap_or(DEFAULT_ANALYTICS_TIMEOUT_SECS).clamp(1, 300);
+    let interrupt = Arc::clone(&session.interrupt);
+    let session_for_work = Arc::clone(&session);
+
+    let fut =
+      blocking(move || query_session(&session_for_work, &sql, row_limit, DEFAULT_QUERY_BYTE_LIMIT));
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), fut).await {
+      Ok(result) => result,
+      Err(_) => {
+        interrupt.interrupt();
+        Err(QueryError::with_code(
+          ANALYTICS_TIMEOUT_CODE,
+          format!("{ANALYTICS_TIMEOUT_CODE}: {timeout_secs}"),
+        ))
+      }
+    }
+  }
+
+  /// 将内存表或指定只读查询结果导出为 Parquet（用户 SQL 仅在沙盒内执行，经瞬态连接原子写盘）
+  pub async fn export_parquet(
+    &self,
+    analytics_id: &str,
+    sql: Option<String>,
+    output_path: PathBuf,
+  ) -> Result<ParquetExportSummary, QueryError> {
+    let session = self.get(analytics_id)?;
+    blocking(move || export_parquet_from_session(&session, sql.as_deref(), &output_path)).await
   }
 
   /// 中止正在该会话上运行的画像或分析查询；会话中止后保持可复用
@@ -332,6 +425,7 @@ impl LocalAnalyticsRegistry {
     let summary = AnalyticsSessionSummary {
       analytics_id: analytics_id.clone(),
       source_kind: session.source_kind,
+      file_kind: session.file_kind,
       row_count: session.row_count,
       column_count: session.columns.len(),
       truncated: session.truncated,
@@ -464,6 +558,7 @@ pub fn create_result_session(
     cancelled: AtomicBool::new(false),
     busy: AtomicBool::new(false),
     source_kind: AnalyticsSourceKind::ResultSet,
+    file_kind: None,
     row_count: admitted_rows.len(),
     truncated,
     columns: plans,
@@ -540,10 +635,410 @@ pub fn create_json_docs_session(
     cancelled: AtomicBool::new(false),
     busy: AtomicBool::new(false),
     source_kind: AnalyticsSourceKind::JsonDocuments,
+    file_kind: None,
     row_count: normalized_docs.len(),
     truncated,
     columns: plans,
   })
+}
+
+/// 识别受支持的本地只读探索数据文件扩展名
+pub fn detect_local_file_kind(path: &Path) -> Option<LocalFileKind> {
+  let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+  match ext.as_str() {
+    "parquet" | "pq" => Some(LocalFileKind::Parquet),
+    "csv" => Some(LocalFileKind::Csv),
+    "tsv" => Some(LocalFileKind::Tsv),
+    "json" => Some(LocalFileKind::Json),
+    "ndjson" | "jsonl" => Some(LocalFileKind::Ndjson),
+    _ => None,
+  }
+}
+
+/// 打开本地 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件物化为内存表 `result_set` 并立即锁死沙盒
+pub fn open_local_file_session(
+  path: &Path,
+  max_rows: usize,
+) -> Result<AnalyticsSession, QueryError> {
+  let Some(file_kind) = detect_local_file_kind(path) else {
+    return Err(QueryError::with_code(
+      ANALYTICS_UNSUPPORTED_FILE_CODE,
+      format!("{ANALYTICS_UNSUPPORTED_FILE_CODE}: {}", path.display()),
+    ));
+  };
+  let metadata = std::fs::metadata(path).map_err(|error| {
+    QueryError::message(format!("Failed to access local file {}: {error}", path.display()))
+  })?;
+  if !metadata.is_file() {
+    return Err(QueryError::with_code(
+      ANALYTICS_UNSUPPORTED_FILE_CODE,
+      format!("{ANALYTICS_UNSUPPORTED_FILE_CODE}: {}", path.display()),
+    ));
+  }
+
+  let path_str = path.to_str().ok_or_else(|| {
+    QueryError::with_code(
+      ANALYTICS_UNSUPPORTED_FILE_CODE,
+      format!("{ANALYTICS_UNSUPPORTED_FILE_CODE}: non-UTF-8 path"),
+    )
+  })?;
+  let escaped = path_str.replace('\'', "''");
+  let reader_expr = match file_kind {
+    LocalFileKind::Parquet => format!("read_parquet('{escaped}')"),
+    LocalFileKind::Csv => format!("read_csv_auto('{escaped}')"),
+    LocalFileKind::Tsv => format!("read_csv_auto('{escaped}', delim='\t')"),
+    LocalFileKind::Json => format!("read_json_auto('{escaped}')"),
+    LocalFileKind::Ndjson => format!("read_json_auto('{escaped}', format='newline_delimited')"),
+  };
+
+  let conn = open_memory_connection()?;
+  let probe_limit = max_rows.saturating_add(1);
+  conn
+    .execute_batch(&format!(
+      "CREATE TABLE __raw_import AS SELECT * FROM {reader_expr} LIMIT {probe_limit}"
+    ))
+    .map_err(duck_error)?;
+
+  let raw_count: i64 =
+    conn.query_row("SELECT COUNT(*) FROM __raw_import", [], |r| r.get(0)).map_err(duck_error)?;
+  let raw_count_u = raw_count.max(0) as usize;
+  let truncated = raw_count_u > max_rows;
+  let row_count = if truncated {
+    conn
+      .execute_batch(&format!(
+        "CREATE TABLE result_set AS SELECT * FROM __raw_import LIMIT {max_rows}; DROP TABLE __raw_import;"
+      ))
+      .map_err(duck_error)?;
+    max_rows
+  } else {
+    conn.execute_batch("ALTER TABLE __raw_import RENAME TO result_set;").map_err(duck_error)?;
+    raw_count_u
+  };
+
+  // 物化完成后立即锁死外部访问与配置，后续用户 SQL 与画像无法逃逸到磁盘
+  lock_sandbox(&conn)?;
+
+  let plans = introspect_result_table(&conn)?;
+  let interrupt = conn.interrupt_handle();
+  Ok(AnalyticsSession {
+    connection: Mutex::new(conn),
+    interrupt,
+    cancelled: AtomicBool::new(false),
+    busy: AtomicBool::new(false),
+    source_kind: AnalyticsSourceKind::LocalFile,
+    file_kind: Some(file_kind),
+    row_count,
+    truncated,
+    columns: plans,
+  })
+}
+
+fn introspect_result_table(conn: &Connection) -> Result<Vec<ColumnPlan>, QueryError> {
+  let mut stmt = conn.prepare("SELECT * FROM result_set LIMIT 0").map_err(duck_error)?;
+  drop(stmt.stream_arrow([]).map_err(duck_error)?);
+  let (metadata, _names) = duckdb_column_header(&stmt);
+  let mut plans = Vec::with_capacity(metadata.len());
+  for (idx, meta) in metadata.into_iter().enumerate() {
+    let logical = stmt.column_logical_type(idx);
+    let (storage, inferred_type) = map_duckdb_logical_type(&logical);
+    plans.push(ColumnPlan {
+      name: meta.name,
+      storage,
+      inferred_type,
+      precision_degraded: false,
+      presence: None,
+    });
+  }
+  Ok(plans)
+}
+
+fn map_duckdb_logical_type(
+  logical: &duckdb::core::LogicalTypeHandle,
+) -> (ColumnStorage, ProfileColumnType) {
+  match logical.id() {
+    LogicalTypeId::Boolean => (ColumnStorage::Boolean, ProfileColumnType::Boolean),
+    LogicalTypeId::Tinyint
+    | LogicalTypeId::Smallint
+    | LogicalTypeId::Integer
+    | LogicalTypeId::Bigint
+    | LogicalTypeId::UTinyint
+    | LogicalTypeId::USmallint
+    | LogicalTypeId::UInteger
+    | LogicalTypeId::UBigint => (ColumnStorage::BigInt, ProfileColumnType::Integer),
+    LogicalTypeId::Hugeint | LogicalTypeId::UHugeint => {
+      (ColumnStorage::HugeInt, ProfileColumnType::Integer)
+    }
+    LogicalTypeId::Decimal => {
+      (ColumnStorage::Decimal { scale: logical.decimal_scale() }, ProfileColumnType::Numeric)
+    }
+    LogicalTypeId::Float | LogicalTypeId::Double => {
+      (ColumnStorage::Double, ProfileColumnType::Numeric)
+    }
+    LogicalTypeId::Date => (ColumnStorage::Date, ProfileColumnType::Date),
+    LogicalTypeId::Time | LogicalTypeId::TimeTZ | LogicalTypeId::TimeNs => {
+      (ColumnStorage::Time, ProfileColumnType::Time)
+    }
+    LogicalTypeId::Timestamp
+    | LogicalTypeId::TimestampS
+    | LogicalTypeId::TimestampMs
+    | LogicalTypeId::TimestampNs
+    | LogicalTypeId::TimestampTZ => (ColumnStorage::Timestamp, ProfileColumnType::Datetime),
+    LogicalTypeId::Blob | LogicalTypeId::Geometry => {
+      (ColumnStorage::Blob, ProfileColumnType::Binary)
+    }
+    LogicalTypeId::List | LogicalTypeId::Array | LogicalTypeId::Struct => {
+      (ColumnStorage::Varchar, ProfileColumnType::Json)
+    }
+    _ => (ColumnStorage::Varchar, ProfileColumnType::Text),
+  }
+}
+
+/// 在沙盒内执行单条只读 SQL（`read_only_gate` + 沙盒锁双层防线，受行数与字节预算保护）
+pub fn query_session(
+  session: &AnalyticsSession,
+  sql: &str,
+  row_limit: usize,
+  byte_limit: usize,
+) -> Result<AnalyticsQueryResult, QueryError> {
+  if let Err(refusal) = read_only_gate::check(sql) {
+    return Err(QueryError::with_code(
+      ANALYTICS_READ_ONLY_REFUSED_CODE,
+      format!("{ANALYTICS_READ_ONLY_REFUSED_CODE}: {refusal}"),
+    ));
+  }
+
+  let started = Instant::now();
+  session.cancelled.store(false, Ordering::SeqCst);
+  session.busy.store(true, Ordering::Release);
+  let _busy_guard = ResetBusy(&session.busy);
+
+  let conn = session.connection.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+  let mut prepared =
+    conn.prepare(sql).map_err(|err| map_interrupt_error(duck_error(err), &session.cancelled))?;
+  drop(
+    prepared
+      .stream_arrow([])
+      .map_err(|err| map_interrupt_error(duck_error(err), &session.cancelled))?,
+  );
+  let (column_metadata, columns) = duckdb_column_header(&prepared);
+  let type_ids: Vec<LogicalTypeId> =
+    (0..columns.len()).map(|idx| prepared.column_logical_type(idx).id()).collect();
+
+  let mut raw_rows = prepared.raw_query();
+  let mut rows: Vec<Vec<JsonValue>> = Vec::new();
+  let mut bytes_read: usize = 0;
+  let mut truncation_reason: Option<QueryTruncationReason> = None;
+
+  while let Some(row) =
+    raw_rows.next().map_err(|err| map_interrupt_error(duck_error(err), &session.cancelled))?
+  {
+    if rows.len() >= row_limit {
+      truncation_reason = Some(QueryTruncationReason::RowLimit);
+      break;
+    }
+    let mut values = Vec::with_capacity(columns.len());
+    for (idx, type_id) in type_ids.iter().enumerate() {
+      let value: Value = row.get(idx).map_err(duck_error)?;
+      values.push(duckdb_decode(&value, *type_id));
+    }
+    let row_bytes = serde_json::to_vec(&values).map(|encoded| encoded.len()).unwrap_or(0);
+    if !rows.is_empty() && bytes_read.saturating_add(row_bytes) > byte_limit {
+      truncation_reason = Some(QueryTruncationReason::ByteLimit);
+      break;
+    }
+    bytes_read = bytes_read.saturating_add(row_bytes);
+    rows.push(values);
+  }
+
+  let row_count = rows.len();
+  Ok(AnalyticsQueryResult {
+    columns,
+    column_metadata,
+    rows,
+    row_count,
+    truncated: truncation_reason.is_some(),
+    truncation_reason,
+    elapsed_ms: started.elapsed().as_millis() as u64,
+  })
+}
+
+/// 将内存表或指定只读 SQL 的结果导出为 Parquet 文件（用户 SQL 仅在沙盒内跑，经独立瞬态连接原子落盘）
+pub fn export_parquet_from_session(
+  session: &AnalyticsSession,
+  sql: Option<&str>,
+  output_path: &Path,
+) -> Result<ParquetExportSummary, QueryError> {
+  let query_sql = match sql.map(str::trim) {
+    Some(s) if !s.is_empty() => s,
+    _ => "SELECT * FROM result_set",
+  };
+  if let Err(refusal) = read_only_gate::check(query_sql) {
+    return Err(QueryError::with_code(
+      ANALYTICS_READ_ONLY_REFUSED_CODE,
+      format!("{ANALYTICS_READ_ONLY_REFUSED_CODE}: {refusal}"),
+    ));
+  }
+
+  let parent = output_path.parent().ok_or_else(|| {
+    QueryError::message(format!("Output path has no parent directory: {}", output_path.display()))
+  })?;
+  if !parent.as_os_str().is_empty() && !parent.is_dir() {
+    return Err(QueryError::message(format!(
+      "Output directory does not exist: {}",
+      parent.display()
+    )));
+  }
+
+  session.cancelled.store(false, Ordering::SeqCst);
+  session.busy.store(true, Ordering::Release);
+  let _busy_guard = ResetBusy(&session.busy);
+
+  // 1) 在沙盒连接内安全执行用户只读 SQL，取出列类型与值
+  let (col_defs, exported_rows): (Vec<(String, String)>, Vec<Vec<Value>>) = {
+    let conn = session.connection.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+    let mut prepared = conn
+      .prepare(query_sql)
+      .map_err(|err| map_interrupt_error(duck_error(err), &session.cancelled))?;
+    drop(
+      prepared
+        .stream_arrow([])
+        .map_err(|err| map_interrupt_error(duck_error(err), &session.cancelled))?,
+    );
+    let (_metadata, names) = duckdb_column_header(&prepared);
+    let mut defs = Vec::with_capacity(names.len());
+    let mut type_ids = Vec::with_capacity(names.len());
+    for (idx, name) in names.iter().enumerate() {
+      let logical = prepared.column_logical_type(idx);
+      let id = logical.id();
+      type_ids.push(id);
+      defs.push((name.clone(), parquet_export_sql_type(&logical)));
+    }
+
+    let mut rows_iter = prepared.raw_query();
+    let mut collected = Vec::new();
+    while let Some(row) =
+      rows_iter.next().map_err(|err| map_interrupt_error(duck_error(err), &session.cancelled))?
+    {
+      if collected.len() >= MAX_ANALYTICS_ROWS {
+        break;
+      }
+      let mut values = Vec::with_capacity(defs.len());
+      for (idx, type_id) in type_ids.iter().enumerate() {
+        let raw: Value = row.get(idx).map_err(duck_error)?;
+        values.push(normalize_export_value(raw, *type_id));
+      }
+      collected.push(values);
+    }
+    (defs, collected)
+  };
+
+  // 2) 在独立瞬态内存连接中写入临时 Parquet 并原子替换目标文件（不执行任何用户 SQL）
+  let row_count = exported_rows.len() as u64;
+  let export_conn = open_memory_connection()?;
+  if col_defs.is_empty() {
+    export_conn.execute_batch("CREATE TABLE __export (__empty VARCHAR)").map_err(duck_error)?;
+  } else {
+    let ddl_cols: Vec<String> =
+      col_defs.iter().map(|(name, sql_ty)| format!("{} {sql_ty}", quote_ident(name))).collect();
+    export_conn
+      .execute_batch(&format!("CREATE TABLE __export ({})", ddl_cols.join(", ")))
+      .map_err(duck_error)?;
+    if !exported_rows.is_empty() {
+      let mut appender = export_conn.appender("__export").map_err(duck_error)?;
+      for row in &exported_rows {
+        appender.append_row(appender_params_from_iter(row.iter())).map_err(duck_error)?;
+      }
+      appender.flush().map_err(duck_error)?;
+    }
+  }
+
+  let file_name = output_path.file_name().and_then(|n| n.to_str()).unwrap_or("export.parquet");
+  let tmp_path = parent.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+  let tmp_str = tmp_path
+    .to_str()
+    .ok_or_else(|| QueryError::message("Temporary export path is not valid UTF-8"))?;
+  let escaped_tmp = tmp_str.replace('\'', "''");
+
+  let copy_res = export_conn
+    .execute_batch(&format!("COPY __export TO '{escaped_tmp}' (FORMAT PARQUET)"))
+    .map_err(duck_error);
+  if let Err(err) = copy_res {
+    let _ = std::fs::remove_file(&tmp_path);
+    return Err(err);
+  }
+
+  if let Err(err) = std::fs::rename(&tmp_path, output_path) {
+    let _ = std::fs::remove_file(&tmp_path);
+    return Err(QueryError::message(format!(
+      "Failed to finalize Parquet export {}: {err}",
+      output_path.display()
+    )));
+  }
+
+  let bytes = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+  Ok(ParquetExportSummary { row_count, bytes })
+}
+
+fn parquet_export_sql_type(logical: &duckdb::core::LogicalTypeHandle) -> String {
+  match logical.id() {
+    LogicalTypeId::Boolean => "BOOLEAN".to_string(),
+    LogicalTypeId::Tinyint => "TINYINT".to_string(),
+    LogicalTypeId::Smallint => "SMALLINT".to_string(),
+    LogicalTypeId::Integer => "INTEGER".to_string(),
+    LogicalTypeId::Bigint => "BIGINT".to_string(),
+    LogicalTypeId::UTinyint => "UTINYINT".to_string(),
+    LogicalTypeId::USmallint => "USMALLINT".to_string(),
+    LogicalTypeId::UInteger => "UINTEGER".to_string(),
+    LogicalTypeId::UBigint => "UBIGINT".to_string(),
+    LogicalTypeId::Hugeint => "HUGEINT".to_string(),
+    LogicalTypeId::UHugeint => "UHUGEINT".to_string(),
+    LogicalTypeId::Float => "FLOAT".to_string(),
+    LogicalTypeId::Double => "DOUBLE".to_string(),
+    LogicalTypeId::Decimal => {
+      format!("DECIMAL({},{})", logical.decimal_width(), logical.decimal_scale())
+    }
+    LogicalTypeId::Date => "DATE".to_string(),
+    LogicalTypeId::Time => "TIME".to_string(),
+    LogicalTypeId::Timestamp
+    | LogicalTypeId::TimestampS
+    | LogicalTypeId::TimestampMs
+    | LogicalTypeId::TimestampNs => "TIMESTAMP".to_string(),
+    LogicalTypeId::Blob | LogicalTypeId::Geometry => "BLOB".to_string(),
+    _ => "VARCHAR".to_string(),
+  }
+}
+
+fn normalize_export_value(value: Value, type_id: LogicalTypeId) -> Value {
+  match value {
+    Value::Null
+    | Value::Boolean(_)
+    | Value::TinyInt(_)
+    | Value::SmallInt(_)
+    | Value::Int(_)
+    | Value::BigInt(_)
+    | Value::UTinyInt(_)
+    | Value::USmallInt(_)
+    | Value::UInt(_)
+    | Value::UBigInt(_)
+    | Value::HugeInt(_)
+    | Value::Float(_)
+    | Value::Double(_)
+    | Value::Text(_)
+    | Value::Blob(_) => value,
+    Value::Decimal(dec) => Value::Text(dec.to_string()),
+    other => match duckdb_decode(&other, type_id) {
+      JsonValue::Null => Value::Null,
+      JsonValue::String(text) => Value::Text(text),
+      JsonValue::Object(map) => {
+        if let Some(val) = map.get("value").and_then(JsonValue::as_str) {
+          Value::Text(val.to_string())
+        } else {
+          Value::Text(JsonValue::Object(map).to_string())
+        }
+      }
+      json => Value::Text(json.to_string()),
+    },
+  }
 }
 
 /// 对已装载的分析会话执行全列画像（GUI / CLI / MCP 共用同一实现）
@@ -1981,5 +2476,167 @@ mod tests {
     assert_eq!(profile.columns[1].name, "id 2");
     assert_eq!(profile.columns[2].name, "col_3");
     assert_eq!(profile.columns[0].null_ratio, 0.0);
+  }
+
+  #[test]
+  fn secondary_query_supports_group_by_pivot_and_refuses_writes() {
+    let columns = vec![col("region", "text"), col("quarter", "text"), col("amount", "decimal")];
+    let rows = vec![
+      vec![json!("North"), json!("Q1"), json!(100.5)],
+      vec![json!("North"), json!("Q2"), json!(200.0)],
+      vec![json!("South"), json!("Q1"), json!(50.25)],
+      vec![json!("South"), json!("Q2"), json!(75.75)],
+    ];
+    let session = create_result_session(&columns, &rows, MAX_ANALYTICS_ROWS).expect("load");
+
+    // GROUP BY
+    let grouped = query_session(
+      &session,
+      "SELECT region, SUM(amount) AS total FROM result_set GROUP BY region ORDER BY region",
+      100,
+      DEFAULT_QUERY_BYTE_LIMIT,
+    )
+    .expect("group by");
+    assert_eq!(grouped.columns, vec!["region", "total"]);
+    assert_eq!(grouped.row_count, 2);
+    assert_eq!(grouped.rows[0][0], json!("North"));
+    assert_eq!(grouped.rows[0][1], json!(300.5));
+
+    // DuckDB 原生 PIVOT
+    let pivoted = query_session(
+      &session,
+      "PIVOT result_set ON quarter USING SUM(amount) GROUP BY region ORDER BY region",
+      100,
+      DEFAULT_QUERY_BYTE_LIMIT,
+    )
+    .expect("pivot");
+    assert_eq!(pivoted.row_count, 2);
+    assert!(pivoted.columns.contains(&"Q1".to_string()));
+    assert!(pivoted.columns.contains(&"Q2".to_string()));
+
+    // 行数截断门
+    let limited = query_session(&session, "SELECT * FROM result_set", 2, DEFAULT_QUERY_BYTE_LIMIT)
+      .expect("limited");
+    assert_eq!(limited.row_count, 2);
+    assert!(limited.truncated);
+    assert_eq!(limited.truncation_reason, Some(QueryTruncationReason::RowLimit));
+
+    // 写语句与多语句必须被 read_only_gate 拒绝
+    for bad in [
+      "DELETE FROM result_set",
+      "DROP TABLE result_set",
+      "SELECT 1; SELECT 2",
+      "SELECT * FROM read_text('/etc/hosts')",
+    ] {
+      let err = query_session(&session, bad, 100, DEFAULT_QUERY_BYTE_LIMIT)
+        .expect_err(&format!("must refuse {bad}"));
+      assert_eq!(err.code.as_deref(), Some(ANALYTICS_READ_ONLY_REFUSED_CODE));
+    }
+  }
+
+  #[test]
+  fn export_parquet_and_open_local_files_roundtrip_and_lock_sandbox() {
+    let dir = std::env::temp_dir().join(format!("dataomni-da2-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    let columns = vec![
+      col("id", "integer"),
+      col("name", "text"),
+      col("price", "decimal"),
+      col("created", "date"),
+      col("active", "boolean"),
+      col("raw", "binary"),
+    ];
+    let rows = vec![
+      vec![
+        json!(1),
+        json!("apple"),
+        json!({"type": "decimal", "value": "12.50"}),
+        json!({"type": "date", "value": "2026-11-20"}),
+        json!(true),
+        json!({"type": "binary", "value": "cafe"}),
+      ],
+      vec![
+        json!(2),
+        json!("banana"),
+        json!({"type": "decimal", "value": "8.25"}),
+        json!({"type": "date", "value": "2026-11-21"}),
+        json!(false),
+        JsonValue::Null,
+      ],
+      vec![
+        json!(3),
+        json!("cherry"),
+        json!({"type": "decimal", "value": "19.99"}),
+        json!({"type": "date", "value": "2026-11-22"}),
+        json!(true),
+        json!({"type": "binary", "value": "0102"}),
+      ],
+    ];
+    let src = create_result_session(&columns, &rows, MAX_ANALYTICS_ROWS).expect("load src");
+
+    // 1) 导出带过滤 SQL 的 Parquet
+    let parquet_path = dir.join("filtered.parquet");
+    let exported = export_parquet_from_session(
+      &src,
+      Some("SELECT id, name, price, created, active, raw FROM result_set WHERE active = true ORDER BY id"),
+      &parquet_path,
+    )
+    .expect("export parquet");
+    assert_eq!(exported.row_count, 2);
+    assert!(exported.bytes > 0);
+
+    // 写语句在导出 Parquet 里同样被拒
+    let bad_export =
+      export_parquet_from_session(&src, Some("DROP TABLE result_set"), &parquet_path)
+        .expect_err("refuse write in parquet export");
+    assert_eq!(bad_export.code.as_deref(), Some(ANALYTICS_READ_ONLY_REFUSED_CODE));
+
+    // 2) 用 open_local_file_session 重新打开刚导出的 Parquet 并验证沙盒已锁死
+    let reopened =
+      open_local_file_session(&parquet_path, MAX_ANALYTICS_ROWS).expect("open parquet");
+    assert_eq!(reopened.file_kind, Some(LocalFileKind::Parquet));
+    assert_eq!(reopened.row_count, 2);
+    assert!(!reopened.truncated);
+    let q = query_session(
+      &reopened,
+      "SELECT id, name FROM result_set ORDER BY id",
+      10,
+      DEFAULT_QUERY_BYTE_LIMIT,
+    )
+    .expect("query reopened");
+    assert_eq!(q.rows[0], vec![json!(1), json!("apple")]);
+    assert_eq!(q.rows[1], vec![json!(3), json!("cherry")]);
+    let prof = profile_session("pq-1", &reopened).expect("profile parquet");
+    assert_eq!(prof.column_count, 6);
+    {
+      let guard = reopened.connection.lock().expect("lock");
+      assert!(guard.execute_batch("SELECT * FROM read_text('/etc/hosts')").is_err());
+      assert!(guard.execute_batch("SET enable_external_access = true").is_err());
+    }
+
+    // 3) 打开 CSV 并验证行数上限截断（max_rows = 2 时 3 行文件被截断并标记 truncated = true）
+    let csv_path = dir.join("sample.csv");
+    std::fs::write(&csv_path, "k,v\na,1\nb,2\nc,3\n").expect("write csv");
+    let csv_session = open_local_file_session(&csv_path, 2).expect("open csv");
+    assert_eq!(csv_session.file_kind, Some(LocalFileKind::Csv));
+    assert_eq!(csv_session.row_count, 2);
+    assert!(csv_session.truncated);
+
+    // 4) 打开 NDJSON
+    let ndjson_path = dir.join("events.ndjson");
+    std::fs::write(&ndjson_path, "{\"id\":1,\"ok\":true}\n{\"id\":2,\"ok\":false}\n")
+      .expect("write ndjson");
+    let ndjson_session = open_local_file_session(&ndjson_path, 100).expect("open ndjson");
+    assert_eq!(ndjson_session.file_kind, Some(LocalFileKind::Ndjson));
+    assert_eq!(ndjson_session.row_count, 2);
+
+    // 5) 不支持的扩展名被拒
+    let bad_path = dir.join("notes.txt");
+    std::fs::write(&bad_path, "hello").expect("write txt");
+    let err = open_local_file_session(&bad_path, 100).err().expect("refuse .txt");
+    assert_eq!(err.code.as_deref(), Some(ANALYTICS_UNSUPPORTED_FILE_CODE));
+
+    let _ = std::fs::remove_dir_all(&dir);
   }
 }
