@@ -25,7 +25,7 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
-| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、预发布审计修复（`2f112c7` / `c44dd9d`）、真二进制 CLI/MCP 冒烟与 macOS 实界面核验已完成，待 PR 跑通 CI 与 `V1` 跨平台实机验收后发版 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、Keychain 覆盖修复、官网 CLI/MCP 文档与托管 `SKILL.md` 均已合入 `main`（PR `#59`–`#62`），`1.3.0` 版本与 README 准备就绪，待合并本 PR 后按需完成 `V1` 跨平台实机验收并打 `v1.3.0` 标签发版 |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -49,7 +49,7 @@
 
 ### 第二阶段（V）：跨平台打包版实机闭环与 Nightly 真库稳态
 
-- [ ] V1 Windows 11 与 Linux 打包版实机闭环验收（承接 `v1.2` `V1`）
+- [ ] V1 Windows 11 与 Linux 打包版实机闭环验收（承接 `v1.2` `V1`；实机验收步骤与一键脚本见 [`docs/packaged-verification-checklist.md`](docs/packaged-verification-checklist.md)，平台专项清单见 [`docs/windows-checklist.md`](docs/windows-checklist.md) 与 [`docs/linux-checklist.md`](docs/linux-checklist.md)）
   - 在 Linux（WebKitGTK 桌面容器，`.deb` / `.rpm`）与 Windows 11（WebView2，`.msi` / `-setup.exe`）打包产物上逐项实测：
     1. SQLite 经后端 `sqlx_pool` 打开、对象树与结构页读取、编辑预览提交、多连接独立关闭、不存在路径不误建空文件；
     2. 开启严格 CSP 后，SQL 编辑器、ER 图 PNG 导出、MongoDB / Redis / Neo4j / Elasticsearch 四大工作区及更新检查正常，`dataomni.log` 零 CSP 报错；
