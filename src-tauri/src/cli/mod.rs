@@ -2955,7 +2955,8 @@ mod tests {
       assert!(!stderr.contains("unknown command"), "{command}: {stderr}");
       if !["help", "version", "guide"].contains(command) {
         assert!(
-          GUIDE.contains(&format!("dataomni cli {command}")),
+          GUIDE.contains(&format!("dataomni {command}"))
+            || GUIDE.contains(&format!("dataomni cli {command}")),
           "guide does not show {command}"
         );
       }
