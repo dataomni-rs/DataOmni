@@ -205,9 +205,20 @@ fn unknown_fields(
 
 impl CredentialStore for SystemCredentialStore {
   fn set_password(&self, profile_id: &str, password: &str) -> Result<(), String> {
-    credential_entry(profile_id)?
-      .set_password(password)
-      .map_err(|error| describe_credential_write_failure(&error))
+    match credential_entry(profile_id)?.set_password(password) {
+      Ok(()) => Ok(()),
+      // 跨签名身份覆写（比如从 ad-hoc 开发版切到 Developer ID 正式签名包）会报 -25244，
+      // 与 `delete_password` 同理：先用系统 security 删旧条目，再按当前签名身份重建
+      #[cfg(target_os = "macos")]
+      Err(error) if written_by_another_signature(&error) => {
+        delete_with_security_tool(profile_id)
+          .map_err(|cause| format!("{CREDENTIAL_SAVE_FAILED}: {error}; {cause}"))?;
+        credential_entry(profile_id)?
+          .set_password(password)
+          .map_err(|retry| describe_credential_write_failure(&retry))
+      }
+      Err(error) => Err(describe_credential_write_failure(&error)),
+    }
   }
 
   fn get_password(&self, profile_id: &str) -> Result<String, String> {

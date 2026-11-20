@@ -370,7 +370,8 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
       // 会被默认值盖掉：先选了「生产」或「只读」再点类型，就悄悄变回了开发环境、关
       name: prev.name,
       environment: prev.environment ?? defaultConfig.environment,
-      agent_access: prev.agent_access ?? defaultConfig.agent_access
+      agent_access: prev.agent_access ?? defaultConfig.agent_access,
+      credential_ref: mode === 'edit' && prev.db_type === defaultConfig.db_type ? prev.credential_ref : undefined
     }));
   };
 
@@ -381,7 +382,8 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
       ...presetConfig,
       name: prev.name,
       environment: prev.environment ?? presetConfig.environment,
-      agent_access: prev.agent_access ?? presetConfig.agent_access
+      agent_access: prev.agent_access ?? presetConfig.agent_access,
+      credential_ref: mode === 'edit' && prev.db_type === presetConfig.db_type ? prev.credential_ref : undefined
     }));
   };
 
@@ -418,6 +420,8 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
   const oracleSid = isOracleSid(formData);
   const redisDeployment = redisMode(formData);
   const neo4jRouting = isNeo4jRouting(formData);
+  const hasStoredPassword =
+    mode === 'edit' && Boolean(formData.credential_ref) && (formData.save_password ?? true);
   // 一格都没填时不提示：刚勾开就红着一片，读起来像是用户做错了什么
   const tunnelGaps = tunnel && !isSshTunnelBlank(tunnel) ? sshTunnelProblems(tunnel) : [];
 
@@ -1141,7 +1145,11 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                           value={formData.password || ''}
                           onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
                           className="w-full px-3 py-2 pr-10 border border-line-strong rounded-control focus:outline-none focus:ring-2 focus:ring-accent"
-                          placeholder={esApiKey ? t('form.esApiKeyPlaceholder') : t('form.passwordPlaceholder')}
+                          placeholder={
+                            hasStoredPassword
+                              ? t('form.passwordStoredPlaceholder')
+                              : (esApiKey ? t('form.esApiKeyPlaceholder') : t('form.passwordPlaceholder'))
+                          }
                           {...PLAIN_TEXT_INPUT}
                         />
                         <button
@@ -1152,8 +1160,13 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                           {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                         </button>
                       </div>
+                      {hasStoredPassword && (
+                        <p className="mt-1 text-xs text-fg-muted">
+                          {t('form.passwordStoredHint')}
+                        </p>
+                      )}
                     </div>
-                    <div className="flex items-start">
+                    <div className="col-span-2 flex items-start">
                       <input
                         id="save-password"
                         type="checkbox"

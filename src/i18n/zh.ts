@@ -1275,6 +1275,8 @@ export const zh = {
   'form.usernamePlaceholder': '输入用户名',
   'form.password': '密码',
   'form.passwordPlaceholder': '输入密码',
+  'form.passwordStoredPlaceholder': '已保存（留空保持不变）',
+  'form.passwordStoredHint': '已保存在系统凭据库中，留空将沿用原密码，输入新内容才会覆盖。',
   'form.savePassword': '将密码保存到系统凭据库',
   'form.savePasswordHint': '关闭后密码仅在本次应用会话中使用，重启后需要重新输入。',
   'form.tlsCertificates': 'TLS 证书（用于加密数据库连接，与 SSH 私钥无关）',

@@ -200,3 +200,58 @@ describe('ConnectionForm 按编译期驱动列表过滤类型（M1）', () => {
     vi.mocked(invoke).mockImplementation(async () => null);
   });
 });
+
+describe('ConnectionForm 编辑模式已保存密码提示', () => {
+  it('已保存密码的连接编辑时提示留空保持不变，留空保存不会丢失 credential_ref', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { DatabaseType, createDefaultConfig } = await import('../stores/connectionStore');
+    const calls = vi.mocked(invoke);
+    calls.mockClear();
+    calls.mockImplementation(async (command: string) =>
+      command === 'get_connections' ? [] : null,
+    );
+
+    const savedMysql = {
+      ...createDefaultConfig(DatabaseType.MySQL),
+      id: 'mysql-saved-1',
+      name: 'claw',
+      host: '127.0.0.1',
+      port: 3306,
+      database: 'app',
+      username: 'dev',
+      password: '',
+      save_password: true,
+      credential_ref: 'system-keyring://connection/mysql-saved-1',
+      created_at: '2026-11-01T00:00:00Z',
+      updated_at: '2026-11-01T00:00:00Z',
+    };
+
+    await act(async () => {
+      root.render(<ConnectionForm mode="edit" connection={savedMysql} onClose={() => {}} />);
+    });
+
+    const pwd = container.querySelector<HTMLInputElement>('input[type="password"]');
+    expect(pwd?.placeholder).toBe('Saved (leave blank to keep)');
+    expect(container.textContent).toContain('Leave blank to keep it');
+
+    // 关闭「保存密码」后，不再提示「已保存在系统凭据库中」
+    const savePassword = container.querySelector<HTMLInputElement>('#save-password');
+    act(() => savePassword?.click());
+    expect(pwd?.placeholder).toBe('Enter a password');
+    expect(container.textContent).not.toContain('Leave blank to keep it');
+
+    // 重新勾选后恢复提示，直接留空保存仍保留 credential_ref
+    act(() => savePassword?.click());
+    await act(async () => button('Save connection').click());
+    const updated = calls.mock.calls.find(([command]) => command === 'update_connection');
+    expect(updated?.[1]).toMatchObject({
+      id: 'mysql-saved-1',
+      config: {
+        password: '',
+        save_password: true,
+        credential_ref: 'system-keyring://connection/mysql-saved-1',
+      },
+    });
+    calls.mockImplementation(async () => null);
+  });
+});
