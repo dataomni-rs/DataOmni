@@ -127,6 +127,10 @@ fn match_dollar_quote_tag(sql: &str, index: usize) -> Option<String> {
 
 fn match_oracle_q_quote(sql: &str, index: usize) -> Option<(usize, String)> {
   let bytes = sql.as_bytes();
+  // 先按 ASCII 首字节过滤：主循环按字节推进，遇到多字节 UTF-8 后续字节时绝不能切 &sql[index..]
+  if !matches!(bytes.get(index), Some(b'q' | b'Q' | b'n' | b'N')) {
+    return None;
+  }
   if let Some(prev) = prev_byte(bytes, index) {
     if is_identifier_word_byte(prev) || prev == b'$' || prev == b'#' {
       return None;
@@ -262,7 +266,7 @@ pub fn scan_parameters(sql: &str, dialect: &DatabaseType) -> Vec<NamedParameter>
         index += 1;
       }
       LexerState::DollarQuote { tag } => {
-        if sql[index..].starts_with(tag.as_str()) {
+        if bytes[index..].starts_with(tag.as_bytes()) {
           index += tag.len();
           state = LexerState::Normal;
         } else {
@@ -287,7 +291,7 @@ pub fn scan_parameters(sql: &str, dialect: &DatabaseType) -> Vec<NamedParameter>
         }
       }
       LexerState::QQuote { terminator } => {
-        if sql[index..].starts_with(terminator.as_str()) {
+        if bytes[index..].starts_with(terminator.as_bytes()) {
           index += terminator.len();
           state = LexerState::Normal;
         } else {
@@ -483,5 +487,18 @@ mod tests {
       rewrite_named_parameters("SELECT :a, :b", &DatabaseType::SQLite, &values),
       Err(NamedParameterError::UnusedParameters(vec!["extra".to_string()]))
     );
+  }
+
+  #[test]
+  fn handles_multibyte_utf8_in_oracle_and_dollar_quoted_sql() {
+    let oracle_sql = "SELECT '中文🚀', q'[测试文本 :ignored 🎉]' FROM 订单表 WHERE 状态 = :status";
+    let oracle_params = scan_parameters(oracle_sql, &DatabaseType::Oracle);
+    let names: Vec<&str> = oracle_params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["status"]);
+
+    let pg_sql = "SELECT $tag$中文内容 :ignored 🚀$tag$, :user_id";
+    let pg_params = scan_parameters(pg_sql, &DatabaseType::PostgreSQL);
+    let pg_names: Vec<&str> = pg_params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(pg_names, vec!["user_id"]);
   }
 }

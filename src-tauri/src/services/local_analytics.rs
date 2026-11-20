@@ -1565,7 +1565,8 @@ fn is_plain_time(raw: &str) -> bool {
 
 fn normalize_timestamp(raw: &str) -> Option<String> {
   let s = raw.trim();
-  if s.len() < 19 {
+  // 标准 SQL/ISO 时间戳全为 ASCII；先判定 is_ascii() 避免在多字节 UTF-8 文本上按字节下标切片 panic
+  if !s.is_ascii() || s.len() < 19 {
     return None;
   }
   let bytes = s.as_bytes();
@@ -2656,5 +2657,22 @@ mod tests {
     assert_eq!(err.code.as_deref(), Some(ANALYTICS_UNSUPPORTED_FILE_CODE));
 
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn non_ascii_timestamp_values_fall_back_to_text_without_panicking() {
+    assert_eq!(normalize_timestamp("2026年11月20日 12:00:00"), None);
+    assert_eq!(normalize_timestamp("2026-11-20T12:34:56Z").as_deref(), Some("2026-11-20 12:34:56"));
+
+    let columns = vec![AnalyticsColumnInput {
+      name: "created_at".to_string(),
+      logical_type: Some("datetime".to_string()),
+      database_type: Some("DATETIME".to_string()),
+    }];
+    let rows = vec![vec![JsonValue::String("2026年11月20日 12:00:00".to_string())]];
+    let session = create_result_session(&columns, &rows, MAX_ANALYTICS_ROWS).expect("load session");
+    let profile = profile_session("utf8-ts", &session).expect("profile");
+    assert_eq!(profile.row_count, 1);
+    assert_eq!(profile.columns[0].duckdb_type, "VARCHAR");
   }
 }
