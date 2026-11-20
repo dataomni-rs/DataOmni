@@ -26,7 +26,7 @@
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证与 Homebrew Tap（`rfcs/roadmap-1.2.md`） | [x] `v1.2.0`（2026-11-17）与 `v1.2.1`（2026-11-18）正式发布，`dataomni-rs/homebrew-tap` 已上线；未结验证与渠道项并入 `v1.3` |
 | v1.3 路线 | 流水线提效、跨平台闭环、平滑更新与合规分发（`rfcs/roadmap-1.3.md`） | [-] `P0–P3`、`U1`、`U2`、`M1` 已完成并正式发布 `v1.2.2`（2026-11-19，带 `latest.json` 与 `dataomni-rs/homebrew-tap` 同步）；`P4`、`V1`、`V2`、`U3`、`M2`、`M3` 按实机与外部条件持续推进 |
-| v1.4 夯实根基 | 内置 DuckDB 统一分析与可视化、CLI/MCP 可用性增强、应用内克制型 AI 增强 | [-] 设计文档已定稿（`rfcs/duckdb-analytics.md`、`rfcs/cli-mcp-usability.md`、`rfcs/ai-sql-assist.md`），`DA0` 已完成，正按 DA → CM → AI 推进 |
+| v1.4 夯实根基 | 内置 DuckDB 统一分析与可视化、CLI/MCP 可用性增强、应用内克制型 AI 增强 | [-] 第一阶段 `DA0–DA3` 已全部完成（`b54da35`、`1a9f2b9`、`69504ef`、`b31e453`），接下来推进 `CM` → `AI` |
 
 ---
 
@@ -97,8 +97,8 @@
   - 落地无 `AppHandle` 依赖的 `LocalAnalyticsRegistry`（10 万行上限、512MB 内存上限、8 会话 LRU 淘汰、装载后立即 `enable_external_access=false` + `lock_configuration=true` 反向验证、支持 `interrupt()` 取消恢复与卸载销毁）；实现 SQL 结果集与 MongoDB/ES 异构 JSON 文档（零临时文件、精确 `presentRatio`/`explicitNullCount`）统一列画像，新增 `DataProfileDialog` 并按需接入 SQL 查询结果、表浏览、MongoDB 集合页与 Elasticsearch 控制台。
 - [x] DA2 结果集二次 SQL / 透视、Parquet 导出与本地文件即席探索（`69504ef`，`cargo test --lib` 466 条含二次查询/PIVOT/Parquet 往返/本地文件锁沙盒门、`clippy` 默认与 `--no-default-features` 零告警、前端 `eslint` + `tsc` + 197 文件 2349 条全绿）
   - 在 `services/local_analytics.rs` 新增 `open_local_file_session`（物化 `.parquet`/`.csv`/`.tsv`/`.json`/`.ndjson` 后立即锁死 `enable_external_access = false` + `lock_configuration = true`）、`query_session`（`read_only_gate` + 沙盒锁双层防线，复用 `duckdb::decode`）与 `export_parquet_from_session`（沙盒内跑只读 SQL 取数、独立瞬态连接原子写盘）；落地 `LocalAnalyticsDialog`（`GROUP BY` / `PIVOT` / 重复空值快捷模板、列画像点击即过滤、图表、CSV/JSON/Parquet 导出）与侧边栏「打开本地数据文件」免连接探索入口。
-- [ ] DA3 原生 SVG 图表扩展、DuckDB 聚合破 200 行上限与 SVG/PNG 导出
-  - 在 `src/utils/resultChart.ts` 纯函数层扩展 `stacked-bar`、`area`、`scatter`、`heatmap`（不做双 Y 轴，不引入重型图库）；超 200 行时提供显式内存 DuckDB 聚合/分桶选项（标明口径、不悄悄采样）；复用 `src/utils/svgExport.ts` 导出 SVG / 2× PNG 与复制 Markdown 摘要。
+- [x] DA3 原生 SVG 图表扩展、DuckDB 聚合破 200 行上限与 SVG/PNG 导出（`b31e453`，`eslint` + `tsc` + 198 文件 2356 条全绿，含 `resultChart.test.ts` 33 条与 `ResultChartDialog.test.tsx`）
+  - 在纯函数 `src/utils/resultChart.ts` 扩展 `stacked-bar`、`area`、`scatter`（2,000 点上限显式提示）、`heatmap`（24×24 交叉热力图）及 Markdown 摘要，坚持不做双 Y 轴、零重型图库依赖；超 200 行时在 `ResultChartDialog` 内提供显式内存 DuckDB 聚合（`SUM/AVG/COUNT/MAX/MIN` + Top 10/20/50，标题栏标明口径并在聚合完成后立即销毁临时会话）；复用 `src/utils/svgExport.ts` 导出带主题背景色的 SVG 与 2× PNG。
 
 ### 第二阶段（CM）：CLI 与 MCP 可用性增强（[`rfcs/cli-mcp-usability.md`](rfcs/cli-mcp-usability.md)）
 
