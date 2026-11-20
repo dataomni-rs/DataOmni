@@ -25,7 +25,7 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
-| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] 第一阶段 `DA0–DA3` 已全部完成（`b54da35`、`1a9f2b9`、`69504ef`、`b31e453`），接下来推进 `CM` → `AI` → `V1` 实机验收 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] 第一阶段 `DA0–DA3` 与第二阶段 `CM1–CM4`（`9610f20`、`10b7e39`、`7d1e38f`、`a1d8aaa`）已全部完成，接下来推进 `AI0–AI2` → `V1` 实机验收 |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -110,8 +110,8 @@
   - 直接复用 `services/local_analytics.rs`：CLI 新增 `export --format parquet`（沿用只读事务与绝不覆盖已有文件规则）及 `profile <conn> "<sql>" [--limit N]`（默认 10,000 行、最高 100,000 行，写审计日志且不记 SQL 原文）与 `profile --file <path>`（仅 CLI 可用，不碰连接）；MCP 新增只读 `profile` 工具，schema 显式关闭 `additionalProperties` 且无 `file` 参数，反向验证传 `file` 或偷渡 `--file` 均报 `usage`。
 - [x] CM3 `cli query --param` 参数化查询与 `cli diff` 只读结构差异报告（`7d1e38f`，`cargo test --lib -- named_parameters cli::` 63 条全通 + 前端 `queryParameters.test.ts` 16 条含共用语料双测、`clippy` 默认与 `--no-default-features` 零告警）
   - 将 `:name` 扫描与各方言占位符改写沉淀至 `services/named_parameters.rs` 并新增共用语料 `fixtures/bind-parameters-conformance.json` 钉住前后端一致；`cli query` 新增 `--param` / `--param-null` / `--params-json`、MCP `query` 新增 `params`（单测验证参数哨兵值绝不落盘 `dataomni-cli.log`，并顺带修复 `duckdb-rs` 读取 `SQLNULL` 绑定列时的内部 panic）；新增 `cli/diff.rs`、`cli diff <src> <dst> [--format json|markdown]` 与 MCP `diff`（双边均经 Agent 权限与 `<id>#agent` 校验，任一侧为 `PROD` 或未开放统一返回相同 `not_found` 文案，只出差异报告绝不执行 DDL）。
-- [ ] CM4 连接级本地业务语义备注（Glossary）注入 `dictionary` / MCP
-  - 按连接存储独立侧文件 `semantics/<id>.md`（上限 32 KB，不影响 `connections.json` 与 `<id>#agent` 指纹）；无备注时输出逐字节兼容 `fixtures/dictionary-conformance.json`，有备注时自动附入 `cli dictionary` 与 MCP `dictionary` / `schema`。
+- [x] CM4 连接级本地业务语义备注（Glossary）注入 `dictionary` / MCP（`a1d8aaa`，`cargo test --lib` 481 条全通含 `connection_semantics` 与 `dictionary` 无侵入逐字节兼容门、`clippy` 默认与 `--no-default-features` 零告警、前端 200 文件 2362 条全绿）
+  - 新增 `services/connection_semantics.rs`，按连接存储独立侧文件 `semantics/<id>.md`（上限 32 KB、防路径穿越、删连接同步清理、不碰 `connections.json` 与 `<id>#agent` 指纹，超限读取按 UTF-8 字符边界显式截断）；连接表单新增 Markdown 语义备注编辑框；无备注时 `dictionary` 逐字节兼容 `fixtures/dictionary-conformance.json`，有备注时自动附入 `## Business Semantics & Notes`，单表 `cli/MCP schema` 按 `### <table>` 小节按需返回 `"semantics"` 字段。
 
 ### 第三阶段（AI）：应用内克制型 AI 可用性增强（[`rfcs/ai-sql-assist.md`](rfcs/ai-sql-assist.md)）
 
