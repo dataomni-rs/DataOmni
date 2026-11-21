@@ -105,11 +105,16 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 - Query templates: save reusable SQL snippets (reusing `:name` bind parameters and an optional dialect
   filter) from the editor toolbar or command palette (`⌘K`), then insert them with Undo history preserved
   or insert and run immediately.
-- Built-in sandboxed DuckDB analytics: profile columns (inferred type, null ratio, cardinality,
-  quantiles, top-5 values) across SQL results, table views, MongoDB collections and Elasticsearch hits,
-  run secondary SQL / `PIVOT` queries, export Apache Parquet, and explore local `.parquet` / `.csv` /
-  `.tsv` / `.json` / `.ndjson` files ad-hoc without creating a connection (`enable_external_access = false`
-  + `lock_configuration = true`, capped at 100k rows / 512 MB).
+- Built-in sandboxed DuckDB & multi-engine analytics: profile columns (inferred type, null/empty/padded
+  whitespace counts, cardinality, quantiles, histograms, time sparklines, top-5 values, health summary
+  bar, Pearson correlation heatmap, one-click Markdown report, and redacted-stats-only AI profile
+  insights) across SQL results, bounded table samples (1k / 5k / 20k rows), MongoDB collections and
+  Elasticsearch hits; attach up to 4 local reference files for `JOIN`/`EXCEPT` reconciliation, run
+  secondary SQL / `PIVOT` queries, export Apache Parquet, and explore local `.parquet` / `.csv` / `.tsv`
+  / `.json` / `.ndjson` files ad-hoc without a connection (`enable_external_access = false` +
+  `lock_configuration = true`, capped at 100k rows / 512 MB). Also includes native read-only diagnostics
+  for Redis (prefix memory / TTL / BigKey), MongoDB (nested schema drift & unused indexes), Elasticsearch
+  (`size: 0` aggregations & mapping/shard health), and Neo4j (`O(1)` counts & bounded supernode topology).
 - Native SVG charts: bar, stacked-bar, line, area, scatter and 24×24 heatmap charts with SVG and 2× PNG
   export. Never adds a dual Y-axis; beyond 200 rows, offers explicit in-memory DuckDB aggregation
   (`SUM`/`AVG`/`COUNT`/`MAX`/`MIN` + Top N) instead of silent sampling.

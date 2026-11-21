@@ -342,7 +342,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   过滤与搜索是两件事：搜索压暗保住图的形状，过滤直接把表拿掉并重排——
   两百张表的库里，把不相干的压暗仍然什么都看不清
 
-- 内置 DuckDB 本地分析与数据画像：把任意查询结果、表浏览页、MongoDB 集合或 Elasticsearch 命中结果装入受控内存 DuckDB 沙盒（`enable_external_access = false` + `lock_configuration = true`，上限 10 万行 / 512 MB），一键查看列级分布画像（类型、空值率、基数、分位数、Top 5），并直接执行二次 SQL / `PIVOT` 透视与 Apache Parquet 导出；侧边栏另支持免连接打开本地 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件即席探索（见 `rfcs/duckdb-analytics.md`）
+- 内置 DuckDB 本地分析与多引擎深度体检：把任意查询结果、表浏览页（支持「当前页」与继承筛选的 1,000 / 5,000 / 20,000 行有界表抽样）、MongoDB 集合或 Elasticsearch 命中结果装入受控内存 DuckDB 沙盒（`enable_external_access = false` + `lock_configuration = true`，上限 10 万行 / 512 MB），一键查看列级分布画像（类型、空值/空串/首尾空白、基数、分位数、直方图、时间趋势、Top 5、体检摘要条、Pearson 相关性双极热力图、一键 Markdown 体检报告与仅发脱敏统计摘要的 AI 体检解读），并直接执行多表附加对账（`JOIN`/`EXCEPT`）、二次 SQL / `PIVOT` 透视与 Apache Parquet 导出；另内置 Redis 键空间内存/TTL/BigKey 抽样体检、MongoDB 嵌套 Schema 漂移与僵尸索引诊断、Elasticsearch 服务端原生聚合（`size: 0`）与 Mapping/分片诊断、Neo4j `O(1)` 图概览与有界超级节点拓扑体检，以及侧边栏免连接打开本地 `.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson` 文件即席探索（见 `rfcs/duckdb-analytics.md` 与 `rfcs/multi-engine-analytics.md`）
 - 原生 SVG 图表：把当前结果画成柱状图、堆叠柱状图、折线图、面积图、散点图或 24×24 交叉热力图，支持导出带主题底色的 SVG 与 2× PNG。默认只画第一列数值，绝不开第二根纵轴；超过 200 行时不悄悄采样，可在弹窗内显式切入内存 DuckDB 聚合（`SUM`/`AVG`/`COUNT`/`MAX`/`MIN` + Top N）后再绘制
 
 > 尚未实现：筛选的 OR / IN。
@@ -593,9 +593,14 @@ bun install
 
 （暂无）
 
-### v1.3.0（2026-11-20）
+### v1.3.0（2026-11-21）
 
 - 内置 DuckDB 统一结果集分析与可视化（`rfcs/duckdb-analytics.md`）：新增受控内存 DuckDB 分析沙盒（10 万行 / 512 MB 上限、加载后立即锁死 `enable_external_access = false` 与 `lock_configuration = true`、支持取消与 LRU 淘汰），覆盖 SQL 查询结果、表浏览、MongoDB 集合与 Elasticsearch 命中结果的列级数据画像（Data Profiling）、二次 SQL / `PIVOT` 透视、Apache Parquet 导出及本地数据文件（`.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson`）免连接即席探索；原生 SVG 图表扩展堆叠柱状图、面积图、散点图与 24×24 热力图，超 200 行提供显式内存 DuckDB 聚合，并支持导出带主题底色的 SVG 与 2× PNG。
+- 多数据模型深度分析与体检增强（`rfcs/multi-engine-analytics.md`）：
+  - 关系库数据画像支持「当前页」与继承当前筛选/排序的 1,000 / 5,000 / 20,000 行有界表抽样，按列语义展示时间趋势折线、空字符串与首尾空白计数、高基数折叠、顶部体检摘要条与 `<` / `>` / `IS NULL` 一键回表筛选；
+  - DuckDB 工作台支持附加最多 4 张本地 CSV/Parquet/JSON 参考表（`ref_1..ref_4`）并附带 `LEFT JOIN` / `EXCEPT` / 金额核对快捷对账模板；
+  - 画像页新增一键复制脱敏 Markdown 体检报告、单遍 DuckDB Pearson 相关性矩阵（双极蓝红热力图与二维 Markdown 复制）以及受 `ai` feature 门控的脱敏统计摘要 AI 体检解读（零原始行外发，可展开核对完整提示词）；
+  - 非关系库新增原生只读诊断：Redis `SCAN` 渐进式前缀内存/TTL/BigKey 体检、MongoDB `$sample` 嵌套 Schema 漂移/数组长度分布与 `$indexStats` 僵尸索引识别、Elasticsearch `size: 0` 原生聚合模板与 Mapping/分片/热索引体检、Neo4j `O(1)` 标签关系概览与有界超级节点拓扑分析。
 - 顶层无头 CLI、TTY 格式化高亮与 MCP 可用性增强（`rfcs/cli-mcp-usability.md`）：CLI 升级为顶层直调 `dataomni <command>`（保留 `dataomni cli <command>` 兼容别名），交互终端自动漂亮缩进与 ANSI 语法高亮 JSON / Markdown，管道重定向自动输出紧凑纯 JSON，新增 `--pretty` / `--compact` / `--color` / `--no-color` 与子命令 `--help`；新增 `profile`（CLI 支持 `--file`、MCP 物理隔离本地文件）、`export --format parquet`、`query --param` / `--param-null` / `--params-json`、`diff` 只读结构比对（MySQL / PostgreSQL 3 次批量元数据查询优化）及连接级本地业务语义备注（`semantics/<id>.md`）；MCP 常驻会话内自动复用 SSH 隧道；设置页新增「命令行与 Agent」一键接入引导与只读审计日志查看器；内置 `dataomni guide` 与官网托管的 `https://dataomni.dev/SKILL.md` 同源同步。
 - 克制型应用内 AI 增强（`rfcs/ai-sql-assist.md`，继续位于 `ai` Cargo feature 后，零数据行外发）：修补 AI 密钥缺失检测，新增请求取消、连接测试、多预设配置、本地 Ollama 无 Key 直连（自动绕过系统代理）与「`STAGING`/`PROD` 仅允许本地模型」路由守卫；SQL 编辑器新增自然语言生成 / 改写、报错诊断修复与 EXPLAIN 瓶颈解读三处克制接入（可展开查看发包原文、绝不自动执行 SQL）；ER 图新增按批草拟业务语义注释并写入 `semantics/<id>.md` 与 CLI / MCP 形成闭环。
 - 连接体验与钥匙串修复：编辑已保存连接时直观标识已保存密码状态（支持保留原密码不重输或显式清除），并修复 macOS Keychain 覆盖旧条目时的 `-25244` 错误。
