@@ -1265,6 +1265,23 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-3-0",
+    toc_label: "v1.3.0 (2026-11-21)",
+    heading: "v1.3.0 — 2026-11-21",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Introduces the built-in sandboxed DuckDB analytics engine, multi-engine read-only diagnostics across five data models, top-level CLI with TTY highlighting, and restrained in-app AI assistance.",
+      ),
+      DocBlock::Bullets(&[
+        "Sandboxed in-memory DuckDB analytics & native charts: profile columns (inferred type, null/empty/padded whitespace counts, cardinality, quantiles, histograms, time sparklines, top-5 values) across SQL results, bounded table samples (1k / 5k / 20k rows inheriting active filters), MongoDB collections, and Elasticsearch hits; attach up to 4 local CSV/Parquet/JSON files for JOIN/EXCEPT reconciliation, run secondary SQL / PIVOT queries, export Apache Parquet, and explore local files ad-hoc (capped at 100k rows / 512 MB with enable_external_access = false and lock_configuration = true). Native SVG charts expand with stacked bar, area, scatter, 24×24 heatmap, Pearson correlation bipolar heatmap, 2D Markdown export, explicit DuckDB aggregation past 200 rows, and themed SVG / 2× PNG export.",
+        "Multi-engine read-only diagnostics: non-blocking Redis SCAN prefix memory / TTL / BigKey inspection, MongoDB $sample nested schema drift & $indexStats unused index detection, Elasticsearch size: 0 native aggregation templates & mapping/shard health checks, and Neo4j O(1) label/relationship overviews with bounded supernode topology analysis.",
+        "Top-level headless CLI & MCP ergonomics: call dataomni <command> directly (keeping dataomni cli as an alias) with automatic pretty/colored TTY JSON & Markdown and compact pipe JSON; adds profile (with --file on CLI and physical local-file isolation on MCP), Parquet export, typed --param / --param-null / --params-json bindings, bulk 3-query schema diff, per-connection local semantics (semantics/<id>.md), shared SSH tunnels in MCP sessions, and an in-app CLI & Agent setup guide with read-only audit log viewer.",
+        "Restrained in-app AI (behind the ai Cargo feature, zero raw rows sent): adds cancellation, connection testing, multi-preset configs, proxy-free local Ollama support, and a STAGING/PROD local-model guard; adds inspectable SQL generation/rewrite, error diagnosis, EXPLAIN bottleneck reading, ER semantics drafting, and redacted-stats-only profile health insights.",
+        "Connection & Keychain polish: saved password status indicator with explicit preserve/clear controls when editing connections, plus a fix for macOS Keychain -25244 overwrite errors.",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-2-2",
     toc_label: "v1.2.2 (2026-11-19)",
     heading: "v1.2.2 — 2026-11-19",
@@ -1362,7 +1379,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade compatibility notes for DataOmni v1.2.2, v1.2.1, v1.1.0, and v1.0.0 on macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.0 through v1.0.0 across macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1371,6 +1388,23 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-3-0",
+    toc_label: "v1.3.0（2026-11-21）",
+    heading: "v1.3.0 — 2026-11-21",
+    blocks: &[
+      DocBlock::Paragraph(
+        "正式引入受控内存 DuckDB 统一分析引擎、五大数据库原生只读深度体检、顶层高亮 CLI / MCP 体验增强，以及零原始行外发的克制型应用内 AI 助手。",
+      ),
+      DocBlock::Bullets(&[
+        "内置内存 DuckDB 分析沙盒与图表升级：支持 SQL 查询结果、继承当前筛选的 1,000 / 5,000 / 20,000 行有界表抽样、MongoDB 集合与 Elasticsearch 命中结果的列级画像（空值/空串/首尾空白、基数、分位数、直方图、时间趋势、体检摘要条、一键回表筛选与脱敏 Markdown 体检报告）；工作台支持附加最多 4 张本地 CSV/Parquet/JSON 参考表进行 JOIN/EXCEPT 对账、二次 SQL / PIVOT 透视与 Parquet 导出，并支持侧边栏免连接探索本地数据文件（10 万行 / 512 MB 上限并锁死 enable_external_access = false）。原生 SVG 图表新增堆叠柱图、面积图、散点图、24×24 交叉热力图、Pearson 相关性双极热力图、二维 Markdown 复制及带主题底色的 SVG / 2× PNG 导出。",
+        "五大引擎原生只读体检：新增 Redis 非阻塞 SCAN 前缀内存/TTL/BigKey 诊断、MongoDB $sample 嵌套 Schema 漂移与 $indexStats 僵尸索引识别、Elasticsearch size: 0 原生聚合模板与 Mapping/分片体检、Neo4j O(1) 图概览与有界超级节点拓扑分析。",
+        "顶层无头 CLI 与 MCP 增强：升级为顶层直调 dataomni <command>（兼容保留 dataomni cli），交互终端自动漂亮缩进与 ANSI 高亮、管道输出纯 JSON；新增 profile（CLI 支持 --file、MCP 物理隔离本地文件）、Parquet 导出、--param / --param-null / --params-json 绑定参数、3 次批量元数据查询 schema diff、连接级本地语义备注（semantics/<id>.md）、MCP 常驻会话复用 SSH 隧道，以及设置页「命令行与 Agent」一键接入引导与只读审计日志。",
+        "克制型应用内 AI 增强（ai Cargo feature 后，零数据行外发）：新增请求取消、连通测试、多预设配置、本地 Ollama 无 Key 直连与「STAGING/PROD 仅允许本地模型」路由守卫；提供 SQL 自然语言生成/改写、报错诊断、EXPLAIN 瓶颈解读、ER 业务语义批量草拟及基于脱敏统计摘要的数据画像体检解读（均可展开核对发包原文、绝不自动执行）。",
+        "连接体验与钥匙串修复：编辑连接时清晰标识已保存密码状态（支持保留原密码或显式清除），并修复 macOS Keychain 覆盖写入时的 -25244 错误。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-2-2",
     toc_label: "v1.2.2（2026-11-19）",
@@ -1469,7 +1503,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.2.2、v1.2.1、v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖三平台。",
+  meta_description: "DataOmni v1.3.0、v1.2.2、v1.2.1、v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖三平台。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
