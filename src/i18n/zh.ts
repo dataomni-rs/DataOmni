@@ -581,6 +581,8 @@ export const zh = {
   'profile.emptyStringChip.one': '空串 {count}',
   'profile.paddedWhitespaceChip': '首尾空格 {count}',
   'profile.paddedWhitespaceChip.one': '首尾空格 {count}',
+  'profile.copyReport': '复制 Markdown',
+  'profile.copiedReport': '已复制报告',
 
   'chart.title': '快速图表',
   'chart.type.bar': '柱状图',

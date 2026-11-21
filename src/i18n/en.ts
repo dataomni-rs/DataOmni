@@ -564,6 +564,8 @@ export const en: Translations = {
   'profile.emptyStringChip.one': '{count} empty string',
   'profile.paddedWhitespaceChip': '{count} padded spaces',
   'profile.paddedWhitespaceChip.one': '{count} padded space',
+  'profile.copyReport': 'Copy Markdown',
+  'profile.copiedReport': 'Report copied',
 
   'chart.title': 'Quick chart',
   'chart.type.bar': 'Bars',

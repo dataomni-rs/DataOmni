@@ -10,6 +10,7 @@ import {
   columnCardinalityHint,
   extractEsJsonDocs,
   filterAndSortProfiles,
+  formatProfileMarkdownReport,
   formatProfileNumber,
   formatProfileRatio,
   hasSchemaDrift,
@@ -295,5 +296,50 @@ describe('analyticsProfile', () => {
     ]);
     expect(buildProfileEmptyStringFilterSql('status')).toBe('SELECT * FROM result_set WHERE "status" = \'\'');
     expect(buildProfilePaddedWhitespaceFilterSql('status')).toContain('TRIM("status") <> "status"');
+  });
+
+  it('formats Markdown profile report with findings and strips raw sample values', () => {
+    const md = formatProfileMarkdownReport({
+      title: 'orders',
+      scopeLabel: 'Sampled · first 5,000 rows',
+      language: 'zh',
+      profile: {
+        rowCount: 5000,
+        columnCount: 2,
+        elapsedMs: 18,
+        columns: [
+          makeColumn({
+            name: 'email|raw',
+            inferredType: 'text',
+            duckdbType: 'VARCHAR',
+            totalCount: 5000,
+            nullCount: 250,
+            nullRatio: 0.05,
+            minLength: 0,
+            maxLength: 40,
+            emptyStringCount: 4,
+            topValues: [{ value: 'secret-user@example.com', count: 10, ratio: 0.002 }]
+          }),
+          makeColumn({
+            name: 'amount',
+            inferredType: 'numeric',
+            duckdbType: 'DOUBLE',
+            totalCount: 5000,
+            min: '-12',
+            max: '9999',
+            p25: 30,
+            p50: 100,
+            p95: 500
+          })
+        ]
+      }
+    });
+    expect(md).toContain('## 数据画像体检报告 · orders');
+    expect(md).toContain('Sampled · first 5,000 rows');
+    expect(md).toContain('`amount`: 存在负值 (< 0)');
+    expect(md).toContain('`email\\|raw`');
+    expect(md).toContain('空串 4');
+    // 隐私保护：不泄露 topValues 里的具体样本值
+    expect(md).not.toContain('secret-user@example.com');
   });
 });

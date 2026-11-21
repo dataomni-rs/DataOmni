@@ -171,7 +171,7 @@
 ### 阶段 4：分析高价值低膨胀增强（`AN7–AN10`）
 
 - [x] AN7 画像体检增强：顶部异常摘要条、文本空串/首尾空格检测与数值 `<` / `>` 一键回表筛选（Rust `local_analytics::tests` 13 条 + 前端 `analyticsProfile`/`DataProfileDialog`/`LocalAnalyticsDialog`/`catalog` 39 条全绿）
-- [ ] AN8 画像体检 Markdown 报告一键复制导出
+- [x] AN8 画像体检 Markdown 报告一键复制导出（前端 `analyticsProfile`/`DataProfileDialog`/`LocalAnalyticsDialog`/`catalog` 40 条全绿，不外泄样本值）
 - [ ] AN9 数值列相关性矩阵（内存 DuckDB `CORR` 复用 `ResultChartDialog` 热力图）
 - [ ] AN10 基于脱敏统计摘要的 AI 体检解读（剥离样本值、零原始行外发，留在 `ai` feature 后面）
 

@@ -355,6 +355,148 @@ export function summarizeProfileFindings(columns: readonly ColumnProfile[]): Pro
   return findings;
 }
 
+function escapeMarkdownCell(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function summarizeColumnDistribution(col: ColumnProfile, language: 'zh' | 'en'): string {
+  const parts: string[] = [];
+  if ((col.inferredType === 'integer' || col.inferredType === 'numeric') && col.min !== undefined) {
+    parts.push(
+      `Min ${col.min}, P50 ${formatProfileNumber(col.p50)}, P95 ${formatProfileNumber(col.p95)}, Max ${col.max ?? '—'}`
+    );
+  } else if (
+    (col.inferredType === 'date' || col.inferredType === 'time' || col.inferredType === 'datetime')
+    && col.min !== undefined
+  ) {
+    parts.push(`${col.min} → ${col.max ?? '—'}`);
+  } else if (col.minLength !== undefined && col.maxLength !== undefined) {
+    parts.push(
+      language === 'zh'
+        ? `长度 ${col.minLength}–${col.maxLength}`
+        : `len ${col.minLength}–${col.maxLength}`
+    );
+  }
+  if ((col.emptyStringCount ?? 0) > 0) {
+    parts.push(language === 'zh' ? `空串 ${col.emptyStringCount}` : `empty "" ${col.emptyStringCount}`);
+  }
+  if ((col.paddedWhitespaceCount ?? 0) > 0) {
+    parts.push(
+      language === 'zh'
+        ? `首尾空格 ${col.paddedWhitespaceCount}`
+        : `padded ${col.paddedWhitespaceCount}`
+    );
+  }
+  if (col.presentRatio !== undefined && col.presentRatio < 1) {
+    parts.push(
+      language === 'zh'
+        ? `存在率 ${formatProfileRatio(col.presentRatio)}`
+        : `present ${formatProfileRatio(col.presentRatio)}`
+    );
+  }
+  return parts.length > 0 ? parts.join(' · ') : '—';
+}
+
+/**
+ * 将列级画像汇总为可直接贴入工单 / IM / PR 的 Markdown 体检报告。
+ * 仅输出聚合统计指标，不展开明细行或高频文本样本值。
+ */
+export function formatProfileMarkdownReport(input: {
+  title?: string;
+  scopeLabel?: string;
+  profile: {
+    readonly rowCount: number;
+    readonly columnCount: number;
+    readonly elapsedMs: number;
+    readonly columns: readonly ColumnProfile[];
+  };
+  language: 'zh' | 'en';
+}): string {
+  const { profile, language } = input;
+  const heading = input.title
+    ? language === 'zh'
+      ? `## 数据画像体检报告 · ${input.title}`
+      : `## Data Profile Report · ${input.title}`
+    : language === 'zh'
+      ? '## 数据画像体检报告'
+      : '## Data Profile Report';
+
+  const metaParts = [
+    language === 'zh'
+      ? `${profile.rowCount.toLocaleString()} 行 × ${profile.columnCount} 列`
+      : `${profile.rowCount.toLocaleString()} rows × ${profile.columnCount} columns`,
+    `${profile.elapsedMs} ms`
+  ];
+  if (input.scopeLabel) {
+    metaParts.push(input.scopeLabel);
+  }
+
+  const lines: string[] = [heading, '', `- ${metaParts.join(' · ')}`];
+  const findings = summarizeProfileFindings(profile.columns);
+  if (findings.length > 0) {
+    lines.push('', language === 'zh' ? '### 待关注项' : '### Flagged Issues', '');
+    for (const f of findings) {
+      const icon = f.severity === 'high' ? '🔴' : '🟡';
+      let desc = '';
+      switch (f.kind) {
+        case 'negative':
+          desc = language === 'zh' ? '存在负值 (< 0)' : 'contains negative values (< 0)';
+          break;
+        case 'high-outlier':
+          desc =
+            language === 'zh'
+              ? `存在高位离群 (> ${f.threshold ?? ''})`
+              : `high-tail outliers (> ${f.threshold ?? ''})`;
+          break;
+        case 'high-nulls':
+          desc =
+            language === 'zh'
+              ? `空值率 ${formatProfileRatio(f.ratio ?? 0)} (${(f.count ?? 0).toLocaleString()} 行)`
+              : `null rate ${formatProfileRatio(f.ratio ?? 0)} (${(f.count ?? 0).toLocaleString()} rows)`;
+          break;
+        case 'empty-strings':
+          desc =
+            language === 'zh'
+              ? `空字符串 "" 共 ${(f.count ?? 0).toLocaleString()} 行`
+              : `${(f.count ?? 0).toLocaleString()} empty string(s)`;
+          break;
+        case 'padded-whitespace':
+          desc =
+            language === 'zh'
+              ? `含首尾空格共 ${(f.count ?? 0).toLocaleString()} 行`
+              : `${(f.count ?? 0).toLocaleString()} value(s) with leading/trailing spaces`;
+          break;
+        case 'schema-drift':
+          desc =
+            language === 'zh'
+              ? `字段存在率 ${formatProfileRatio(f.ratio ?? 0)}（Schema 漂移）`
+              : `present in ${formatProfileRatio(f.ratio ?? 0)} of docs (schema drift)`;
+          break;
+      }
+      lines.push(`- ${icon} \`${f.column}\`: ${desc}`);
+    }
+  } else {
+    lines.push(
+      '',
+      language === 'zh' ? '- ✅ 未发现显著空值、空格或数值异常项' : '- ✅ No notable null, whitespace, or numeric anomalies detected'
+    );
+  }
+
+  lines.push(
+    '',
+    language === 'zh'
+      ? '| 列名 | 类型 | 空值率 | 唯一值 | 分布摘要 |'
+      : '| Column | Type | Null % | Distinct | Distribution |',
+    '| --- | --- | ---: | ---: | --- |'
+  );
+  for (const col of profile.columns) {
+    lines.push(
+      `| \`${escapeMarkdownCell(col.name)}\` | \`${escapeMarkdownCell(col.duckdbType)}\` | ${formatProfileRatio(col.nullRatio)} | ${col.distinctCount.toLocaleString()} (${formatProfileRatio(col.distinctRatio)}) | ${escapeMarkdownCell(summarizeColumnDistribution(col, language))} |`
+    );
+  }
+  return lines.join('\n');
+}
+
 /** 生成可粘贴回原数据库查询框的方言 `WHERE` 条件片段 */
 export function buildSourceWhereClause(
   columnName: string,

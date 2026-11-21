@@ -12,8 +12,10 @@ import {
   AlertTriangle,
   BarChart2,
   BarChart3,
+  Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Database,
   Download,
   FilePlus2,
@@ -52,6 +54,7 @@ import {
 } from '../utils/analyticsQuery';
 import {
   filterAndSortProfiles,
+  formatProfileMarkdownReport,
   type ProfileSortMode,
   type ProfileTableFilterOperator
 } from '../utils/analyticsProfile';
@@ -123,6 +126,7 @@ export function LocalAnalyticsDialog({
   onClose
 }: LocalAnalyticsDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const language = useLanguageStore((state) => state.resolved);
   const [tab, setTab] = useState<WorkbenchTab>('sql');
   const [scope, setScope] = useState<'current' | 'sample'>('current');
   const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
@@ -1216,19 +1220,55 @@ export function LocalAnalyticsDialog({
                       className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
                     />
                   </div>
-                  <select
-                    value={profileSort}
-                    onChange={(event) => setProfileSort(event.target.value as ProfileSortMode)}
-                    className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
-                  >
-                    {(['order', 'nulls', 'distinct', 'drift'] as const)
-                      .filter((m) => m !== 'drift' || hasPresenceInfo)
-                      .map((mode) => (
-                        <option key={mode} value={mode}>
-                          {t(`profile.sort.${mode}` as const)}
-                        </option>
-                      ))}
-                  </select>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const scopeLabel =
+                          scope === 'sample' && tableSample
+                            ? tableSample.hasActiveFilters
+                              ? t('profile.sampleBadgeFiltered', {
+                                  count: profile.rowCount.toLocaleString()
+                                })
+                              : t('profile.sampleBadge', {
+                                  count: profile.rowCount.toLocaleString()
+                                })
+                            : undefined;
+                        const md = formatProfileMarkdownReport({
+                          title: titleLabel,
+                          profile,
+                          scopeLabel,
+                          language
+                        });
+                        handleCopySql('__report__', md);
+                      }}
+                      className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover"
+                    >
+                      {copiedKey === '__report__' ? (
+                        <Check size={12} className="text-success" />
+                      ) : (
+                        <Copy size={12} />
+                      )}
+                      <span>
+                        {copiedKey === '__report__'
+                          ? t('profile.copiedReport')
+                          : t('profile.copyReport')}
+                      </span>
+                    </button>
+                    <select
+                      value={profileSort}
+                      onChange={(event) => setProfileSort(event.target.value as ProfileSortMode)}
+                      className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
+                    >
+                      {(['order', 'nulls', 'distinct', 'drift'] as const)
+                        .filter((m) => m !== 'drift' || hasPresenceInfo)
+                        .map((mode) => (
+                          <option key={mode} value={mode}>
+                            {t(`profile.sort.${mode}` as const)}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
                 </div>
                 <ProfileHealthSummaryBar
                   columns={profile.columns}

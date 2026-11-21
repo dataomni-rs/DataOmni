@@ -32,6 +32,7 @@ import {
   buildSourceWhereClause,
   columnCardinalityHint,
   filterAndSortProfiles,
+  formatProfileMarkdownReport,
   formatProfileNumber,
   formatProfileRatio,
   hasSchemaDrift,
@@ -95,6 +96,7 @@ export function DataProfileDialog({
   onClose
 }: DataProfileDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const language = useLanguageStore((state) => state.resolved);
   const [scope, setScope] = useState<'current' | 'sample'>('current');
   const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
   const [sampling, setSampling] = useState(false);
@@ -413,6 +415,41 @@ export function DataProfileDialog({
                 />
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const scopeLabel =
+                      scope === 'sample' && tableSample
+                        ? tableSample.hasActiveFilters
+                          ? t('profile.sampleBadgeFiltered', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                          : t('profile.sampleBadge', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                        : t('profile.scopeCurrentPage', {
+                            count: profile.rowCount.toLocaleString()
+                          });
+                    const md = formatProfileMarkdownReport({
+                      profile,
+                      scopeLabel,
+                      language
+                    });
+                    handleCopySql('__report__', md);
+                  }}
+                  className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover"
+                >
+                  {copiedKey === '__report__' ? (
+                    <Check size={12} className="text-success" />
+                  ) : (
+                    <Copy size={12} />
+                  )}
+                  <span>
+                    {copiedKey === '__report__'
+                      ? t('profile.copiedReport')
+                      : t('profile.copyReport')}
+                  </span>
+                </button>
                 <select
                   value={sortMode}
                   onChange={(event) => setSortMode(event.target.value as ProfileSortMode)}
