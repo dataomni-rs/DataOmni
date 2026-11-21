@@ -4,6 +4,7 @@ import {
   buildProfileFilterSql,
   buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  buildSourceWhereClause,
   columnCardinalityHint,
   extractEsJsonDocs,
   filterAndSortProfiles,
@@ -12,7 +13,10 @@ import {
   hasSchemaDrift,
   histogramHeights,
   mongoRowsToJsonDocs,
-  nullSeverity
+  nullSeverity,
+  numericOutlierFilter,
+  shouldCollapseTopValues,
+  timeSparklinePoints
 } from './analyticsProfile';
 
 function makeColumn(overrides: Partial<ColumnProfile> & { name: string }): ColumnProfile {
@@ -138,5 +142,119 @@ describe('analyticsProfile', () => {
       { level: 'INFO' }
     ]);
     expect(extractEsJsonDocs('not json')).toEqual([]);
+  });
+
+  it('collapses top values only for unique / high-cardinality single-hit columns', () => {
+    const uniqueId = makeColumn({
+      name: 'user_id',
+      totalCount: 6,
+      nullCount: 0,
+      distinctCount: 6,
+      distinctRatio: 1,
+      topValues: [{ value: 'u1', count: 1, ratio: 0.167 }]
+    });
+    const statusEnum = makeColumn({
+      name: 'status',
+      totalCount: 100,
+      nullCount: 0,
+      distinctCount: 3,
+      distinctRatio: 0.03,
+      topValues: [{ value: 'ok', count: 80, ratio: 0.8 }]
+    });
+    expect(shouldCollapseTopValues(uniqueId)).toBe(true);
+    expect(shouldCollapseTopValues(statusEnum)).toBe(false);
+
+    // 高基数时间列（20,000 行中偶发 2 条同秒碰撞，但已有 timeBins 迷你图）默认折叠 Top-5
+    const timestampCol = makeColumn({
+      name: 'created_at',
+      inferredType: 'datetime',
+      totalCount: 20000,
+      nullCount: 0,
+      distinctCount: 19972,
+      distinctRatio: 0.9986,
+      timeBins: [
+        { label: '2026-01', count: 1500 },
+        { label: '2026-06', count: 4200 }
+      ],
+      topValues: [
+        { value: '2026-06-05 08:39:10', count: 2, ratio: 0.0001 }
+      ]
+    });
+    expect(shouldCollapseTopValues(timestampCol)).toBe(true);
+  });
+
+  it('suggests numeric outlier filters for negative anomalies and >P95 tails', () => {
+    const negativeAmount = makeColumn({
+      name: 'amount',
+      inferredType: 'numeric',
+      totalCount: 50,
+      min: '-12.5',
+      max: '500',
+      p25: 10,
+      p95: 400
+    });
+    expect(numericOutlierFilter(negativeAmount)).toEqual({
+      kind: 'negative',
+      threshold: '0',
+      sql: 'SELECT * FROM result_set WHERE "amount" < 0'
+    });
+
+    const highTail = makeColumn({
+      name: 'latency_ms',
+      inferredType: 'integer',
+      totalCount: 100,
+      min: '10',
+      max: '9500',
+      p25: 25,
+      p95: 180
+    });
+    expect(numericOutlierFilter(highTail)).toEqual({
+      kind: 'high',
+      threshold: '180',
+      sql: 'SELECT * FROM result_set WHERE "latency_ms" > 180 ORDER BY "latency_ms" DESC'
+    });
+
+    const flat = makeColumn({
+      name: 'score',
+      inferredType: 'integer',
+      totalCount: 10,
+      min: '5',
+      max: '5',
+      p25: 5,
+      p95: 5
+    });
+    expect(numericOutlierFilter(flat)).toBeNull();
+
+    // 100% 唯一自增主键 id（1..50）不误报高位异常
+    const autoId = makeColumn({
+      name: 'id',
+      inferredType: 'integer',
+      totalCount: 50,
+      nullCount: 0,
+      distinctCount: 50,
+      distinctRatio: 1,
+      min: '1',
+      max: '50',
+      p25: 13,
+      p50: 25.5,
+      p95: 47.55
+    });
+    expect(numericOutlierFilter(autoId)).toBeNull();
+  });
+
+  it('builds dialect-aware source WHERE clauses and sparkline coordinates', () => {
+    expect(buildSourceWhereClause('status', 'text', "o'k", 'mysql')).toBe("`status` = 'o''k'");
+    expect(buildSourceWhereClause('amount', 'numeric', '42.5', 'sqlserver')).toBe('[amount] = 42.5');
+    expect(buildSourceWhereClause('deleted_at', 'datetime', null, 'postgresql')).toBe('"deleted_at" IS NULL');
+
+    const pts = timeSparklinePoints([
+      { label: '2026-11-01', count: 0 },
+      { label: '2026-11-02', count: 10 },
+      { label: '2026-11-03', count: 5 }
+    ], 200, 32, 4, 4);
+    expect(pts).toHaveLength(3);
+    expect(pts[0].y).toBe(28);
+    expect(pts[1].y).toBe(4);
+    expect(pts[2].y).toBe(16);
   });
 });

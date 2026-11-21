@@ -4,12 +4,14 @@ import { clsx } from 'clsx';
 import {
   AlertCircle,
   BarChart2,
+  BarChart3,
   Database,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Download,
+  Layers,
   Upload,
   Plus,
   RefreshCw,
@@ -39,7 +41,10 @@ import { MongoBulkWriteDialog, type MongoBulkWriteMode } from './MongoBulkWriteD
 import { MongoExplainDialog } from './MongoExplainDialog';
 import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
 import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
+import { MongoSchemaAnalyticsDialog } from './MongoSchemaAnalyticsDialog';
+import { ResultChartDialog } from './ResultChartDialog';
 import { mongoRowsToJsonDocs } from '../utils/analyticsProfile';
+import { mongoRowsToChartTable } from '../utils/mongoAnalytics';
 
 interface MongoCollectionViewerProps {
   database: string;
@@ -120,6 +125,8 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
   const [exporting, setExporting] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showAnalyze, setShowAnalyze] = useState(false);
+  const [showSchemaAnalytics, setShowSchemaAnalytics] = useState(false);
+  const [showChart, setShowChart] = useState(false);
   const [importing, setImporting] = useState(false);
   const [bulk, setBulk] = useState<MongoBulkWriteMode | null>(null);
   // 执行计划看的是**框里**那一份：它不写库，不必先按查询；问的正是「这样写会怎么走」
@@ -513,6 +520,24 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
               <span>{t('mongo.import')}</span>
             </button>
           )}
+          <button
+            onClick={() => setShowSchemaAnalytics(true)}
+            disabled={!connectionString}
+            title={t('mongo.analytics.buttonTitle')}
+            className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+          >
+            <Layers size={14} />
+            <span>{t('mongo.analytics.button')}</span>
+          </button>
+          <button
+            onClick={() => setShowChart(true)}
+            disabled={documents.length === 0}
+            title={t('result.chart')}
+            className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+          >
+            <BarChart3 size={14} />
+            <span>{t('result.chart')}</span>
+          </button>
           <button
             onClick={() => setShowProfile(true)}
             disabled={documents.length === 0}
@@ -932,6 +957,34 @@ export function MongoCollectionViewer({ database, collection, readOnly }: MongoC
           onClose={() => setShowAnalyze(false)}
         />
       )}
+      {showSchemaAnalytics && connectionString && (
+        <MongoSchemaAnalyticsDialog
+          connectionString={connectionString}
+          database={database}
+          collection={collection}
+          filter={applied.filter}
+          timeoutMs={timeoutMs}
+          onApplyFilter={(filterText) => {
+            setMode('find');
+            setFilterDraft(filterText);
+            const nextQuery: AppliedQuery = { filter: filterText, sort: applied.sort, pipeline: null };
+            setApplied(nextQuery);
+            setPage(1);
+            void load(1, nextQuery, pageSize);
+          }}
+          onClose={() => setShowSchemaAnalytics(false)}
+        />
+      )}
+      {showChart && (() => {
+        const chartTable = mongoRowsToChartTable(columns, documents);
+        return (
+          <ResultChartDialog
+            columns={chartTable.columns}
+            rows={chartTable.rows}
+            onClose={() => setShowChart(false)}
+          />
+        );
+      })()}
       {bulk && connectionString && (
         <MongoBulkWriteDialog
           mode={bulk}

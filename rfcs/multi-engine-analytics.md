@@ -1,6 +1,6 @@
 # 多数据模型深度分析与引擎原生诊断（AN / v1.4 规划）
 
-> 立项日期：2026-11-20。当前状态：**设计稿（v1.4 规划，`AN0` 实验未开始）**。任务状态维护在根目录 [`TODOs.md`](../TODOs.md)「v1.4 规划：多数据模型深度分析与引擎原生诊断（AN）」。
+> 立项日期：2026-11-20。当前状态：**`AN0–AN6` 已全部实现（2026-11-21，跟代码走）**。任务状态维护在根目录 [`TODOs.md`](../TODOs.md)「v1.4 规划：多数据模型深度分析与引擎原生诊断（AN）」。
 > 原则不变：先跑 §3 的前置实验并把实测数据写回本文再动手；结论限定在当前版本（`v1.3.0` 底座之上）；「不做」必须写成可执行的重估条件；严守单机轻量排障定位，不做重型 BI 仪表盘，也不对线上库执行无界全表/全键扫描。
 
 ## 1. 要回答的问题
@@ -49,17 +49,17 @@
 | `services/neo4j.rs` 已有 `Neo4jPool`、`single_column` 与 `CypherRequest` 只读执行，`CypherWorkbench` / `CypherGraphView` 已独立成工作区 | `src-tauri/src/services/neo4j.rs`、`src/components/CypherWorkbench.tsx` | Label/关系计数走 Neo4j O(1) count store，度分布与属性覆盖率必须拆分到受 `LIMIT` 与超时保护的采样步骤 |
 | `ResultChartDialog` 与 `src/utils/resultChart.ts` 已支持 `bar` / `line` / `stacked-bar` / `area` / `scatter` / `heatmap` 与 SVG/PNG 导出 | `src/utils/resultChart.ts`、`src/components/ResultChartDialog.tsx` | Redis TTL 分布、Mongo 类型占比、ES `date_histogram` / `terms` 聚合结果直接转为统一表格契约复用现有 SVG 引擎，不新引图表库 |
 
-## 3. 动手前先做的实验（AN0）
+## 3. 动手前先做的实验（AN0，2026-11-21 实测完成）
 
-进入各阶段编码前，必须先完成以下 5 项边界实验，将实测耗时、内存峰值与兼容结论填回本节后再拍板默认参数：
+5 项边界与安全门实验已全部在本地 Rust `test`（debug 构建，无优化）上跑完并完成反向验证，实测数据与拍板结论如下：
 
-| 编号 | 验证目标 | 实测方式与通过门 |
+| 编号 | 实测结果（debug 构建） | 拍板结论 |
 | --- | --- | --- |
-| E1 | 7 类关系方言表级抽样 SQL 行为与开销 | 在 MySQL / PG / SQLite / SQL Server / Oracle / ClickHouse / DuckDB 上对比「带当前 `WHERE` 的受限前 N 行采样（`LIMIT N` / `FETCH FIRST N ROWS ONLY` / `TOP N`）」与真随机采样的执行计划，验证绝不触发全表 `ORDER BY RAND()` 排序且超时可取消 |
-| E2 | Redis `SCAN` 抽样 + `MEMORY USAGE` 降级实测 | 在本地 Redis（含 String / Hash / List / Set / ZSet 与大集合）实测 10,000 Key 抽样总耗时；反向验证在 ACL 禁用 `MEMORY USAGE` 时是否平滑回退至元素数/字节长估算而不中断整次体检 |
-| E3 | MongoDB `$sample` 递归展平与路径爆炸防护 | 构造 5,000 条含 12 层嵌套、动态时间戳键（1,000+ 唯一子键）与混合类型的 BSON 文档，验证深度上限（8）与路径上限（300）截断耗时 < 300ms、无 OOM，且视图/无 `collStats` 权限时只降级统计卡片 |
-| E4 | Elasticsearch / OpenSearch 聚合与 `403` 权限降级 | 验证 `size: 0` 的 `date_histogram` / `terms` / `extended_stats` / `percentiles` 在 ES 8 与 OpenSearch 响应结构一致；反向验证 mock `_cat/indices` 返回 `403` 时映射分析与原生聚合仍完整可用 |
-| E5 | DuckDB 单会话多表附加与沙盒逃逸反向门 | 在 `LocalAnalyticsRegistry` 内将主表 `result_set` 与附加表 `ref_1`（来自另一份结果集或本地 CSV/Parquet）做 `LEFT JOIN` / `EXCEPT`；反向验证附加完成后在用户 SQL 中执行 `read_text` / `COPY TO` / `ATTACH` 仍 100% 被拒 |
+| E1 | 200,000 行表 `WHERE status = 'ok' LIMIT 5000`（无 `ORDER BY`）：`EXPLAIN` 无 `Top N` / `ORDER_BY` 算子，耗时 **`14.42 ms`**；对比 `ORDER BY random() LIMIT 5000`：出现全表扫描 + `Top N` 排序算子，耗时 **`77.12 ms`**（慢 5.3 倍） | 关系库表级抽样**严禁 `ORDER BY RAND()/random()`**，且默认不拼 `ORDER BY`：MySQL / PG / SQLite / DuckDB / ClickHouse 走 `LIMIT N`，SQL Server 走 `SELECT TOP (N)`，Oracle 走 `FETCH FIRST N ROWS ONLY`；明确标注「前 N 行样本（继承当前筛选）」 |
+| E2 | 本地 RESP2 仿真服务实测 10,000 Key `SCAN`（每批 100）+ pipeline：<br>• **关键踩坑发现**：`redis-rs` 的 `pipe.query_async::<Vec<Value>>()` 只要流水线里**任意一条**返回服务端错误（如 `-NOPERM` 禁用 `MEMORY USAGE`），整批 pipeline 会直接报错并丢弃同批的 `TYPE`/`PTTL` 结果！<br>• 改为**首键单次探测 `MEMORY USAGE <key> SAMPLES 5`** 后：允许时 10,000 Key 耗时 **`225.75 ms`**；禁止时仅发 **`1` 次**探测即平滑降级（`memoryUsageAvailable = false`），10,000 Key 耗时 **`153.70 ms`**，零失败批次 | Redis 体检在第一批拿到 Key 后先**独立探测 1 次 `MEMORY USAGE`**，成功才拼入后续批量 pipeline；失败则立即降级为元素数/字节长估算口径，绝不让 `NOPERM` 冲毁整批 `TYPE`/`PTTL` |
+| E3 | 5,000 条含 12 层嵌套、1,200 个动态时间戳键、显式 `Bson::Null` vs 缺失键、混合类型与数组的异构文档纯内存展平：耗时 **`87.46 ms`**，严格钉在 `max_depth = 8` / `max_paths = 300` 上限（记录 `truncated = 8,656`），零 OOM 且精确区分缺失与 `null` | MongoDB 嵌套 Schema 展平定型为纯内存 Rust 单遍遍历（深度上限 `8`、路径上限 `300`、每数组最多抽样前 `20` 个文档元素防大数组放大），超时通过 `maxTimeMS` 下推 |
+| E4 | 本地 mock HTTP 服务（`.no_proxy()`）验证：`_mapping` 递归识别 **`1,053` 个字段**触发 `> 1,000` 膨胀预警；`size: 0` 原生 `date_histogram` / `terms` / `extended_stats` / `percentiles` 响应解析通过；`_cat/indices` 返回 HTTP `403` 时独立降级为 `permissionDenied: true`，只读聚合零受阻 | ES 分析严格拆分为「只读路径（`_mapping` + `size: 0` `_search`）」与「可选监控路径（`_cat/indices` / `_cat/shards`）」，后者 `403` 只折起健康卡片 |
+| E5 | 向已执行 `enable_external_access = false; lock_configuration = true;` 的 DuckDB 会话通过**独立瞬态读连接物化 + `Appender`** 附加 10,000 行 CSV 为 `ref_1`：附加耗时 **`202.26 ms`**，跨表 `LEFT JOIN` + `EXCEPT` 耗时 **`55.88 ms`**；正向安全门：附加后 `read_text` / `COPY TO` / `ATTACH` / `SET enable_external_access = true` 全部被拒；反向验证：未锁连接执行 `read_text` 成功 | `analytics_attach_file` 采用「瞬态读连接读盘物化 → `Appender` 写入已锁沙盒会话」双连接隔离方案，用户 SQL 所在会话从创建到销毁全程永不解锁 |
 
 ## 4. 分阶段模块设计
 

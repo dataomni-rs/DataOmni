@@ -10,8 +10,12 @@ import { useLanguageStore } from '../stores/languageStore';
 
 const invoke = vi.fn();
 const save = vi.fn();
+const open = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: (...args: unknown[]) => save(...args) }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  save: (...args: unknown[]) => save(...args),
+  open: (...args: unknown[]) => open(...args)
+}));
 
 const { LocalAnalyticsDialog } = await import('./LocalAnalyticsDialog');
 
@@ -31,6 +35,7 @@ describe('LocalAnalyticsDialog', () => {
     useLanguageStore.getState().setPreference('zh');
     invoke.mockReset();
     save.mockReset();
+    open.mockReset();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -148,5 +153,174 @@ describe('LocalAnalyticsDialog', () => {
       root.unmount();
     });
     expect(invoke).toHaveBeenCalledWith('analytics_close', { analyticsId: 'file-sess-1' });
+  });
+
+  it('attaches a local CSV reconciliation table and runs LEFT JOIN template', async () => {
+    open.mockResolvedValue('/tmp/ops_list.csv');
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+      if (cmd === 'analytics_load_result') {
+        return {
+          analyticsId: 'sess-join',
+          sourceKind: 'resultSet',
+          rowCount: 2,
+          columnCount: 2,
+          truncated: false,
+          columns: [
+            { name: 'order_id', duckdbType: 'BIGINT', inferredType: 'integer', precisionDegraded: false },
+            { name: 'amount', duckdbType: 'DOUBLE', inferredType: 'numeric', precisionDegraded: false }
+          ]
+        };
+      }
+      if (cmd === 'analytics_attach_file') {
+        return {
+          tableName: 'ref_1',
+          fileKind: 'csv',
+          rowCount: 3,
+          columnCount: 2,
+          truncated: false,
+          columns: [
+            { name: 'order_id', duckdbType: 'BIGINT', inferredType: 'integer', precisionDegraded: false },
+            { name: 'flag', duckdbType: 'VARCHAR', inferredType: 'text', precisionDegraded: false }
+          ]
+        };
+      }
+      if (cmd === 'analytics_query') {
+        if (String(args.sql).includes('LEFT JOIN')) {
+          return {
+            columns: ['order_id', 'amount', 'flag'],
+            columnMetadata: [],
+            rows: [[1, 100, 'vip']],
+            rowCount: 1,
+            truncated: false,
+            truncationReason: null,
+            elapsedMs: 2
+          };
+        }
+        return {
+          columns: ['order_id', 'amount'],
+          columnMetadata: [],
+          rows: [[1, 100]],
+          rowCount: 1,
+          truncated: false,
+          truncationReason: null,
+          elapsedMs: 1
+        };
+      }
+      return true;
+    });
+
+    await act(async () => {
+      root.render(
+        <LocalAnalyticsDialog
+          source={{
+            kind: 'resultSet',
+            title: 'orders',
+            columns: [{ name: 'order_id' }, { name: 'amount' }],
+            rows: [[1, 100]]
+          }}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    await flush();
+
+    const attachBtn = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent?.includes('附加文件对账')
+    );
+    expect(attachBtn).toBeTruthy();
+    await act(async () => {
+      attachBtn?.click();
+    });
+    await flush();
+
+    expect(invoke).toHaveBeenCalledWith('analytics_attach_file', {
+      analyticsId: 'sess-join',
+      tableName: 'ref_1',
+      path: '/tmp/ops_list.csv'
+    });
+    expect(container.textContent).toContain('ref_1');
+    expect(container.textContent).toContain('ops_list.csv');
+    // 附加表的列名芯片也应直接展示
+    expect(container.textContent).toContain('flag');
+
+    const joinBtn = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent?.includes('LEFT JOIN 对账')
+    );
+    expect(joinBtn).toBeTruthy();
+    await act(async () => {
+      joinBtn?.click();
+    });
+    await flush();
+
+    expect(container.textContent).toContain('vip');
+  });
+
+  it('supports table-level sampling toggle in workbench header when tableSample is provided', async () => {
+    const fetchSample = vi.fn().mockResolvedValue({
+      columns: [{ name: 'order_id' }],
+      rows: [[1], [2], [3]],
+      truncated: false
+    });
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+      if (cmd === 'analytics_load_result') {
+        const rows = (args.rows as unknown[]) ?? [];
+        return {
+          analyticsId: `sess-${rows.length}`,
+          sourceKind: 'resultSet',
+          rowCount: rows.length,
+          columnCount: 1,
+          truncated: false,
+          columns: [
+            { name: 'order_id', duckdbType: 'BIGINT', inferredType: 'integer', precisionDegraded: false }
+          ]
+        };
+      }
+      if (cmd === 'analytics_query') {
+        return {
+          columns: ['order_id'],
+          columnMetadata: [],
+          rows: [[1]],
+          rowCount: 1,
+          truncated: false,
+          truncationReason: null,
+          elapsedMs: 1
+        };
+      }
+      return true;
+    });
+
+    await act(async () => {
+      root.render(
+        <LocalAnalyticsDialog
+          source={{
+            kind: 'resultSet',
+            title: 'orders',
+            columns: [{ name: 'order_id' }],
+            rows: [[1]]
+          }}
+          tableSample={{
+            hasActiveFilters: false,
+            fetchSample,
+            cancelSample: vi.fn()
+          }}
+          sourceDialect="sqlite"
+          onApplyTableFilter={vi.fn()}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    await flush();
+
+    const sampleBtn = Array.from(container.querySelectorAll('button')).find((btn) =>
+      btn.textContent?.includes('表抽样')
+    );
+    expect(sampleBtn).toBeTruthy();
+    await act(async () => {
+      sampleBtn?.click();
+    });
+    await flush();
+
+    expect(fetchSample).toHaveBeenCalledWith(5000, expect.any(String));
+    expect(container.textContent).toContain('3 × 1');
   });
 });

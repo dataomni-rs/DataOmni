@@ -127,6 +127,8 @@ const MESSAGES: Readonly<Record<string, TranslationKey>> = {
   DATAOMNI_ANALYTICS_READ_ONLY_REFUSED: 'error.backend.analyticsReadOnlyRefused',
   DATAOMNI_ANALYTICS_TIMEOUT: 'error.backend.analyticsTimeout',
   DATAOMNI_ANALYTICS_UNSUPPORTED_FILE: 'error.backend.analyticsUnsupportedFile',
+  DATAOMNI_ANALYTICS_ATTACH_LIMIT: 'error.backend.analyticsAttachLimit',
+  DATAOMNI_ANALYTICS_INVALID_TABLE_NAME: 'error.backend.analyticsInvalidTableName',
   DATAOMNI_PARAMETER_TYPE_UNSUPPORTED: 'error.backend.parameterTypeUnsupported',
   DATAOMNI_PARAMETER_NOT_CONVERTIBLE: 'error.backend.parameterNotConvertible',
   DATAOMNI_SQL_SERVER_DRIVER_FAILURE: 'error.backend.sqlServerDriverFailure',

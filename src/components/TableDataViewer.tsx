@@ -3,7 +3,12 @@ import { useShallow } from 'zustand/react/shallow';
 import { invoke } from '@tauri-apps/api/core';
 import { supportsFeature } from '../contracts/databaseSupport';
 import { useLanguageStore } from '../stores/languageStore';
-import { reportConnectionLostIfActive, runReadQuery, useQueryStore } from '../stores/queryStore';
+import {
+  reportConnectionLostIfActive,
+  runCancellableSampleQuery,
+  runReadQuery,
+  useQueryStore
+} from '../stores/queryStore';
 import { editStartValue, isTaggedResultValue, unwrapResultValue } from '../utils/resultValues';
 import { describeError } from '../utils/describeError';
 import type { SerializedResultValue } from '../contracts/resultSet';
@@ -50,6 +55,7 @@ import {
   tableProjection
 } from '../utils/tablePagination';
 import { buildTableExportQuery } from '../utils/tableExportQuery';
+import { buildTableSampleQuery } from '../utils/tableSampleQuery';
 import { nextColumnSort, type ColumnSort } from '../utils/resultSorting';
 import { ColumnSortButton } from './ColumnSortButton';
 import { useCellSelection } from '../hooks/useCellSelection';
@@ -60,7 +66,11 @@ import { useResizableColumns } from '../hooks/useResizableColumns';
 import { ColumnResizeHandle } from './ColumnResizeHandle';
 import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
 import { ResultChartDialog } from './ResultChartDialog';
-import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
+import {
+  DataProfileDialog,
+  type DataProfileSource,
+  type TableSampleConfig
+} from './DataProfileDialog';
 import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
 import { CsvImportDialog } from './CsvImportDialog';
 import { useTaskStore } from '../stores/taskStore';
@@ -791,6 +801,58 @@ export default function TableDataViewer({
     }),
     [profileSource, tableName, visibleRows]
   );
+  const tableSampleConfig = useMemo<TableSampleConfig | undefined>(() => {
+    if (!tableSchema || tableSchemaKey !== currentTableKey) {
+      return undefined;
+    }
+    const visibleNames = visibleIndexes
+      .map((index) => columnNames[index] ?? '')
+      .filter((name) => name.length > 0);
+    if (visibleNames.length === 0) {
+      return undefined;
+    }
+    const sampleColumns = visibleIndexes.map((index) => ({
+      name: columnNames[index] ?? '',
+      databaseType: tableSchema.columns[index]?.data_type ?? null
+    }));
+    const activeFilters = appliedFilters.filter((item) => item.column.trim().length > 0);
+    return {
+      hasActiveFilters: activeFilters.length > 0,
+      fetchSample: async (limit: number, executionId: string) => {
+        const sql = buildTableSampleQuery({
+          schema: schema ?? null,
+          table: tableName,
+          columns: tableSchema.columns,
+          visibleColumns: visibleNames,
+          filters: activeFilters,
+          limit,
+          dialect
+        });
+        if (!sql) {
+          return { columns: sampleColumns, rows: [], truncated: false };
+        }
+        const fetched = await runCancellableSampleQuery(sql, { executionId, rowLimit: limit });
+        return {
+          columns: sampleColumns,
+          rows: fetched.rows.map((record) => visibleNames.map((col) => record[col] ?? null)),
+          truncated: fetched.truncated
+        };
+      },
+      cancelSample: (executionId: string) => {
+        void invoke('cancel_query', { executionId }).catch(() => {});
+      }
+    };
+  }, [
+    appliedFilters,
+    columnNames,
+    currentTableKey,
+    dialect,
+    schema,
+    tableName,
+    tableSchema,
+    tableSchemaKey,
+    visibleIndexes
+  ]);
   // 行编辑时每格多一个「写入方式」下拉，日期时间格还多一个选择器，列宽跟着让出来
   const visibleWidths = visibleIndexes.map((index) => {
     const width = columnWidths[index] ?? 0;
@@ -2157,6 +2219,20 @@ export default function TableDataViewer({
       {showProfile && (
         <DataProfileDialog
           source={profileSource}
+          tableSample={tableSampleConfig}
+          sourceDialect={dialect}
+          onApplyTableFilter={(columnName, operator, value) => {
+            const nextFilter: ColumnFilter = {
+              id: `profile-${columnName}-${Date.now()}`,
+              column: columnName,
+              operator,
+              value: operator === 'is-null' ? '' : value
+            };
+            const merged = [...appliedFilters.filter((f) => f.column !== columnName), nextFilter];
+            setShowFilters(true);
+            setFilters(merged);
+            applyFilters(merged);
+          }}
           onClose={() => setShowProfile(false)}
         />
       )}
@@ -2164,6 +2240,20 @@ export default function TableDataViewer({
       {showAnalyze && (
         <LocalAnalyticsDialog
           source={analyticsSource}
+          tableSample={tableSampleConfig}
+          sourceDialect={dialect}
+          onApplyTableFilter={(columnName, operator, value) => {
+            const nextFilter: ColumnFilter = {
+              id: `profile-${columnName}-${Date.now()}`,
+              column: columnName,
+              operator,
+              value: operator === 'is-null' ? '' : value
+            };
+            const merged = [...appliedFilters.filter((f) => f.column !== columnName), nextFilter];
+            setShowFilters(true);
+            setFilters(merged);
+            applyFilters(merged);
+          }}
           onClose={() => setShowAnalyze(false)}
         />
       )}

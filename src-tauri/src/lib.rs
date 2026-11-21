@@ -62,6 +62,7 @@ pub fn run() {
     .manage(services::oracle::OracleRegistry::default())
     .manage(services::mongodb::MongoRegistry::default())
     .manage(services::redis::RedisRegistry::default())
+    .manage(services::redis::RedisAnalysisState::default())
     .manage(services::neo4j::Neo4jRegistry::default())
     .manage(services::elasticsearch::EsRegistry::default())
     .manage(services::duckdb::DuckDbRegistry::default())
@@ -125,6 +126,7 @@ pub fn run() {
       mongodb_insert_document,
       mongodb_delete_document,
       mongodb_collection_structure,
+      mongodb_analyze_collection,
       mongodb_export_to_file,
       mongodb_import_file,
       mongodb_create_index,
@@ -138,6 +140,8 @@ pub fn run() {
       mongodb_explain,
       redis_list_keyspaces,
       redis_scan,
+      redis_analyze_keyspace,
+      redis_cancel_analysis,
       redis_read_value,
       redis_execute,
       redis_change_key,
@@ -182,6 +186,8 @@ pub fn run() {
       analytics_load_result,
       analytics_load_json_docs,
       analytics_open_file,
+      analytics_attach_result,
+      analytics_attach_file,
       analytics_profile,
       analytics_query,
       analytics_export_parquet,

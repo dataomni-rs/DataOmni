@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Clock, Loader2, Pencil, Plus, RefreshCw, Search, TextCursorInput, Trash2 } from 'lucide-react';
+import { Activity, Clock, Database, Loader2, Pencil, Plus, RefreshCw, Search, TextCursorInput, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { PLAIN_TEXT_INPUT, SegmentedControl } from './FormControls';
 import { RedisConsole } from './RedisConsole';
 import { RedisInputDialog } from './RedisInputDialog';
 import { RedisValueTable, type ElementChange } from './RedisValueTable';
 import { RedisNewKeyDialog } from './RedisNewKeyDialog';
+import { RedisKeyspaceAnalyticsDialog } from './RedisKeyspaceAnalyticsDialog';
+import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
+import { redisValueToAnalyticsRows } from '../utils/redisAnalytics';
 import { useConfirmPrompt } from './ConfirmPrompt';
 import { bytesToBase64 } from '../utils/redisCommandLine';
 import { CodeSegments } from './HighlightedCode';
@@ -73,6 +76,8 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
   const valueRequest = useRef(0);
   const { ask, prompt: confirmPrompt } = useConfirmPrompt();
   const [dialog, setDialog] = useState<'rename' | 'ttl' | 'new' | null>(null);
+  const [showKeyspaceAnalytics, setShowKeyspaceAnalytics] = useState(false);
+  const [showValueAnalytics, setShowValueAnalytics] = useState(false);
   // 正在改的字符串；null 是没在改
   const [stringDraft, setStringDraft] = useState<string | null>(null);
   const [savingString, setSavingString] = useState(false);
@@ -233,6 +238,21 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
   };
 
   const more = value ? nextPosition(value) : null;
+  const valueAnalyticsSource = useMemo<LocalAnalyticsSource | null>(() => {
+    if (!selected || !value) {
+      return null;
+    }
+    const table = redisValueToAnalyticsRows(value);
+    if (!table) {
+      return null;
+    }
+    return {
+      kind: 'resultSet',
+      title: selected.key.text,
+      columns: table.columns,
+      rows: table.rows
+    };
+  }, [selected, value]);
 
   return (
     <div className="flex h-full flex-col bg-surface">
@@ -261,14 +281,25 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
             }}
           />
           {mode === 'keys' && (
-            <button
-              onClick={refresh}
-              disabled={!connectionString || scanning}
-              className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
-            >
-              <RefreshCw size={14} />
-              <span>{t('redis.refresh')}</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setShowKeyspaceAnalytics(true)}
+                disabled={!connectionString}
+                className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+              >
+                <Activity size={14} />
+                <span>{t('redis.analytics.button')}</span>
+              </button>
+              <button
+                onClick={refresh}
+                disabled={!connectionString || scanning}
+                className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+              >
+                <RefreshCw size={14} />
+                <span>{t('redis.refresh')}</span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -474,6 +505,16 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
                         {t('redis.action.edit')}
                       </button>
                     )}
+                    {valueAnalyticsSource && (
+                      <button
+                        type="button"
+                        onClick={() => setShowValueAnalytics(true)}
+                        className="mb-2 flex items-center gap-1 rounded-control border border-line-strong px-2 py-1 text-xs text-fg hover:bg-surface-hover"
+                      >
+                        <Database size={12} />
+                        <span>{t('redis.analytics.analyzeValue')}</span>
+                      </button>
+                    )}
                     {value && (value.kind === 'hash' || value.kind === 'list' || value.kind === 'set' || value.kind === 'zset' || value.kind === 'stream') ? (
                       <RedisValueTable
                         value={value}
@@ -505,6 +546,26 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
         </div>
       </div>
       {confirmPrompt}
+      {showKeyspaceAnalytics && connectionString && (
+        <RedisKeyspaceAnalyticsDialog
+          connectionString={connectionString}
+          database={database}
+          initialPattern={applied.pattern}
+          onSelectKey={(row) => {
+            setKeys((previous) =>
+              previous.some((item) => item.key.raw === row.key.raw) ? previous : [row, ...previous]
+            );
+            select(row);
+          }}
+          onClose={() => setShowKeyspaceAnalytics(false)}
+        />
+      )}
+      {showValueAnalytics && valueAnalyticsSource && (
+        <LocalAnalyticsDialog
+          source={valueAnalyticsSource}
+          onClose={() => setShowValueAnalytics(false)}
+        />
+      )}
       {dialog === 'new' && connectionString && (
         <RedisNewKeyDialog
           connectionString={connectionString}

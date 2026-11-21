@@ -20,7 +20,9 @@ use redis::cluster_async::ClusterConnection;
 use redis::cluster_routing::{RoutingInfo, SingleNodeRoutingInfo};
 use redis::{ConnectionAddr, ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, Value};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 与前端 `REDIS_SCHEME` 一致：连接串以它开头就归这里管
@@ -85,6 +87,45 @@ fn next_scan_count(page: usize, collected: usize, scanned: u64) -> u64 {
 }
 
 pub type RedisRegistry = PoolRegistry<RedisPool>;
+
+/// 单次 Redis Keyspace 抽样体检的键数硬上限（AN3 安全护栏）
+pub const MAX_REDIS_ANALYSIS_SAMPLE: usize = 20_000;
+/// 默认抽样键数
+pub const DEFAULT_REDIS_ANALYSIS_SAMPLE: usize = 5_000;
+/// 抽样体检单批 SCAN 大小
+const ANALYSIS_BATCH_SIZE: usize = 200;
+
+/// 托管在 Tauri `State` 中的 Redis 体检协作取消登记表
+#[derive(Default)]
+pub struct RedisAnalysisState {
+  active: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl RedisAnalysisState {
+  pub fn register(&self, request_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Ok(mut guard) = self.active.lock() {
+      guard.insert(request_id.to_string(), Arc::clone(&flag));
+    }
+    flag
+  }
+
+  pub fn cancel(&self, request_id: &str) -> bool {
+    if let Ok(guard) = self.active.lock() {
+      if let Some(flag) = guard.get(request_id) {
+        flag.store(true, Ordering::SeqCst);
+        return true;
+      }
+    }
+    false
+  }
+
+  pub fn finish(&self, request_id: &str) {
+    if let Ok(mut guard) = self.active.lock() {
+      guard.remove(request_id);
+    }
+  }
+}
 
 #[derive(Clone)]
 pub struct RedisTarget {
@@ -690,6 +731,285 @@ async fn describe_keys(
           _ => -2,
         };
         RedisKeyRow { key: RedisBytes::new(key), kind, ttl_ms }
+      })
+      .collect(),
+  )
+}
+
+pub struct RedisKeyspaceAnalysisRequest {
+  pub database: i64,
+  pub pattern: String,
+  pub sample_limit: usize,
+  pub timeout: Duration,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisSampledKey {
+  pub key: RedisBytes,
+  pub kind: String,
+  pub ttl_ms: i64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub memory_bytes: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub length: Option<u64>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyspaceAnalysis {
+  pub sampled_count: usize,
+  pub partial: bool,
+  pub cancelled: bool,
+  pub memory_usage_available: bool,
+  pub elapsed_ms: u64,
+  pub keys: Vec<RedisSampledKey>,
+}
+
+/// 非阻塞抽样体检（AN3）：复用游标 `SCAN`（单机 / Cluster 均适用，严禁 `KEYS *`），
+/// 遵循 AN0-E2 实测拍板：首键单独探测 1 次 `MEMORY USAGE` 成功才纳入 pipeline，
+/// 禁用时立即平滑降级至元素数 / 字符串长度估算口径；全程支持协作取消与时间硬上限。
+pub async fn analyze_keyspace(
+  pool: &RedisPool,
+  request: RedisKeyspaceAnalysisRequest,
+  cancel: Arc<AtomicBool>,
+) -> Result<RedisKeyspaceAnalysis, String> {
+  let mut connection = pool.connection(request.database).await?;
+  let sample_limit = request.sample_limit.clamp(1, MAX_REDIS_ANALYSIS_SAMPLE);
+  let pattern =
+    if request.pattern.trim().is_empty() { "*".to_string() } else { request.pattern.clone() };
+  let started = Instant::now();
+
+  let masters: Option<Vec<(String, u16)>> = if pool.target.cluster {
+    let nodes: String = redis::cmd("CLUSTER")
+      .arg("NODES")
+      .query_async(&mut connection)
+      .await
+      .map_err(describe_error)?;
+    Some(cluster_masters(&nodes))
+  } else {
+    None
+  };
+
+  let mut node_index = 0usize;
+  let mut cursor: u64 = 0;
+  let mut seen: HashSet<Vec<u8>> = HashSet::new();
+  let mut sampled: Vec<RedisSampledKey> = Vec::new();
+  let mut memory_usage_available: Option<bool> = None;
+  let mut partial = false;
+  let mut cancelled = false;
+
+  loop {
+    if cancel.load(Ordering::SeqCst) {
+      cancelled = true;
+      partial = true;
+      break;
+    }
+    if started.elapsed() >= request.timeout {
+      partial = true;
+      break;
+    }
+
+    let current_node = match &masters {
+      Some(list) => match list.get(node_index) {
+        Some(addr) => Some(addr),
+        None => break,
+      },
+      None => None,
+    };
+
+    let remaining_budget = request.timeout.saturating_sub(started.elapsed());
+    if remaining_budget.is_zero() {
+      partial = true;
+      break;
+    }
+
+    let remaining_keys = sample_limit.saturating_sub(sampled.len());
+    if remaining_keys == 0 {
+      partial = true;
+      break;
+    }
+    let want = remaining_keys.min(ANALYSIS_BATCH_SIZE);
+
+    let mut command = redis::cmd("SCAN");
+    command.arg(cursor).arg("MATCH").arg(&pattern).arg("COUNT").arg(want);
+
+    let scan_step = async {
+      let reply: (u64, Vec<Vec<u8>>) = match (&mut connection, current_node) {
+        (RedisConnection::Cluster(cluster), Some((host, port))) => {
+          let routing = RoutingInfo::SingleNode(SingleNodeRoutingInfo::ByAddress {
+            host: host.clone(),
+            port: *port,
+          });
+          let raw = cluster.route_command(command, routing).await.map_err(describe_error)?;
+          redis::from_redis_value(raw).map_err(|error| error.to_string())?
+        }
+        (conn, _) => command.query_async(conn).await.map_err(describe_error)?,
+      };
+      Ok::<(u64, Vec<Vec<u8>>), String>(reply)
+    };
+
+    let (next_cursor, batch) = match tokio::time::timeout(remaining_budget, scan_step).await {
+      Ok(Ok(res)) => res,
+      Ok(Err(err)) => return Err(err),
+      Err(_) => {
+        partial = true;
+        break;
+      }
+    };
+
+    let mut fresh: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
+    for key in batch {
+      if sampled.len() + fresh.len() >= sample_limit {
+        partial = true;
+        break;
+      }
+      if seen.insert(key.clone()) {
+        fresh.push(key);
+      }
+    }
+
+    if !fresh.is_empty() {
+      // AN0-E2：首键单独探测一次 MEMORY USAGE，避免 ACL NOPERM 导致整批 pipeline 丢弃 TYPE/PTTL
+      if memory_usage_available.is_none() {
+        if let Some(first_key) = fresh.first() {
+          let probe_rem = request.timeout.saturating_sub(started.elapsed());
+          let mut probe_cmd = redis::cmd("MEMORY");
+          probe_cmd.arg("USAGE").arg(first_key).arg("SAMPLES").arg(5);
+          let probe_fut = probe_cmd.query_async::<Option<u64>>(&mut connection);
+          memory_usage_available = match tokio::time::timeout(probe_rem, probe_fut).await {
+            Ok(Ok(_)) => Some(true),
+            Ok(Err(_)) => Some(false),
+            Err(_) => {
+              partial = true;
+              break;
+            }
+          };
+        }
+      }
+
+      let use_memory = memory_usage_available.unwrap_or(false);
+      let inspect_rem = request.timeout.saturating_sub(started.elapsed());
+      if inspect_rem.is_zero() {
+        partial = true;
+        break;
+      }
+      match tokio::time::timeout(inspect_rem, inspect_sampled_keys(&connection, fresh, use_memory))
+        .await
+      {
+        Ok(Ok(rows)) => sampled.extend(rows),
+        Ok(Err(err)) => return Err(err),
+        Err(_) => {
+          partial = true;
+          break;
+        }
+      }
+    }
+
+    cursor = next_cursor;
+    if cursor == 0 {
+      if masters.is_some() {
+        node_index += 1;
+      } else {
+        break;
+      }
+    }
+    if sampled.len() >= sample_limit {
+      partial = true;
+      break;
+    }
+  }
+
+  Ok(RedisKeyspaceAnalysis {
+    sampled_count: sampled.len(),
+    partial,
+    cancelled,
+    memory_usage_available: memory_usage_available.unwrap_or(false),
+    elapsed_ms: started.elapsed().as_millis() as u64,
+    keys: sampled,
+  })
+}
+
+fn length_command_for_kind(kind: &str) -> Option<&'static str> {
+  match kind {
+    "string" => Some("STRLEN"),
+    "hash" => Some("HLEN"),
+    "list" => Some("LLEN"),
+    "set" => Some("SCARD"),
+    "zset" => Some("ZCARD"),
+    "stream" => Some("XLEN"),
+    _ => None,
+  }
+}
+
+async fn inspect_sampled_keys(
+  connection: &RedisConnection,
+  keys: Vec<Vec<u8>>,
+  include_memory: bool,
+) -> Result<Vec<RedisSampledKey>, String> {
+  let pass1 = futures_util::future::try_join_all(keys.iter().map(|key| {
+    let mut connection = connection.clone();
+    async move {
+      let mut pipe = redis::pipe();
+      pipe.cmd("TYPE").arg(key).cmd("PTTL").arg(key);
+      if include_memory {
+        pipe.cmd("MEMORY").arg("USAGE").arg(key).arg("SAMPLES").arg(5);
+      }
+      pipe.query_async::<Vec<Value>>(&mut connection).await
+    }
+  }))
+  .await
+  .map_err(describe_error)?;
+
+  let mut base: Vec<(Vec<u8>, String, i64, Option<u64>)> = Vec::with_capacity(keys.len());
+  for (key, reply_vec) in keys.into_iter().zip(pass1) {
+    let kind = match reply_vec.first() {
+      Some(Value::SimpleString(kind)) => kind.clone(),
+      Some(Value::BulkString(kind)) => String::from_utf8_lossy(kind).into_owned(),
+      _ => "none".to_string(),
+    };
+    let ttl_ms = match reply_vec.get(1) {
+      Some(Value::Int(ttl)) => *ttl,
+      _ => -2,
+    };
+    let memory_bytes = if include_memory {
+      match reply_vec.get(2) {
+        Some(Value::Int(bytes)) if *bytes >= 0 => Some(*bytes as u64),
+        _ => None,
+      }
+    } else {
+      None
+    };
+    base.push((key, kind, ttl_ms, memory_bytes));
+  }
+
+  let lengths = futures_util::future::try_join_all(base.iter().map(|(key, kind, _, _)| {
+    let mut connection = connection.clone();
+    let cmd_name = length_command_for_kind(kind);
+    async move {
+      let Some(cmd_name) = cmd_name else {
+        return Ok::<Option<u64>, redis::RedisError>(None);
+      };
+      let reply: Value = redis::cmd(cmd_name).arg(key).query_async(&mut connection).await?;
+      Ok(match reply {
+        Value::Int(len) if len >= 0 => Some(len as u64),
+        _ => None,
+      })
+    }
+  }))
+  .await
+  .map_err(describe_error)?;
+
+  Ok(
+    base
+      .into_iter()
+      .zip(lengths)
+      .map(|((key, kind, ttl_ms, memory_bytes), length)| RedisSampledKey {
+        key: RedisBytes::new(key),
+        kind,
+        ttl_ms,
+        memory_bytes,
+        length,
       })
       .collect(),
   )
@@ -1677,5 +1997,175 @@ e [::1]:37003@47003 master - 0 1 3 connected 10923-16383
       json(i64::MIN),
       Some(serde_json::json!({ "kind": "integer", "value": "-9223372036854775808" }))
     );
+  }
+
+  fn read_mock_resp(reader: &mut std::io::BufReader<std::net::TcpStream>) -> Option<Vec<String>> {
+    use std::io::{BufRead, Read};
+    let mut line = String::new();
+    if reader.read_line(&mut line).ok()? == 0 {
+      return None;
+    }
+    let count: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+    let mut args = Vec::with_capacity(count);
+    for _ in 0..count {
+      line.clear();
+      if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+      }
+      let len: usize = line.trim().strip_prefix('$')?.parse().ok()?;
+      let mut buf = vec![0u8; len + 2];
+      reader.read_exact(&mut buf).ok()?;
+      args.push(String::from_utf8_lossy(&buf[..len]).into_owned());
+    }
+    Some(args)
+  }
+
+  fn spawn_mock_redis_for_analysis(
+    total_keys: usize,
+    forbid_memory: bool,
+  ) -> (u16, Arc<std::sync::atomic::AtomicUsize>, Arc<AtomicBool>) {
+    use std::io::{BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let mem_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mem_counter = Arc::clone(&mem_calls);
+    let stop_flag = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+      while !stop_flag.load(Ordering::Relaxed) {
+        let Ok((stream, _)) = listener.accept() else { break };
+        let mem_c = Arc::clone(&mem_counter);
+        let st = Arc::clone(&stop_flag);
+        std::thread::spawn(move || {
+          let mut writer = stream.try_clone().expect("clone");
+          let mut reader = BufReader::new(stream);
+          while !st.load(Ordering::Relaxed) {
+            let Some(cmd) = read_mock_resp(&mut reader) else { break };
+            let op = cmd.first().map(|s| s.to_ascii_uppercase()).unwrap_or_default();
+            match op.as_str() {
+              "PING" => {
+                let _ = writer.write_all(b"+PONG\r\n");
+              }
+              "SCAN" => {
+                let cursor: usize = cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let end = (cursor + 5).min(total_keys);
+                let next = if end >= total_keys { 0 } else { end };
+                let next_s = next.to_string();
+                let mut out =
+                  format!("*2\r\n${}\r\n{next_s}\r\n*{}\r\n", next_s.len(), end - cursor);
+                for idx in cursor..end {
+                  let k = if idx % 2 == 0 {
+                    format!("session:u:{idx}")
+                  } else {
+                    format!("cache:item:{idx}")
+                  };
+                  out.push_str(&format!("${}\r\n{k}\r\n", k.len()));
+                }
+                let _ = writer.write_all(out.as_bytes());
+              }
+              "TYPE" => {
+                let key = cmd.get(1).map(String::as_str).unwrap_or("");
+                if key.starts_with("cache:") {
+                  let _ = writer.write_all(b"+hash\r\n");
+                } else {
+                  let _ = writer.write_all(b"+string\r\n");
+                }
+              }
+              "PTTL" => {
+                let key = cmd.get(1).map(String::as_str).unwrap_or("");
+                if key.starts_with("session:") {
+                  let _ = writer.write_all(b":-1\r\n");
+                } else {
+                  let _ = writer.write_all(b":600000\r\n");
+                }
+              }
+              "MEMORY" => {
+                mem_c.fetch_add(1, Ordering::Relaxed);
+                if forbid_memory {
+                  let _ = writer.write_all(b"-NOPERM memory|usage disabled\r\n");
+                } else {
+                  let _ = writer.write_all(b":512\r\n");
+                }
+              }
+              "STRLEN" => {
+                let _ = writer.write_all(b":120\r\n");
+              }
+              "HLEN" => {
+                let _ = writer.write_all(b":42\r\n");
+              }
+              _ => {
+                let _ = writer.write_all(b"+OK\r\n");
+              }
+            }
+          }
+        });
+      }
+    });
+    (port, mem_calls, stop)
+  }
+
+  #[tokio::test]
+  async fn analyze_keyspace_handles_memory_usage_noperm_degradation_and_cancellation() {
+    for forbid in [false, true] {
+      let (port, mem_calls, stop) = spawn_mock_redis_for_analysis(12, forbid);
+      let mut profile = sentinel_profile(None);
+      profile.host = "127.0.0.1".to_string();
+      profile.port = port;
+      let target = RedisTarget::from_profile(&profile).expect("target");
+      let pool = connect(target).await.expect("connect");
+
+      let res = analyze_keyspace(
+        &pool,
+        RedisKeyspaceAnalysisRequest {
+          database: 0,
+          pattern: "*".to_string(),
+          sample_limit: 50,
+          timeout: Duration::from_secs(5),
+        },
+        Arc::new(AtomicBool::new(false)),
+      )
+      .await
+      .expect("analyze");
+
+      assert_eq!(res.sampled_count, 12);
+      assert!(!res.partial);
+      assert!(!res.cancelled);
+      assert_eq!(res.memory_usage_available, !forbid);
+      if forbid {
+        assert_eq!(mem_calls.load(Ordering::Relaxed), 1, "must probe MEMORY USAGE only once");
+        assert!(res.keys.iter().all(|k| k.memory_bytes.is_none()));
+      } else {
+        assert!(res.keys.iter().all(|k| k.memory_bytes == Some(512)));
+      }
+      assert!(res
+        .keys
+        .iter()
+        .any(|k| k.kind == "string" && k.length == Some(120) && k.ttl_ms == -1));
+      assert!(res
+        .keys
+        .iter()
+        .any(|k| k.kind == "hash" && k.length == Some(42) && k.ttl_ms == 600_000));
+
+      // Cooperative cancel before first batch returns immediately with cancelled=true
+      let cancelled_flag = Arc::new(AtomicBool::new(true));
+      let aborted = analyze_keyspace(
+        &pool,
+        RedisKeyspaceAnalysisRequest {
+          database: 0,
+          pattern: "*".to_string(),
+          sample_limit: 50,
+          timeout: Duration::from_secs(5),
+        },
+        cancelled_flag,
+      )
+      .await
+      .expect("cancelled analyze");
+      assert!(aborted.cancelled);
+      assert!(aborted.partial);
+      assert_eq!(aborted.sampled_count, 0);
+
+      stop.store(true, Ordering::Relaxed);
+    }
   }
 }

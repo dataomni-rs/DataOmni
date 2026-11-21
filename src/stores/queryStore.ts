@@ -376,6 +376,95 @@ export async function runReadQuery(
   return rows;
 }
 
+export interface SampleQueryResult {
+  readonly rows: Record<string, SerializedResultValue>[];
+  readonly truncated: boolean;
+}
+
+/**
+ * 可取消的只读抽样查询（供 `AN1` 表级抽样画像与分析工作台使用）：
+ * - 通过 `executionId` 接入既有 `cancel_query` 取消登记表，取消时真正中止数据库驱动查询；
+ * - 若先触及字节上限（`truncated`），安全返回已取回样本并标记 `truncated: true`，不抛异常。
+ */
+export async function runCancellableSampleQuery(
+  sql: string,
+  options: { executionId: string; rowLimit: number }
+): Promise<SampleQueryResult> {
+  const { connectionId, session, queryTimeoutMs } = useQueryStore.getState();
+  if (!connectionId || !session) {
+    throw new Error(translateNow('error.sessionUnavailable'));
+  }
+
+  const rows: Record<string, SerializedResultValue>[] = [];
+  let expectedBatchCount = 0;
+  let batchError: Error | null = null;
+  let receivedBytes = 0;
+  let resolveBatches: (() => void) | null = null;
+  const batchesComplete = new Promise<void>((resolve) => {
+    resolveBatches = resolve;
+  });
+
+  const onBatch = new Channel<DriverQueryBatch>((batch) => {
+    if (batchError) {
+      return;
+    }
+    if (batch.offset !== rows.length) {
+      batchError = new Error(
+        translateNow('error.batchOutOfOrder', { expected: rows.length, actual: batch.offset })
+      );
+      resolveBatches?.();
+      return;
+    }
+    receivedBytes += new TextEncoder().encode(JSON.stringify(batch.rows)).byteLength;
+    if (receivedBytes > QUERY_RESULT_FRONTEND_BYTE_LIMIT) {
+      batchError = new Error(translateNow('error.memoryBudget'));
+      resolveBatches?.();
+      return;
+    }
+    rows.push(...batch.rows);
+    if (expectedBatchCount > 0 && batch.index + 1 === expectedBatchCount) {
+      resolveBatches?.();
+    }
+  });
+
+  let driverResult: DriverQueryResult;
+  try {
+    driverResult = await invoke<DriverQueryResult>('execute_query', {
+      onBatch,
+      request: {
+        connectionId,
+        sessionId: session.id,
+        executionId: options.executionId,
+        sql,
+        timeoutMs: queryTimeoutMs,
+        rowLimit: Math.max(1, Math.trunc(options.rowLimit)),
+        byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
+        autocommit: true
+      }
+    });
+  } catch (error) {
+    reportConnectionLostIfActive(connectionId, error);
+    throw error;
+  }
+
+  if (driverResult.kind !== 'rows') {
+    return { rows: [], truncated: false };
+  }
+
+  expectedBatchCount = driverResult.batch_count;
+  if (rows.length < driverResult.row_count && !batchError) {
+    await batchesComplete;
+  }
+  if (batchError) {
+    throw batchError;
+  }
+
+  return {
+    rows,
+    truncated: Boolean(driverResult.truncated)
+  };
+}
+
 /**
  * 只有断线发生在**当前活动连接**上时才把工作区标为已断开：后台任务如果在用户切走之后才失败，
  * 不得把新切过去的健康连接误标成已断开。

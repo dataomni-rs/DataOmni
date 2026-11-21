@@ -44,6 +44,8 @@ pub const ANALYTICS_THREADS: usize = 4;
 pub const HISTOGRAM_BIN_COUNT: usize = 10;
 /// 分类/文本列 Top-K 默认条数
 pub const TOP_VALUES_LIMIT: usize = 5;
+/// 单会话最多附加的对账参考表数量（共享 512MB 内存上限）
+pub const MAX_ATTACHED_TABLES: usize = 4;
 
 /// 会话不存在或已被淘汰/关闭
 pub const ANALYTICS_NOT_FOUND_CODE: &str = "DATAOMNI_ANALYTICS_NOT_FOUND";
@@ -55,6 +57,10 @@ pub const ANALYTICS_READ_ONLY_REFUSED_CODE: &str = "DATAOMNI_ANALYTICS_READ_ONLY
 pub const ANALYTICS_TIMEOUT_CODE: &str = "DATAOMNI_ANALYTICS_TIMEOUT";
 /// 本地数据文件格式不受支持或无法打开
 pub const ANALYTICS_UNSUPPORTED_FILE_CODE: &str = "DATAOMNI_ANALYTICS_UNSUPPORTED_FILE";
+/// 单会话附加表数量已达上限
+pub const ANALYTICS_ATTACH_LIMIT_CODE: &str = "DATAOMNI_ANALYTICS_ATTACH_LIMIT";
+/// 附加表名非法或与主表/既有附加表冲突
+pub const ANALYTICS_INVALID_TABLE_NAME_CODE: &str = "DATAOMNI_ANALYTICS_INVALID_TABLE_NAME";
 
 const LOCK_POISONED: &str = "Analytics session lock poisoned";
 
@@ -123,6 +129,18 @@ pub struct AnalyticsSessionSummary {
   pub columns: Vec<AnalyticsColumnMeta>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedTableSummary {
+  pub table_name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file_kind: Option<LocalFileKind>,
+  pub row_count: usize,
+  pub column_count: usize,
+  pub truncated: bool,
+  pub columns: Vec<AnalyticsColumnMeta>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsQueryResult {
@@ -147,6 +165,13 @@ pub struct ParquetExportSummary {
 pub struct HistogramBin {
   pub lower: f64,
   pub upper: f64,
+  pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeHistogramBin {
+  pub label: String,
   pub count: u64,
 }
 
@@ -193,6 +218,8 @@ pub struct ColumnProfile {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub p95: Option<f64>,
   pub bins: Vec<HistogramBin>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub time_bins: Vec<TimeHistogramBin>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub min_length: Option<u64>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -284,6 +311,7 @@ pub struct AnalyticsSession {
   row_count: usize,
   truncated: bool,
   columns: Vec<ColumnPlan>,
+  attached_tables: Mutex<Vec<String>>,
 }
 
 impl AnalyticsSession {
@@ -354,6 +382,32 @@ impl LocalAnalyticsRegistry {
   pub async fn open_file(&self, path: PathBuf) -> Result<AnalyticsSessionSummary, QueryError> {
     let session = blocking(move || open_local_file_session(&path, MAX_ANALYTICS_ROWS)).await?;
     self.insert(session)
+  }
+
+  /// 向既有已锁沙盒会话附加一张内存结果表（如 `ref_1`）用于跨结果 LEFT JOIN / EXCEPT 对账
+  pub async fn attach_result(
+    &self,
+    analytics_id: &str,
+    table_name: String,
+    columns: Vec<AnalyticsColumnInput>,
+    rows: Vec<Vec<JsonValue>>,
+  ) -> Result<AttachedTableSummary, QueryError> {
+    let session = self.get(analytics_id)?;
+    blocking(move || {
+      attach_result_to_session(&session, &table_name, &columns, &rows, MAX_ANALYTICS_ROWS, None)
+    })
+    .await
+  }
+
+  /// 通过瞬态只读连接物化本地文件再写入既有已锁沙盒会话（用户 SQL 所在连接全程永不解锁）
+  pub async fn attach_file(
+    &self,
+    analytics_id: &str,
+    table_name: String,
+    path: PathBuf,
+  ) -> Result<AttachedTableSummary, QueryError> {
+    let session = self.get(analytics_id)?;
+    blocking(move || attach_file_to_session(&session, &table_name, &path, MAX_ANALYTICS_ROWS)).await
   }
 
   /// 对指定会话执行列级数据画像（异步在阻塞线程池跑，可被 `cancel` 中止）
@@ -572,6 +626,7 @@ pub fn create_result_session(
     row_count: admitted_rows.len(),
     truncated,
     columns: plans,
+    attached_tables: Mutex::new(Vec::new()),
   })
 }
 
@@ -649,6 +704,7 @@ pub fn create_json_docs_session(
     row_count: normalized_docs.len(),
     truncated,
     columns: plans,
+    attached_tables: Mutex::new(Vec::new()),
   })
 }
 
@@ -740,7 +796,168 @@ pub fn open_local_file_session(
     row_count,
     truncated,
     columns: plans,
+    attached_tables: Mutex::new(Vec::new()),
   })
+}
+
+fn validate_attach_table_name(raw: &str, existing: &[String]) -> Result<String, QueryError> {
+  let trimmed = raw.trim();
+  let valid = !trimmed.is_empty()
+    && trimmed.len() <= 64
+    && trimmed.bytes().enumerate().all(|(idx, byte)| {
+      if idx == 0 {
+        byte.is_ascii_alphabetic() || byte == b'_'
+      } else {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+      }
+    });
+  if !valid || trimmed.eq_ignore_ascii_case("result_set") {
+    return Err(QueryError::with_code(
+      ANALYTICS_INVALID_TABLE_NAME_CODE,
+      format!("{ANALYTICS_INVALID_TABLE_NAME_CODE}: {trimmed}"),
+    ));
+  }
+  if existing.iter().any(|name| name.eq_ignore_ascii_case(trimmed)) {
+    return Err(QueryError::with_code(
+      ANALYTICS_INVALID_TABLE_NAME_CODE,
+      format!("{ANALYTICS_INVALID_TABLE_NAME_CODE}: duplicate table {trimmed}"),
+    ));
+  }
+  if existing.len() >= MAX_ATTACHED_TABLES {
+    return Err(QueryError::with_code(
+      ANALYTICS_ATTACH_LIMIT_CODE,
+      format!("{ANALYTICS_ATTACH_LIMIT_CODE}: max {MAX_ATTACHED_TABLES} attached tables"),
+    ));
+  }
+  Ok(trimmed.to_string())
+}
+
+fn create_named_table(
+  conn: &Connection,
+  table_name: &str,
+  plans: &[ColumnPlan],
+) -> Result<(), QueryError> {
+  let table_ident = quote_ident(table_name);
+  if plans.is_empty() {
+    conn
+      .execute_batch(&format!("CREATE TABLE {table_ident} (__empty_placeholder VARCHAR)"))
+      .map_err(duck_error)?;
+    return Ok(());
+  }
+  let cols_sql: Vec<String> = plans
+    .iter()
+    .map(|plan| format!("{} {}", quote_ident(&plan.name), plan.duckdb_type()))
+    .collect();
+  conn
+    .execute_batch(&format!("CREATE TABLE {table_ident} ({})", cols_sql.join(", ")))
+    .map_err(duck_error)
+}
+
+/// 将结果集附加为已锁沙盒会话内的只读对账表（不解锁外部访问）
+pub fn attach_result_to_session(
+  session: &AnalyticsSession,
+  table_name: &str,
+  columns: &[AnalyticsColumnInput],
+  rows: &[Vec<JsonValue>],
+  max_rows: usize,
+  file_kind: Option<LocalFileKind>,
+) -> Result<AttachedTableSummary, QueryError> {
+  let validated_name = {
+    let attached =
+      session.attached_tables.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+    validate_attach_table_name(table_name, &attached)?
+  };
+
+  let truncated = rows.len() > max_rows;
+  let admitted_rows = if truncated { &rows[..max_rows] } else { rows };
+
+  let raw_names: Vec<String> = columns
+    .iter()
+    .enumerate()
+    .map(|(index, col)| {
+      let trimmed = col.name.trim();
+      if trimmed.is_empty() {
+        format!("col_{}", index + 1)
+      } else {
+        trimmed.to_string()
+      }
+    })
+    .collect();
+  let unique_names = number_duplicate_columns(raw_names.iter().map(String::as_str));
+
+  let plans: Vec<ColumnPlan> = unique_names
+    .into_iter()
+    .enumerate()
+    .map(|(col_idx, name)| {
+      let logical_hint = columns.get(col_idx).and_then(|c| c.logical_type.as_deref());
+      infer_result_column_plan(name, logical_hint, admitted_rows, col_idx)
+    })
+    .collect();
+
+  {
+    let mut attached =
+      session.attached_tables.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+    let _ = validate_attach_table_name(&validated_name, &attached)?;
+    let conn = session.connection.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+    create_named_table(&conn, &validated_name, &plans)?;
+    if !plans.is_empty() && !admitted_rows.is_empty() {
+      let mut appender = conn.appender(&validated_name).map_err(duck_error)?;
+      let mut buffer: Vec<Value> = Vec::with_capacity(plans.len());
+      for row in admitted_rows {
+        buffer.clear();
+        for (col_idx, plan) in plans.iter().enumerate() {
+          let cell = row.get(col_idx).unwrap_or(&JsonValue::Null);
+          buffer.push(encode_result_cell(cell, plan.storage));
+        }
+        appender.append_row(appender_params_from_iter(buffer.iter())).map_err(duck_error)?;
+      }
+      appender.flush().map_err(duck_error)?;
+    }
+    attached.push(validated_name.clone());
+  }
+
+  Ok(AttachedTableSummary {
+    table_name: validated_name,
+    file_kind,
+    row_count: admitted_rows.len(),
+    column_count: plans.len(),
+    truncated,
+    columns: plans.iter().map(ColumnPlan::meta).collect(),
+  })
+}
+
+/// 通过独立瞬态读连接物化本地文件后经 `Appender` 写入已锁沙盒会话（AN0-E5 双连接隔离方案）
+pub fn attach_file_to_session(
+  session: &AnalyticsSession,
+  table_name: &str,
+  path: &Path,
+  max_rows: usize,
+) -> Result<AttachedTableSummary, QueryError> {
+  {
+    let attached =
+      session.attached_tables.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+    let _ = validate_attach_table_name(table_name, &attached)?;
+  }
+
+  let transient = open_local_file_session(path, max_rows)?;
+  let file_kind = transient.file_kind;
+  let file_truncated = transient.truncated;
+  let fetched = query_session(&transient, "SELECT * FROM result_set", max_rows, usize::MAX)?;
+  drop(transient);
+
+  let columns: Vec<AnalyticsColumnInput> = fetched
+    .column_metadata
+    .into_iter()
+    .map(|col| AnalyticsColumnInput {
+      name: col.name,
+      logical_type: Some(col.logical_type),
+      database_type: Some(col.database_type),
+    })
+    .collect();
+  let mut summary =
+    attach_result_to_session(session, table_name, &columns, &fetched.rows, max_rows, file_kind)?;
+  summary.truncated = summary.truncated || file_truncated || fetched.truncated;
+  Ok(summary)
 }
 
 fn introspect_result_table(conn: &Connection) -> Result<Vec<ColumnPlan>, QueryError> {
@@ -1156,7 +1373,15 @@ fn classify_result_cell(cell: &JsonValue) -> Option<CellKind> {
         Some(CellKind::Float)
       }
     }
-    JsonValue::String(_) => Some(CellKind::Text),
+    JsonValue::String(text) => {
+      if normalize_timestamp(text).is_some() {
+        Some(CellKind::Datetime)
+      } else if is_plain_date(text) {
+        Some(CellKind::Date)
+      } else {
+        Some(CellKind::Text)
+      }
+    }
     JsonValue::Object(map) => {
       let tag = map.get("type").and_then(JsonValue::as_str);
       let val = map.get("value").and_then(JsonValue::as_str);
@@ -1534,15 +1759,47 @@ fn parse_decimal_shape(raw: &str) -> Option<(u8, u8)> {
   Some((significant_int as u8, scale as u8))
 }
 
+fn is_leap_year(year: u32) -> bool {
+  (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+  match month {
+    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+    4 | 6 | 9 | 11 => 30,
+    2 => {
+      if is_leap_year(year) {
+        29
+      } else {
+        28
+      }
+    }
+    _ => 0,
+  }
+}
+
 fn is_plain_date(raw: &str) -> bool {
   let s = raw.trim();
   let bytes = s.as_bytes();
-  bytes.len() == 10
+  if !(bytes.len() == 10
     && bytes[4] == b'-'
     && bytes[7] == b'-'
     && bytes[0..4].iter().all(u8::is_ascii_digit)
     && bytes[5..7].iter().all(u8::is_ascii_digit)
-    && bytes[8..10].iter().all(u8::is_ascii_digit)
+    && bytes[8..10].iter().all(u8::is_ascii_digit))
+  {
+    return false;
+  }
+  let Ok(year) = s[0..4].parse::<u32>() else {
+    return false;
+  };
+  let Ok(month) = s[5..7].parse::<u32>() else {
+    return false;
+  };
+  let Ok(day) = s[8..10].parse::<u32>() else {
+    return false;
+  };
+  year >= 1 && (1..=12).contains(&month) && day >= 1 && day <= days_in_month(year, month)
 }
 
 fn is_plain_time(raw: &str) -> bool {
@@ -1555,6 +1812,18 @@ fn is_plain_time(raw: &str) -> bool {
     && bytes[3..5].iter().all(u8::is_ascii_digit)
     && bytes[6..8].iter().all(u8::is_ascii_digit);
   if !hh_mm_ss {
+    return false;
+  }
+  let Ok(hour) = s[0..2].parse::<u32>() else {
+    return false;
+  };
+  let Ok(minute) = s[3..5].parse::<u32>() else {
+    return false;
+  };
+  let Ok(second) = s[6..8].parse::<u32>() else {
+    return false;
+  };
+  if hour > 23 || minute > 59 || second > 59 {
     return false;
   }
   if bytes.len() == 8 {
@@ -1732,6 +2001,7 @@ fn profile_single_column(
       p75: None,
       p95: None,
       bins: Vec::new(),
+      time_bins: Vec::new(),
       min_length: None,
       max_length: None,
       top_values: Vec::new(),
@@ -1916,6 +2186,7 @@ fn profile_numeric_column(
     p75: finite_opt(p75),
     p95: finite_opt(p95),
     bins,
+    time_bins: Vec::new(),
     min_length: None,
     max_length: None,
     top_values,
@@ -2013,6 +2284,7 @@ fn profile_binary_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins: Vec::new(),
     min_length: min_len.map(|v| v.max(0) as u64),
     max_length: max_len.map(|v| v.max(0) as u64),
     top_values: Vec::new(),
@@ -2059,6 +2331,7 @@ fn profile_boolean_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins: Vec::new(),
     min_length: None,
     max_length: None,
     top_values,
@@ -2090,6 +2363,14 @@ fn profile_temporal_column(
   let distinct_count = distinct_count.max(0) as u64;
   let non_null = total_rows.saturating_sub(null_count);
   let top_values = if non_null > 0 { query_top_values(conn, col, non_null)? } else { Vec::new() };
+  let time_bins =
+    if matches!(plan.inferred_type, ProfileColumnType::Date | ProfileColumnType::Datetime)
+      && distinct_count >= 2
+    {
+      query_temporal_histogram(conn, col, 12)?
+    } else {
+      Vec::new()
+    };
 
   Ok(ColumnProfile {
     name: plan.name.clone(),
@@ -2113,10 +2394,77 @@ fn profile_temporal_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins,
     min_length: None,
     max_length: None,
     top_values,
   })
+}
+
+fn query_temporal_histogram(
+  conn: &Connection,
+  col: &str,
+  max_bins: usize,
+) -> Result<Vec<TimeHistogramBin>, QueryError> {
+  let bounds_sql = format!(
+    "SELECT MIN(epoch(CAST({col} AS TIMESTAMP))), MAX(epoch(CAST({col} AS TIMESTAMP))) \
+     FROM result_set WHERE {col} IS NOT NULL"
+  );
+  let (lo, hi): (Option<f64>, Option<f64>) =
+    conn.query_row(&bounds_sql, [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(duck_error)?;
+  let (Some(lo), Some(hi)) = (lo, hi) else {
+    return Ok(Vec::new());
+  };
+  let span = hi - lo;
+  if !span.is_finite() || span <= 0.0 || max_bins < 2 {
+    return Ok(Vec::new());
+  }
+
+  let bin_count = max_bins;
+  let max_bucket = (bin_count - 1) as i64;
+  let width = span / bin_count as f64;
+  let label_fmt = if span > 365.0 * 86_400.0 {
+    "%Y-%m"
+  } else if span > 3.0 * 86_400.0 {
+    "%Y-%m-%d"
+  } else if span > 2.0 * 3_600.0 {
+    "%m-%d %H:00"
+  } else {
+    "%H:%M:%S"
+  };
+
+  let bucket_sql = format!(
+    "SELECT \
+       LEAST({max_bucket}, GREATEST(0, CAST(FLOOR((epoch(CAST({col} AS TIMESTAMP)) - $1) / $2 * {bin_count}) AS BIGINT))) AS bucket, \
+       COUNT(*) AS cnt \
+     FROM result_set \
+     WHERE {col} IS NOT NULL \
+     GROUP BY bucket \
+     ORDER BY bucket"
+  );
+  let mut counts = vec![0u64; bin_count];
+  let mut stmt = conn.prepare(&bucket_sql).map_err(duck_error)?;
+  let mut rows = stmt.query([lo, span]).map_err(duck_error)?;
+  while let Some(row) = rows.next().map_err(duck_error)? {
+    let bucket: i64 = row.get(0).map_err(duck_error)?;
+    let cnt: i64 = row.get(1).map_err(duck_error)?;
+    if let Ok(idx) = usize::try_from(bucket) {
+      if idx < bin_count {
+        counts[idx] = cnt.max(0) as u64;
+      }
+    }
+  }
+
+  let label_sql = format!("SELECT strftime(to_timestamp($1), '{label_fmt}')");
+  let mut label_stmt = conn.prepare(&label_sql).map_err(duck_error)?;
+  let mut out = Vec::with_capacity(bin_count);
+  for (idx, count) in counts.into_iter().enumerate() {
+    let ts = lo + width * idx as f64;
+    let label: String =
+      label_stmt.query_row([ts], |r| r.get(0)).unwrap_or_else(|_| format!("#{}", idx + 1));
+    out.push(TimeHistogramBin { label, count });
+  }
+  Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2176,6 +2524,7 @@ fn profile_text_column(
     p75: None,
     p95: None,
     bins: Vec::new(),
+    time_bins: Vec::new(),
     min_length: min_len.map(|v| v.max(0) as u64),
     max_length: max_len.map(|v| v.max(0) as u64),
     top_values,
@@ -2674,5 +3023,200 @@ mod tests {
     let profile = profile_session("utf8-ts", &session).expect("profile");
     assert_eq!(profile.row_count, 1);
     assert_eq!(profile.columns[0].duckdb_type, "VARCHAR");
+  }
+
+  #[test]
+  fn temporal_columns_emit_time_bins_for_multi_point_spans() {
+    let columns = vec![
+      AnalyticsColumnInput {
+        name: "created_at".to_string(),
+        logical_type: Some("datetime".to_string()),
+        database_type: Some("TIMESTAMP".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "same_day".to_string(),
+        logical_type: Some("date".to_string()),
+        database_type: Some("DATE".to_string()),
+      },
+    ];
+    let rows = vec![
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-01 10:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-05 12:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-10 15:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+      vec![
+        json!({ "type": "datetime", "value": "2026-11-10 18:00:00" }),
+        json!({ "type": "date", "value": "2026-11-01" }),
+      ],
+    ];
+    let session = create_result_session(&columns, &rows, MAX_ANALYTICS_ROWS).expect("load session");
+    let profile = profile_session("time-bins", &session).expect("profile");
+
+    let created = &profile.columns[0];
+    assert_eq!(created.time_bins.len(), 12);
+    let total_binned: u64 = created.time_bins.iter().map(|b| b.count).sum();
+    assert_eq!(total_binned, 4);
+    assert!(created.time_bins[0].label.starts_with("2026-11-01"));
+
+    // Constant date column must not emit redundant time bins
+    let same_day = &profile.columns[1];
+    assert!(same_day.time_bins.is_empty());
+  }
+
+  #[test]
+  fn attach_result_and_local_file_support_reconciliation_while_keeping_sandbox_locked() {
+    let dir = std::env::temp_dir().join(format!("dataomni-attach-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let csv_path = dir.join("ops_list.csv");
+    std::fs::write(&csv_path, "order_id,flag\n2,vip\n3,refund\n4,missing_in_db\n")
+      .expect("write csv");
+
+    let primary_cols = vec![
+      AnalyticsColumnInput {
+        name: "order_id".to_string(),
+        logical_type: Some("integer".to_string()),
+        database_type: Some("INT".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "amount".to_string(),
+        logical_type: Some("numeric".to_string()),
+        database_type: Some("DOUBLE".to_string()),
+      },
+    ];
+    let primary_rows =
+      vec![vec![json!(1), json!(10.0)], vec![json!(2), json!(20.0)], vec![json!(3), json!(30.0)]];
+    let session =
+      create_result_session(&primary_cols, &primary_rows, MAX_ANALYTICS_ROWS).expect("primary");
+
+    // 1) Attach a second in-memory result set
+    let ref1 = attach_result_to_session(
+      &session,
+      "ref_1",
+      &[AnalyticsColumnInput {
+        name: "order_id".to_string(),
+        logical_type: Some("integer".to_string()),
+        database_type: Some("INT".to_string()),
+      }],
+      &[vec![json!(1)], vec![json!(2)]],
+      MAX_ANALYTICS_ROWS,
+      None,
+    )
+    .expect("attach ref_1");
+    assert_eq!(ref1.table_name, "ref_1");
+    assert_eq!(ref1.row_count, 2);
+
+    // 2) Attach a local CSV via dual-connection isolation
+    let ref2 = attach_file_to_session(&session, "ref_2", &csv_path, MAX_ANALYTICS_ROWS)
+      .expect("attach ref_2");
+    assert_eq!(ref2.table_name, "ref_2");
+    assert_eq!(ref2.file_kind, Some(LocalFileKind::Csv));
+    assert_eq!(ref2.row_count, 3);
+
+    // 3) Cross-table LEFT JOIN and EXCEPT work cleanly
+    let joined = query_session(
+      &session,
+      "SELECT a.order_id, b.flag FROM result_set a LEFT JOIN ref_2 b ON a.order_id = b.order_id ORDER BY a.order_id",
+      100,
+      DEFAULT_QUERY_BYTE_LIMIT,
+    )
+    .expect("left join");
+    assert_eq!(joined.row_count, 3);
+    assert_eq!(joined.rows[0], vec![json!(1), json!(null)]);
+    assert_eq!(joined.rows[1], vec![json!(2), json!("vip")]);
+    assert_eq!(joined.rows[2], vec![json!(3), json!("refund")]);
+
+    let diff = query_session(
+      &session,
+      "SELECT order_id FROM result_set EXCEPT SELECT order_id FROM ref_1 ORDER BY order_id",
+      100,
+      DEFAULT_QUERY_BYTE_LIMIT,
+    )
+    .expect("except");
+    assert_eq!(diff.rows, vec![vec![json!(3)]]);
+
+    // 4) Invalid names, collisions, and max limit are rejected
+    let dup = attach_result_to_session(&session, "ref_1", &primary_cols, &[], 10, None)
+      .expect_err("reject duplicate");
+    assert_eq!(dup.code.as_deref(), Some(ANALYTICS_INVALID_TABLE_NAME_CODE));
+    let reserved = attach_result_to_session(&session, "result_set", &primary_cols, &[], 10, None)
+      .expect_err("reject result_set");
+    assert_eq!(reserved.code.as_deref(), Some(ANALYTICS_INVALID_TABLE_NAME_CODE));
+    let bad_ident =
+      attach_result_to_session(&session, "bad-name;drop", &primary_cols, &[], 10, None)
+        .expect_err("reject bad ident");
+    assert_eq!(bad_ident.code.as_deref(), Some(ANALYTICS_INVALID_TABLE_NAME_CODE));
+
+    attach_result_to_session(&session, "ref_3", &primary_cols, &[], 10, None).expect("ref_3");
+    attach_result_to_session(&session, "ref_4", &primary_cols, &[], 10, None).expect("ref_4");
+    let over_limit = attach_result_to_session(&session, "ref_5", &primary_cols, &[], 10, None)
+      .expect_err("reject 5th attach");
+    assert_eq!(over_limit.code.as_deref(), Some(ANALYTICS_ATTACH_LIMIT_CODE));
+
+    // 5) Forward + reverse sandbox security gate after attach_file_to_session
+    {
+      let guard = session.connection.lock().expect("lock");
+      for escape in [
+        format!("SELECT * FROM read_text('{}')", csv_path.display()),
+        format!("COPY result_set TO '{}/out.csv'", dir.display()),
+        format!("ATTACH '{}/ext.db' AS ext", dir.display()),
+        "SET enable_external_access = true".to_string(),
+      ] {
+        assert!(guard.execute_batch(&escape).is_err(), "must reject escape: {escape}");
+      }
+    }
+    let unlocked = open_memory_connection().expect("unlocked");
+    let ok: String = unlocked
+      .query_row(&format!("SELECT content FROM read_text('{}')", csv_path.display()), [], |r| {
+        r.get(0)
+      })
+      .expect("unlocked read_text succeeds");
+    assert!(ok.starts_with("order_id,flag"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn plain_string_timestamps_and_dates_infer_temporal_types_with_bins() {
+    let cols = vec![
+      AnalyticsColumnInput {
+        name: "created_at".to_string(),
+        logical_type: None,
+        database_type: Some("TIMESTAMP".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "order_date".to_string(),
+        logical_type: None,
+        database_type: Some("DATE".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "bad_date".to_string(),
+        logical_type: None,
+        database_type: Some("TEXT".to_string()),
+      },
+    ];
+    let rows = vec![
+      vec![json!("2026-01-05 08:10:00"), json!("2026-01-05"), json!("2026-02-28")],
+      vec![json!("2026-06-18 14:20:00"), json!("2026-06-18"), json!("2026-02-30")],
+      vec![json!("2026-11-11 23:59:59"), json!("2026-11-11"), json!("2026-03-01")],
+    ];
+
+    let session =
+      create_result_session(&cols, &rows, 100).expect("load sqlite-like string timestamps");
+    assert_eq!(session.columns[0].inferred_type, ProfileColumnType::Datetime);
+    assert_eq!(session.columns[1].inferred_type, ProfileColumnType::Date);
+    assert_eq!(session.columns[2].inferred_type, ProfileColumnType::Text);
+
+    let profile = profile_session("sqlite-ts", &session).expect("profile");
+    assert!(!profile.columns[0].time_bins.is_empty(), "created_at should emit time_bins");
+    assert!(!profile.columns[1].time_bins.is_empty(), "order_date should emit time_bins");
+    assert!(profile.columns[2].time_bins.is_empty(), "invalid date column stays text");
   }
 }

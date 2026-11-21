@@ -25,8 +25,8 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
-| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [-] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、Keychain 覆盖修复、官网 CLI/MCP 文档与托管 `SKILL.md` 均已合入 `main`（PR `#59`–`#62`），`1.3.0` 版本与 README 准备就绪，待合并本 PR 后按需完成 `V1` 跨平台实机验收并打 `v1.3.0` 标签发版 |
-| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [ ] 规划已完成（`AN0–AN6`），待 `v1.3.0` 发版后按 `P0 → P1 → P2/P3` 推进 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已合入 `main`（PR `#59`–`#63`），`v1.3.0` 标签已推送触发发版（`V1` 跨平台实机验收继续跟踪） |
+| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6` 全部实现并通过验收（见下方明细，在 `feat/multi-engine-analytics` 分支待合入） |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -134,39 +134,39 @@
 
 ### 前置实验（AN0）
 
-- [ ] AN0 多引擎分析边界与安全门实验（E1–E5，实测结果写回 [`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md) §3）
-  - E1 7 类关系方言带过滤条件的表级抽样 SQL 执行计划与取消行为（绝不触发 `ORDER BY RAND()`）；
-  - E2 Redis 单机/Cluster 10,000 Key `SCAN` + pipeline 耗时与禁用 `MEMORY USAGE` 降级实测；
-  - E3 MongoDB 5,000 条 12 层嵌套/动态键 BSON 展平截断（深 8 / 300 路径）耗时与视图/权限降级实测；
-  - E4 ES 8 / OpenSearch `size: 0` 原生 `aggs` 兼容与 `_cat/indices` 返回 `403` 权限降级实测；
-  - E5 `LocalAnalyticsRegistry` 多表附加（结果集 + 本地文件）后的沙盒逃逸反向验证门。
+- [x] AN0 多引擎分析边界与安全门实验（E1–E5，5 条集成实验全通含 E2 ACL 降级与 E5 沙盒逃逸反向门，实测数据已写回 [`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md) §3）
+  - E1：200k 行 `WHERE ... LIMIT 5000`（无排序 `14.42ms`）vs `ORDER BY random()`（全扫 `Top N` `77.12ms`），拍板 7 方言无排序限流抽样；
+  - E2：踩出真实陷阱——`redis-rs` pipeline 任一命令报 `NOPERM` 会丢弃整批 `TYPE`/`PTTL`，拍板首键独立探测 1 次 `MEMORY USAGE`（10k Key 允许 `225.75ms` / 禁止仅 1 次探测即降级 `153.70ms`）；
+  - E3：5,000 条 12 层嵌套 + 1,200 动态键 BSON 纯内存展平 `87.46ms`，严控 `max_depth=8` / `max_paths=300`（截断 `8,656` 路径）；
+  - E4：mock HTTP（`.no_proxy()`）验证 1,053 字段 Mapping 膨胀预警、`size: 0` 聚合与 `_cat/indices` `403` 独立降级；
+  - E5：瞬态读连接物化 + `Appender` 向已锁沙盒附加 10k CSV（`202.26ms`）并跑 `LEFT JOIN`/`EXCEPT`（`55.88ms`），4 类逃逸全拒且反向门证实未锁连接可 `read_text`。
 
 ### 阶段 1（P0）：结构化数据深度分析升级
 
-- [ ] AN1 关系库表级抽样画像与按列语义智能视图
-  - `TableDataViewer` 支持「当前页 / 表级抽样（1,000 / 5,000 / 20,000 行，继承当前过滤条件、可取消、标明样本口径）」切换；
-  - `DataProfileDialog` 按列语义分流：高基数/唯一 ID 列默认折叠无意义 Top-5 仅告警重复/空值、时间列补迷你趋势折线（Sparkline）、数值列补离群值一键下钻，支持一键复制原库方言 `WHERE` 或跳回原表筛选。
-- [ ] AN2 DuckDB 工作台多表联动对账（结果集 × 本地文件 / 跨查询结果）
-  - `services/local_analytics.rs` 新增 `analytics_attach_result` / `analytics_attach_file`（本地文件经独立瞬态只读连接物化再 `Appender` 写入，用户 SQL 所在连接全程锁死 `enable_external_access=false` + `lock_configuration=true`，单会话上限 4 张表）；
-  - `LocalAnalyticsDialog` 支持附加本地 CSV/Parquet/JSON 或另一标签结果，CodeMirror 补全同步覆盖多表列名，内置 `LEFT JOIN` 与 `EXCEPT` 对账模板。
+- [x] AN1 关系库表级抽样画像与按列语义智能视图（`local_analytics::tests` 10 条全通 + 前端 `tableSampleQuery`/`analyticsProfile`/`DataProfileDialog`/`TableDataViewer`/`catalog`/`shortcuts` 85 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - 新增 `src/utils/tableSampleQuery.ts`（7 类关系方言无排序限流抽样 SQL，严禁 `ORDER BY RAND()`）与 `runCancellableSampleQuery`（接入既有 `cancel_query` 驱动级取消）；`TableDataViewer` 与 `DataProfileDialog` 支持「当前页 / 表抽样（1,000 / 5,000 / 20,000 行，继承当前过滤条件、明确标注样本口径）」切换；
+  - 后端 `local_analytics.rs` 为 `DATE`/`TIMESTAMP` 列补充自适应粒度 `timeBins`（12 桶时间分布）；`DataProfileDialog` 按列语义分流：默认折叠唯一/高基数 ID 列无意义 Top-5、渲染时间列内联 SVG Sparkline、数值列提供负值/`> P95` 离群值一键下钻，支持原库方言 `WHERE` 复制与直接「回表筛选」。
+- [x] AN2 DuckDB 工作台多表联动对账（结果集 × 本地文件 / 跨查询结果）（`local_analytics::tests` 11 条全通含 `attach_result_and_local_file_support_reconciliation_while_keeping_sandbox_locked` 沙盒逃逸反向门 + 前端 `analyticsQuery`/`LocalAnalyticsDialog`/`catalog` 27 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `services/local_analytics.rs`、`commands/analytics_commands.rs` 与 `lib.rs` 新增 `analytics_attach_result` / `analytics_attach_file`（本地文件经独立瞬态只读连接物化再 `Appender` 写入已锁沙盒，用户 SQL 连接全程不解锁，单会话上限 4 张表且严格校验合法表名）；
+  - `LocalAnalyticsDialog` 与 `src/utils/analyticsQuery.ts` 支持附加本地 CSV/Parquet/TSV/JSON 或当前工作区另一查询结果，CodeMirror 补全自动纳入所有附加表列名，并内置同名键推断的 `LEFT JOIN 对账` 与 `EXCEPT 找差异` 快捷模板。
 
 ### 阶段 2（P1）：Redis 与 MongoDB 引擎专属分析
 
-- [ ] AN3 Redis 非阻塞 Keyspace 内存、TTL 与 BigKey 体检
-  - `services/redis.rs` 新增受时间（15s）与样本数（默认 5,000 / 上限 20,000）双重保护且支持协作取消的抽样分析器（复用 `scan_node` / `scan_cluster`，严禁 `KEYS *`；`MEMORY USAGE` 被 ACL 禁用时平滑降级为元素数/长度口径）；
-  - 纯函数 `src/utils/redisAnalytics.ts` 与 `RedisKeyBrowser` 空间体检视图：可配分隔符前缀树内存占比、TTL 5 档健康度分布、BigKey Top 50 点击直达 Key 详情，支持大型 Hash/ZSet 样本桥接至 DuckDB。
-- [ ] AN4 MongoDB `$sample` 递归嵌套 Schema 漂移与索引体检
-  - `services/mongodb.rs` 新增基于 `$sample`（支持前置当前 `filter`，默认 1,000 / 上限 10,000，深 8 / 300 路径防爆炸截断）的递归嵌套路径分析（存在率区分缺失与 `null`、BSON 混合类型漂移占比、数组长度分位数）及 `$collStats` / `$indexStats` 僵尸索引体检（视图与低权限局部降级）；
-  - `MongoCollectionViewer` 接入「Schema 与索引分析」视图，点击异常类型一键生成 `{ "path": { "$type": "..." } }` 过滤条件，聚合管道结果接入 `ResultChartDialog` 一键出图。
+- [x] AN3 Redis 非阻塞 Keyspace 内存、TTL 与 BigKey 体检（Rust `services::redis::tests` 16 条全通含 mock RESP2 `MEMORY USAGE` ACL 降级与取消门 + 前端 `redisAnalytics`/`RedisKeyspaceAnalyticsDialog`/`RedisKeyBrowser`/`catalog` 32 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `services/redis.rs`、`commands/redis_commands.rs` 与 `lib.rs` 新增 `redis_analyze_keyspace` / `redis_cancel_analysis` 与 `RedisAnalysisState` 协作取消登记表（复用 `SCAN` 单机/Cluster 游标，严禁 `KEYS *`；遵循 `AN0-E2` 首键单次探测 `MEMORY USAGE`，ACL 禁用时平滑降级为元素数/长度估算，受 15s 与 20,000 键双上限保护）；
+  - 落地纯函数 `src/utils/redisAnalytics.ts`、`RedisKeyspaceAnalyticsDialog` 与 `RedisKeyBrowser` 入口：可配分隔符（`:` / `/` / `.`）前缀树内存占比、TTL 5 档健康度分布与点击下钻、BigKey Top 50 点击直达 Key 详情，并为 Hash/ZSet 单键值提供一键桥接至 DuckDB 二次分析。
+- [x] AN4 MongoDB `$sample` 递归嵌套 Schema 漂移与索引体检（Rust `services::mongodb::tests` 12 条全通含 12 层嵌套+动态键截断与类型漂移单测 + 前端 `mongoAnalytics`/`MongoSchemaAnalyticsDialog`/`catalog` 24 条全绿 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `services/mongodb.rs`、`commands/mongodb_commands.rs` 与 `lib.rs` 新增 `mongodb_analyze_collection` 与纯内存 `analyze_bson_documents`（基于 `$sample`，支持前置当前 `filter`，默认 1,000 / 上限 10,000，硬限深度 8 / 路径 300 / 单数组抽样 20 防爆炸，精确区分缺失与显式 `null`、识别 BSON 混合类型漂移与数组长度分位数），并行拉取 `$collStats`/`$indexStats` 识别长期 0 命中候选僵尸索引并在视图或权限不足时局部降级；
+  - 落地 `src/utils/mongoAnalytics.ts` 与 `MongoSchemaAnalyticsDialog`，接入 `MongoCollectionViewer`「Schema / 索引」入口（点击异常类型或缺失标签一键生成 `{ "path": { $type / $exists } }` 回填筛选），同时为集合查询与聚合管道结果接入 `ResultChartDialog` 一键出图。
 
 ### 阶段 3（P2–P3）：Elasticsearch 原生聚合分析与 Neo4j 图拓扑体检
 
-- [ ] AN5 Elasticsearch 原生 `aggs` 下推探索与 Mapping / 分片健康诊断
-  - 读权限路径：`GET /<index>/_mapping` 字段数统计与逼近 1,000 字段膨胀预警 + `POST /<index>/_search`（`size: 0`）下推 `date_histogram` / `terms + missing` / `extended_stats + percentiles`，聚合桶直接喂给 `ResultChartDialog` 原生 SVG 出图；
-  - 监控权限独立路径：`_cat/indices` 与 `_cat/shards` 检查分片过碎/过大与高软删除率，收到 `403` 时优雅折叠卡片不阻塞只读聚合；保留 DuckDB 用于明细二次清洗与导出 Parquet。
-- [ ] AN6 Neo4j 图谱拓扑与超级节点（Supernode）体检
-  - `services/neo4j.rs` 分层执行只读 Cypher：O(1) count store 统计各 Label 节点数与 Relationship Type 边数 + 按需受限采样（`LIMIT` 与超时保护）计算节点度分位数、孤立节点率、Top 20 超级节点及属性覆盖率；
-  - `CypherWorkbench` 接入「图谱体检」面板，点击高风险 Label / 超级节点一键生成只读 Cypher 或在 `CypherGraphView` 展开局部邻域。
+- [x] AN5 Elasticsearch 原生 `aggs` 下推探索与 Mapping / 分片健康诊断（前端 `esAnalytics`/`EsIndexAnalyticsDialog`/`EsConsole`/`catalog` 26 条全绿含 `_cat/indices` `403` 降级与 Mapping 1,000+ 字段膨胀门 + `tsc`/`eslint` 通过）
+  - 复用既有 `elasticsearch_run`（零冗余后端代理），落地纯函数 `src/utils/esAnalytics.ts` 与 `EsIndexAnalyticsDialog`，接入 `EsIndexStructureView`「原生聚合分析」入口；
+  - 读权限路径自动汇总 `_mapping` 叶子字段数（≥ 800 / 1,000 膨胀预警）、`text + .keyword` 双存计数与 `date`/`keyword`/数值字段清单，下推 `size: 0` 的 `date_histogram` / `terms + missing` / `extended_stats + percentiles` 并直连 `ResultChartDialog` 原生 SVG 出图；监控权限路径独立查 `_cat/indices` 与 `_cat/shards` 检查软删除率及过大/过碎/未分配分片，遇 `403` 局部折叠不阻塞只读聚合。
+- [x] AN6 Neo4j 图谱拓扑与超级节点（Supernode）体检（前端 `neo4jAnalytics`/`Neo4jTopologyAnalyticsDialog`/`CypherWorkbench`/`catalog` 31 条全绿含只读 Cypher 门禁 + `tsc`/`eslint`/`cargo fmt` 通过）
+  - `commands/neo4j_commands.rs` `neo4j_run` 开放可选 `read_only` 协议级只读事务标志；落地 `src/utils/neo4jAnalytics.ts` 与 `Neo4jTopologyAnalyticsDialog`，接入 `CypherWorkbench`「图谱体检」入口；
+  - 分层执行：第一层经 O(1) count store 统计各 Label 节点数与 Relationship Type 边数并直连 `ResultChartDialog` 出图；第二层按需受限采样（500 / 1,000 / 5,000 节点，兼容 Neo4j 5 `COUNT { (n)--() }` 与 Neo4j 4 `size()` 回退）统计度分位数（P50 / P95 / Max）、孤立节点占比、Top 20 超级节点与稀疏属性覆盖率，点击超级节点一键载入并执行只读邻域 Cypher 在图视图展开。
 
 ---
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { clsx } from 'clsx';
-import { AlertCircle, RefreshCw } from 'lucide-react';
+import { AlertCircle, BarChart3, RefreshCw } from 'lucide-react';
 import { useQueryStore } from '../stores/queryStore';
 import { useLanguageStore } from '../stores/languageStore';
 import { describeError } from '../utils/describeError';
@@ -18,6 +18,7 @@ import {
   type MappingField
 } from '../utils/esMapping';
 import { HighlightedCode } from './HighlightedCode';
+import { EsIndexAnalyticsDialog } from './EsIndexAnalyticsDialog';
 
 interface EsResponse {
   status: number;
@@ -50,6 +51,7 @@ export function EsIndexStructureView({ index }: EsIndexStructureViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [showRaw, setShowRaw] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
   const request = useRef(0);
 
   const load = useCallback(async () => {
@@ -115,14 +117,26 @@ export function EsIndexStructureView({ index }: EsIndexStructureViewProps) {
           </h2>
           {facts.length > 0 && <p className="mt-0.5 truncate text-xs text-fg-muted">{facts.join(' · ')}</p>}
         </div>
-        <button
-          onClick={() => void load()}
-          disabled={loading}
-          className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          <span>{t('explorer.refresh')}</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowAnalytics(true)}
+            disabled={!loaded || !connectionString}
+            title={t('es.analytics.buttonTitle')}
+            className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+          >
+            <BarChart3 size={14} />
+            <span>{t('es.analytics.button')}</span>
+          </button>
+          <button
+            onClick={() => void load()}
+            disabled={loading}
+            className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg transition-colors hover:bg-surface-hover disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            <span>{t('explorer.refresh')}</span>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -194,6 +208,15 @@ export function EsIndexStructureView({ index }: EsIndexStructureViewProps) {
           </>
         )}
       </div>
+      {showAnalytics && loaded && connectionString && (
+        <EsIndexAnalyticsDialog
+          connectionString={connectionString}
+          index={index}
+          mappingFields={loaded.mapping.fields}
+          timeoutMs={timeoutMs}
+          onClose={() => setShowAnalytics(false)}
+        />
+      )}
     </div>
   );
 }

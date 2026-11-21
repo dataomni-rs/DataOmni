@@ -40,6 +40,15 @@ export interface AnalyticsSessionSummary {
   readonly columns: readonly AnalyticsColumnMeta[];
 }
 
+export interface AttachedTableSummary {
+  readonly tableName: string;
+  readonly fileKind?: LocalFileKind;
+  readonly rowCount: number;
+  readonly columnCount: number;
+  readonly truncated: boolean;
+  readonly columns: readonly AnalyticsColumnMeta[];
+}
+
 export interface AnalyticsQueryResult {
   readonly columns: readonly string[];
   readonly columnMetadata: readonly DriverQueryColumn[];
@@ -58,6 +67,11 @@ export interface ParquetExportSummary {
 export interface HistogramBin {
   readonly lower: number;
   readonly upper: number;
+  readonly count: number;
+}
+
+export interface TimeHistogramBin {
+  readonly label: string;
   readonly count: number;
 }
 
@@ -90,6 +104,7 @@ export interface ColumnProfile {
   readonly p75?: number;
   readonly p95?: number;
   readonly bins: readonly HistogramBin[];
+  readonly timeBins?: readonly TimeHistogramBin[];
   readonly minLength?: number;
   readonly maxLength?: number;
   readonly topValues: readonly TopValueEntry[];
