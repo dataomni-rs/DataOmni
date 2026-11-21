@@ -166,4 +166,29 @@ describe('AiProfileInsightsPanel', () => {
     expect(runBtn?.disabled).toBe(true);
     expect(container.textContent).toContain('本机回环模型');
   });
+
+  it('surfaces an explicit error instead of vanishing silently on empty model reply', async () => {
+    invoke.mockResolvedValueOnce('   ');
+
+    await act(async () => {
+      root.render(
+        <AiProfileInsightsPanel
+          title="orders"
+          environment="development"
+          profile={SAMPLE_PROFILE}
+          onClose={vi.fn()}
+        />
+      );
+    });
+
+    const runBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('生成体检解读')
+    );
+    await act(async () => {
+      runBtn?.click();
+    });
+    await flush();
+
+    expect(container.textContent).toContain('JSON 结构');
+  });
 });

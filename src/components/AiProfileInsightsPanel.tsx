@@ -99,17 +99,22 @@ export function AiProfileInsightsPanel({
     try {
       const reply = await completeWithAi(ai, previewPrompt, {
         requestId,
-        endpoint: endpointResolution.endpoint,
-        maxTokens: 1200
+        endpoint: endpointResolution.endpoint
       });
       if (!mountedRef.current || activeRequestIdRef.current !== requestId) {
         return;
       }
+      const trimmed = reply.trim();
+      if (trimmed === '') {
+        setError(t('aiSql.parseFailed'));
+        return;
+      }
       const parsed = parseProfileInsightsReply(reply);
-      if (parsed.ok) {
+      if (parsed.ok && (parsed.value.summary !== '' || parsed.value.findings.length > 0)) {
         setInsights(parsed.value);
       } else {
-        setRawReply(parsed.raw);
+        setError(t('aiSql.parseFailed'));
+        setRawReply(trimmed);
       }
     } catch (err) {
       if (!mountedRef.current || activeRequestIdRef.current !== requestId) {
@@ -120,7 +125,7 @@ export function AiProfileInsightsPanel({
       } else if (isAiKeyMissing(err)) {
         setError(t('error.backend.aiKeyMissing'));
       } else {
-        setError(describeError(err));
+        setError(describeError(err) || t('aiSql.parseFailed'));
       }
     } finally {
       if (activeRequestIdRef.current === requestId) {
@@ -151,7 +156,7 @@ export function AiProfileInsightsPanel({
   };
 
   return (
-    <section className="shrink-0 space-y-2.5 border-b border-line bg-surface px-5 py-3 text-xs">
+    <section className="max-h-[42vh] shrink-0 space-y-2.5 overflow-y-auto border-b border-line bg-surface px-5 py-3 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Sparkles size={14} className="text-accent" />

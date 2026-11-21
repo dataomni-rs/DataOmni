@@ -919,19 +919,43 @@ export function ResultChartDialog({
                 {heatmapData.cells.map((cell) => {
                   const x = PLOT.left + cell.xIdx * cellW + 1;
                   const y = PLOT.top + cell.yIdx * cellH + 1;
+                  const w = Math.max(2, cellW - 2);
+                  const h = Math.max(2, cellH - 2);
+                  const intensity = heatmapIntensity(cell.value, heatmapData.min, heatmapData.max);
+                  const showCellLabel = w >= 42 && h >= 20;
+                  const labelText = Number.isInteger(cell.value)
+                    ? String(cell.value)
+                    : Number(cell.value.toFixed(2)).toString();
                   return (
-                    <rect
-                      key={`${cell.xIdx}-${cell.yIdx}`}
-                      x={x}
-                      y={y}
-                      width={Math.max(2, cellW - 2)}
-                      height={Math.max(2, cellH - 2)}
-                      rx={2}
-                      fill="var(--dm-accent)"
-                      opacity={heatmapIntensity(cell.value, heatmapData.min, heatmapData.max)}
-                    >
-                      <title>{`${heatmapData.xLabels[cell.xIdx]} × ${heatmapData.yLabels[cell.yIdx]} · ${heatmapData.valueName}: ${cell.value}`}</title>
-                    </rect>
+                    <g key={`${cell.xIdx}-${cell.yIdx}`}>
+                      <rect
+                        x={x}
+                        y={y}
+                        width={w}
+                        height={h}
+                        rx={2}
+                        fill="var(--dm-accent)"
+                        opacity={intensity}
+                      >
+                        <title>{`${heatmapData.xLabels[cell.xIdx]} × ${heatmapData.yLabels[cell.yIdx]} · ${heatmapData.valueName}: ${cell.value}`}</title>
+                      </rect>
+                      {showCellLabel && (
+                        <text
+                          x={x + w / 2}
+                          y={y + h / 2}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          pointerEvents="none"
+                          className={
+                            intensity >= 0.6
+                              ? 'fill-[var(--dm-fg-on-accent)] font-mono text-[11px] font-medium'
+                              : 'fill-[var(--dm-fg)] font-mono text-[11px]'
+                          }
+                        >
+                          {labelText}
+                        </text>
+                      )}
+                    </g>
                   );
                 })}
                 {heatmapData.xLabels.map((label, idx) =>

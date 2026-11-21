@@ -171,7 +171,8 @@ fn response_text(protocol: AiProtocol, value: &JsonValue) -> Option<String> {
       (!text.is_empty()).then_some(text)
     }
     AiProtocol::Openai => {
-      value.get("choices")?.get(0)?.get("message")?.get("content")?.as_str().map(str::to_string)
+      let text = value.get("choices")?.get(0)?.get("message")?.get("content")?.as_str()?;
+      (!text.trim().is_empty()).then(|| text.to_string())
     }
   }
 }
@@ -331,5 +332,17 @@ mod tests {
       .expect_err("should fail");
     server.join().expect("server");
     assert!(error.message.starts_with(AI_BAD_RESPONSE), "{}", error.message);
+
+    // 思考/推理模型耗尽 max_tokens 返回空 content 时同样不应静默当成成功
+    let (base_empty, server_empty) = serve_once(
+      "200 OK",
+      r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":""}}]}"#,
+    );
+    let empty_err = complete_with(&client(), &request(AiProtocol::Openai, base_empty), "k")
+      .await
+      .expect_err("empty content must fail");
+    server_empty.join().expect("server");
+    assert!(empty_err.message.starts_with(AI_BAD_RESPONSE), "{}", empty_err.message);
+    assert!(empty_err.message.contains("finish_reason"), "{}", empty_err.message);
   }
 }
