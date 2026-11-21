@@ -25,8 +25,8 @@
 | v1.0 | 稳定桌面客户端（`rfcs/roadmap-1.0.md`） | [x] `v1.0.0` 2026-11-05 正式发布 |
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
-| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已合入 `main`（PR `#59`–`#63`），`v1.3.0` 标签已推送触发发版（`V1` 跨平台实机验收继续跟踪） |
-| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6` 已合入 `main`（PR `#64`）；`AN7–AN10` 全部实现并通过验收 |
+| v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已合入 `main`（PR `#59`–`#63`），随 `v1.3.0` 一并发版（`V1` 跨平台实机验收继续跟踪） |
+| v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已合入 `main`，并入 `v1.3.0` 一并发版 |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
