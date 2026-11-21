@@ -2240,6 +2240,20 @@ export default function TableDataViewer({
       {showAnalyze && (
         <LocalAnalyticsDialog
           source={analyticsSource}
+          tableSample={tableSampleConfig}
+          sourceDialect={dialect}
+          onApplyTableFilter={(columnName, operator, value) => {
+            const nextFilter: ColumnFilter = {
+              id: `profile-${columnName}-${Date.now()}`,
+              column: columnName,
+              operator,
+              value: operator === 'is-null' ? '' : value
+            };
+            const merged = [...appliedFilters.filter((f) => f.column !== columnName), nextFilter];
+            setShowFilters(true);
+            setFilters(merged);
+            applyFilters(merged);
+          }}
           onClose={() => setShowAnalyze(false)}
         />
       )}

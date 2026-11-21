@@ -1373,7 +1373,15 @@ fn classify_result_cell(cell: &JsonValue) -> Option<CellKind> {
         Some(CellKind::Float)
       }
     }
-    JsonValue::String(_) => Some(CellKind::Text),
+    JsonValue::String(text) => {
+      if normalize_timestamp(text).is_some() {
+        Some(CellKind::Datetime)
+      } else if is_plain_date(text) {
+        Some(CellKind::Date)
+      } else {
+        Some(CellKind::Text)
+      }
+    }
     JsonValue::Object(map) => {
       let tag = map.get("type").and_then(JsonValue::as_str);
       let val = map.get("value").and_then(JsonValue::as_str);
@@ -1751,15 +1759,47 @@ fn parse_decimal_shape(raw: &str) -> Option<(u8, u8)> {
   Some((significant_int as u8, scale as u8))
 }
 
+fn is_leap_year(year: u32) -> bool {
+  (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+  match month {
+    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+    4 | 6 | 9 | 11 => 30,
+    2 => {
+      if is_leap_year(year) {
+        29
+      } else {
+        28
+      }
+    }
+    _ => 0,
+  }
+}
+
 fn is_plain_date(raw: &str) -> bool {
   let s = raw.trim();
   let bytes = s.as_bytes();
-  bytes.len() == 10
+  if !(bytes.len() == 10
     && bytes[4] == b'-'
     && bytes[7] == b'-'
     && bytes[0..4].iter().all(u8::is_ascii_digit)
     && bytes[5..7].iter().all(u8::is_ascii_digit)
-    && bytes[8..10].iter().all(u8::is_ascii_digit)
+    && bytes[8..10].iter().all(u8::is_ascii_digit))
+  {
+    return false;
+  }
+  let Ok(year) = s[0..4].parse::<u32>() else {
+    return false;
+  };
+  let Ok(month) = s[5..7].parse::<u32>() else {
+    return false;
+  };
+  let Ok(day) = s[8..10].parse::<u32>() else {
+    return false;
+  };
+  year >= 1 && (1..=12).contains(&month) && day >= 1 && day <= days_in_month(year, month)
 }
 
 fn is_plain_time(raw: &str) -> bool {
@@ -1772,6 +1812,18 @@ fn is_plain_time(raw: &str) -> bool {
     && bytes[3..5].iter().all(u8::is_ascii_digit)
     && bytes[6..8].iter().all(u8::is_ascii_digit);
   if !hh_mm_ss {
+    return false;
+  }
+  let Ok(hour) = s[0..2].parse::<u32>() else {
+    return false;
+  };
+  let Ok(minute) = s[3..5].parse::<u32>() else {
+    return false;
+  };
+  let Ok(second) = s[6..8].parse::<u32>() else {
+    return false;
+  };
+  if hour > 23 || minute > 59 || second > 59 {
     return false;
   }
   if bytes.len() == 8 {
@@ -3129,5 +3181,42 @@ mod tests {
     assert!(ok.starts_with("order_id,flag"));
 
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn plain_string_timestamps_and_dates_infer_temporal_types_with_bins() {
+    let cols = vec![
+      AnalyticsColumnInput {
+        name: "created_at".to_string(),
+        logical_type: None,
+        database_type: Some("TIMESTAMP".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "order_date".to_string(),
+        logical_type: None,
+        database_type: Some("DATE".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "bad_date".to_string(),
+        logical_type: None,
+        database_type: Some("TEXT".to_string()),
+      },
+    ];
+    let rows = vec![
+      vec![json!("2026-01-05 08:10:00"), json!("2026-01-05"), json!("2026-02-28")],
+      vec![json!("2026-06-18 14:20:00"), json!("2026-06-18"), json!("2026-02-30")],
+      vec![json!("2026-11-11 23:59:59"), json!("2026-11-11"), json!("2026-03-01")],
+    ];
+
+    let session =
+      create_result_session(&cols, &rows, 100).expect("load sqlite-like string timestamps");
+    assert_eq!(session.columns[0].inferred_type, ProfileColumnType::Datetime);
+    assert_eq!(session.columns[1].inferred_type, ProfileColumnType::Date);
+    assert_eq!(session.columns[2].inferred_type, ProfileColumnType::Text);
+
+    let profile = profile_session("sqlite-ts", &session).expect("profile");
+    assert!(!profile.columns[0].time_bins.is_empty(), "created_at should emit time_bins");
+    assert!(!profile.columns[1].time_bins.is_empty(), "order_date should emit time_bins");
+    assert!(profile.columns[2].time_bins.is_empty(), "invalid date column stays text");
   }
 }

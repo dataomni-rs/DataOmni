@@ -240,6 +240,8 @@ describe('LocalAnalyticsDialog', () => {
     });
     expect(container.textContent).toContain('ref_1');
     expect(container.textContent).toContain('ops_list.csv');
+    // 附加表的列名芯片也应直接展示
+    expect(container.textContent).toContain('flag');
 
     const joinBtn = Array.from(container.querySelectorAll('button')).find(
       (btn) => btn.textContent?.includes('LEFT JOIN 对账')
@@ -251,5 +253,74 @@ describe('LocalAnalyticsDialog', () => {
     await flush();
 
     expect(container.textContent).toContain('vip');
+  });
+
+  it('supports table-level sampling toggle in workbench header when tableSample is provided', async () => {
+    const fetchSample = vi.fn().mockResolvedValue({
+      columns: [{ name: 'order_id' }],
+      rows: [[1], [2], [3]],
+      truncated: false
+    });
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+      if (cmd === 'analytics_load_result') {
+        const rows = (args.rows as unknown[]) ?? [];
+        return {
+          analyticsId: `sess-${rows.length}`,
+          sourceKind: 'resultSet',
+          rowCount: rows.length,
+          columnCount: 1,
+          truncated: false,
+          columns: [
+            { name: 'order_id', duckdbType: 'BIGINT', inferredType: 'integer', precisionDegraded: false }
+          ]
+        };
+      }
+      if (cmd === 'analytics_query') {
+        return {
+          columns: ['order_id'],
+          columnMetadata: [],
+          rows: [[1]],
+          rowCount: 1,
+          truncated: false,
+          truncationReason: null,
+          elapsedMs: 1
+        };
+      }
+      return true;
+    });
+
+    await act(async () => {
+      root.render(
+        <LocalAnalyticsDialog
+          source={{
+            kind: 'resultSet',
+            title: 'orders',
+            columns: [{ name: 'order_id' }],
+            rows: [[1]]
+          }}
+          tableSample={{
+            hasActiveFilters: false,
+            fetchSample,
+            cancelSample: vi.fn()
+          }}
+          sourceDialect="sqlite"
+          onApplyTableFilter={vi.fn()}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    await flush();
+
+    const sampleBtn = Array.from(container.querySelectorAll('button')).find((btn) =>
+      btn.textContent?.includes('表抽样')
+    );
+    expect(sampleBtn).toBeTruthy();
+    await act(async () => {
+      sampleBtn?.click();
+    });
+    await flush();
+
+    expect(fetchSample).toHaveBeenCalledWith(5000, expect.any(String));
+    expect(container.textContent).toContain('3 × 1');
   });
 });

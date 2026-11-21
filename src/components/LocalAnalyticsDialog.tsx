@@ -58,7 +58,12 @@ import { GRID_PAGE_SIZE_OPTIONS } from '../utils/gridPagination';
 import { formatResultValueOneLine } from '../utils/resultValues';
 import { runShortcutKeymap, type RunShortcutHandlers } from '../utils/runShortcutKeymap';
 import { isImeKeyEvent } from '../utils/shortcuts';
-import { ColumnProfileCard } from './DataProfileDialog';
+import type { SqlIdentifierDialect } from '../utils/sqlIdentifiers';
+import {
+  DEFAULT_TABLE_SAMPLE_SIZE,
+  TABLE_SAMPLE_SIZE_OPTIONS
+} from '../utils/tableSampleQuery';
+import { ColumnProfileCard, type TableSampleConfig } from './DataProfileDialog';
 import { ExportResultDialog } from './ExportResultDialog';
 import { PLAIN_TEXT_INPUT } from './FormControls';
 import { ResultChartDialog } from './ResultChartDialog';
@@ -84,6 +89,9 @@ type WorkbenchTab = 'sql' | 'profile';
 
 interface LocalAnalyticsDialogProps {
   source: LocalAnalyticsSource;
+  tableSample?: TableSampleConfig;
+  sourceDialect?: SqlIdentifierDialect;
+  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
   onClose: () => void;
 }
 
@@ -99,9 +107,19 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogProps) {
+export function LocalAnalyticsDialog({
+  source,
+  tableSample,
+  sourceDialect,
+  onApplyTableFilter,
+  onClose
+}: LocalAnalyticsDialogProps) {
   const t = useLanguageStore((state) => state.t);
   const [tab, setTab] = useState<WorkbenchTab>('sql');
+  const [scope, setScope] = useState<'current' | 'sample'>('current');
+  const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
+  const [sampling, setSampling] = useState(false);
+  const [sampledTruncated, setSampledTruncated] = useState(false);
   const [loadingSession, setLoadingSession] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [summary, setSummary] = useState<AnalyticsSessionSummary | null>(null);
@@ -161,9 +179,20 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
 
   const resolvedTheme = useThemeStore((state) => state.resolved);
   const sessionIdRef = useRef<string | null>(null);
+  const sampleExecutionIdRef = useRef<string | null>(null);
+  const tabRef = useRef<WorkbenchTab>('sql');
   const mountedRef = useRef(true);
   const editorViewRef = useRef<EditorView | null>(null);
   const runShortcutsRef = useRef<RunShortcutHandlers>({ runCurrent: () => {}, runAll: () => {} });
+
+  tabRef.current = tab;
+
+  const currentRowCount =
+    source.kind === 'resultSet'
+      ? source.rows.length
+      : source.kind === 'jsonDocuments'
+        ? source.documents.length
+        : (summary?.rowCount ?? 0);
 
   const titleLabel =
     source.kind === 'localFile' ? localFileBasename(source.filePath) : source.title;
@@ -210,13 +239,18 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      const sampleExecId = sampleExecutionIdRef.current;
+      sampleExecutionIdRef.current = null;
+      if (sampleExecId && tableSample) {
+        tableSample.cancelSample(sampleExecId);
+      }
       const id = sessionIdRef.current;
       sessionIdRef.current = null;
       if (id) {
         void invoke('analytics_close', { analyticsId: id }).catch(() => {});
       }
     };
-  }, []);
+  }, [tableSample]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -267,6 +301,8 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
   useEffect(() => {
     let stale = false;
     setLoadingSession(true);
+    setSampling(scope === 'sample' && Boolean(tableSample));
+    setSampledTruncated(false);
     setSessionError(null);
     setSummary(null);
     setAttachedTables([]);
@@ -282,19 +318,36 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
         void invoke('analytics_close', { analyticsId: prev }).catch(() => {});
       }
       try {
-        const loaded =
-          source.kind === 'localFile'
-            ? await invoke<AnalyticsSessionSummary>('analytics_open_file', {
-                path: source.filePath
-              })
-            : source.kind === 'resultSet'
-              ? await invoke<AnalyticsSessionSummary>('analytics_load_result', {
-                  columns: source.columns,
-                  rows: source.rows
+        let loaded: AnalyticsSessionSummary;
+        if (scope === 'sample' && tableSample) {
+          const execId = crypto.randomUUID();
+          sampleExecutionIdRef.current = execId;
+          const sampled = await tableSample.fetchSample(sampleSize, execId);
+          sampleExecutionIdRef.current = null;
+          if (stale || !mountedRef.current) {
+            return;
+          }
+          setSampling(false);
+          setSampledTruncated(sampled.truncated);
+          loaded = await invoke<AnalyticsSessionSummary>('analytics_load_result', {
+            columns: sampled.columns,
+            rows: sampled.rows
+          });
+        } else {
+          loaded =
+            source.kind === 'localFile'
+              ? await invoke<AnalyticsSessionSummary>('analytics_open_file', {
+                  path: source.filePath
                 })
-              : await invoke<AnalyticsSessionSummary>('analytics_load_json_docs', {
-                  documents: source.documents
-                });
+              : source.kind === 'resultSet'
+                ? await invoke<AnalyticsSessionSummary>('analytics_load_result', {
+                    columns: source.columns,
+                    rows: source.rows
+                  })
+                : await invoke<AnalyticsSessionSummary>('analytics_load_json_docs', {
+                    documents: source.documents
+                  });
+        }
 
         if (stale || !mountedRef.current) {
           void invoke('analytics_close', { analyticsId: loaded.analyticsId }).catch(() => {});
@@ -304,11 +357,31 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
         sessionIdRef.current = loaded.analyticsId;
         setSummary(loaded);
         setLoadingSession(false);
+        if (tabRef.current === 'profile') {
+          setProfileLoading(true);
+          try {
+            const profiled = await invoke<ProfileResult>('analytics_profile', {
+              analyticsId: loaded.analyticsId
+            });
+            if (!stale && mountedRef.current && sessionIdRef.current === loaded.analyticsId) {
+              setProfile(profiled);
+            }
+          } catch (err) {
+            if (!stale && mountedRef.current && sessionIdRef.current === loaded.analyticsId) {
+              setProfileError(describeError(err));
+            }
+          } finally {
+            if (!stale && mountedRef.current && sessionIdRef.current === loaded.analyticsId) {
+              setProfileLoading(false);
+            }
+          }
+        }
         await runSql(loaded.analyticsId, DEFAULT_PREVIEW_SQL, 1000);
       } catch (err) {
         if (stale || !mountedRef.current) {
           return;
         }
+        setSampling(false);
         setSessionError(describeError(err));
         setLoadingSession(false);
       }
@@ -317,8 +390,22 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     void init();
     return () => {
       stale = true;
+      const sampleExecId = sampleExecutionIdRef.current;
+      sampleExecutionIdRef.current = null;
+      if (sampleExecId && tableSample) {
+        tableSample.cancelSample(sampleExecId);
+      }
     };
-  }, [source, runSql]);
+  }, [source, scope, sampleSize, tableSample, runSql]);
+
+  const handleCancelSample = () => {
+    const sampleExecId = sampleExecutionIdRef.current;
+    if (sampleExecId && tableSample) {
+      sampleExecutionIdRef.current = null;
+      tableSample.cancelSample(sampleExecId);
+    }
+    setScope('current');
+  };
 
   const loadProfile = useCallback(async () => {
     const id = sessionIdRef.current;
@@ -456,19 +543,26 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
     }
   };
 
-  const handleInsertColumn = (columnName: string) => {
-    const quoted = quoteDuckIdentifier(columnName);
+  const handleInsertSqlFragment = (fragment: string) => {
     const view = editorViewRef.current;
     if (!view) {
-      setSql((prev) => `${prev} ${quoted}`);
+      setSql((prev) => `${prev} ${fragment}`);
       return;
     }
     const { from, to } = view.state.selection.main;
     view.dispatch({
-      changes: { from, to, insert: quoted },
-      selection: { anchor: from + quoted.length }
+      changes: { from, to, insert: fragment },
+      selection: { anchor: from + fragment.length }
     });
     view.focus();
+  };
+
+  const handleInsertColumn = (columnName: string) => {
+    handleInsertSqlFragment(quoteDuckIdentifier(columnName));
+  };
+
+  const handleInsertQualifiedColumn = (tableName: string, columnName: string) => {
+    handleInsertSqlFragment(`${quoteDuckIdentifier(tableName)}.${quoteDuckIdentifier(columnName)}`);
   };
 
   const handleRunFromProfile = (filterSql: string) => {
@@ -563,8 +657,8 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
         onClick={(event) => event.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex shrink-0 items-center justify-between border-b border-line px-5 py-3">
-          <div className="flex min-w-0 items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Database size={16} className="shrink-0 text-accent" />
             <h3 id="local-analytics-title" className="truncate text-sm font-semibold text-fg">
               {t('analytics.title')} · {titleLabel}
@@ -575,8 +669,58 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                 {summary.fileKind ? ` · ${summary.fileKind.toUpperCase()}` : ''}
               </span>
             )}
+            {scope === 'sample' && summary && tableSample && (
+              <span className="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent">
+                {tableSample.hasActiveFilters
+                  ? t('profile.sampleBadgeFiltered', { count: summary.rowCount.toLocaleString() })
+                  : t('profile.sampleBadge', { count: summary.rowCount.toLocaleString() })}
+              </span>
+            )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {tableSample && (
+              <div className="flex items-center gap-1 rounded-control border border-line-strong bg-surface p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setScope('current')}
+                  className={clsx(
+                    'rounded px-2 py-0.5 transition-colors',
+                    scope === 'current'
+                      ? 'bg-accent-soft font-medium text-accent'
+                      : 'text-fg-muted hover:text-fg'
+                  )}
+                >
+                  {t('profile.scopeCurrentPage', { count: currentRowCount.toLocaleString() })}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScope('sample')}
+                  className={clsx(
+                    'flex items-center gap-1 rounded px-2 py-0.5 transition-colors',
+                    scope === 'sample'
+                      ? 'bg-accent-soft font-medium text-accent'
+                      : 'text-fg-muted hover:text-fg'
+                  )}
+                >
+                  <Database size={11} />
+                  <span>{t('profile.scopeTableSample')}</span>
+                </button>
+                {scope === 'sample' && (
+                  <select
+                    aria-label={t('profile.scopeTableSample')}
+                    value={sampleSize}
+                    onChange={(event) => setSampleSize(Number(event.target.value))}
+                    className="rounded border-none bg-transparent px-1 py-0.5 font-mono text-[11px] text-fg focus:outline-none"
+                  >
+                    {TABLE_SAMPLE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>
+                        {size.toLocaleString()}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
             {summary && (
               <div className="flex overflow-hidden rounded-control border border-line text-xs" role="tablist">
                 <button
@@ -622,7 +766,7 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
         </div>
 
         {/* Truncated banner */}
-        {summary?.truncated && (
+        {(summary?.truncated || sampledTruncated) && summary && (
           <div className="flex shrink-0 items-center gap-2 border-b border-warning-line bg-warning-soft px-5 py-2 text-xs text-warning">
             <AlertTriangle size={14} className="shrink-0" />
             <span>{t('profile.truncatedNotice', { count: summary.rowCount })}</span>
@@ -633,7 +777,20 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
         {loadingSession ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3">
             <Loader2 size={24} className="animate-spin text-accent" />
-            <p className="text-sm text-fg-muted">{t('analytics.loadingSession')}</p>
+            <p className="text-sm text-fg-muted">
+              {sampling
+                ? t('profile.samplingRows', { count: sampleSize.toLocaleString() })
+                : t('analytics.loadingSession')}
+            </p>
+            {sampling && (
+              <button
+                type="button"
+                onClick={handleCancelSample}
+                className="rounded-control border border-line-strong px-3 py-1 text-xs text-fg hover:bg-surface-hover"
+              >
+                {t('analytics.cancel')}
+              </button>
+            )}
           </div>
         ) : sessionError || !summary ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6">
@@ -739,30 +896,51 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                 </div>
               </div>
 
-              {/* Attached reconciliation tables */}
+              {/* Attached reconciliation tables (with clickable column chips) */}
               {attachedTables.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="space-y-1">
                   {attachedTables.map((table) => (
-                    <button
-                      key={table.tableName}
-                      type="button"
-                      onClick={() => handleInsertColumn(table.tableName)}
-                      title={table.columns.map((c) => `${c.name}: ${c.duckdbType}`).join(', ')}
-                      className="rounded border border-accent/30 bg-accent-soft px-2 py-0.5 font-mono text-[11px] text-accent hover:opacity-90"
-                    >
-                      {t('analytics.attachedMeta', {
-                        table: table.tableName,
-                        count: table.rowCount,
-                        label: table.label
-                      })}
-                    </button>
+                    <div key={table.tableName} className="flex flex-wrap items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleInsertColumn(table.tableName)}
+                        title={table.columns.map((c) => `${c.name}: ${c.duckdbType}`).join(', ')}
+                        className="rounded border border-accent/30 bg-accent-soft px-2 py-0.5 font-mono text-[11px] text-accent hover:opacity-90"
+                      >
+                        {t('analytics.attachedMeta', {
+                          table: table.tableName,
+                          count: table.rowCount,
+                          label: table.label
+                        })}
+                      </button>
+                      {table.columns.map((col) => (
+                        <button
+                          key={`${table.tableName}.${col.name}`}
+                          type="button"
+                          onClick={() => handleInsertQualifiedColumn(table.tableName, col.name)}
+                          title={`${table.tableName}.${col.name} (${col.duckdbType})`}
+                          className="rounded bg-surface-sunken px-1.5 py-0.5 font-mono text-[11px] text-fg-muted hover:bg-surface-hover hover:text-fg"
+                        >
+                          {col.name}
+                        </button>
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}
 
-              {/* Column chips */}
+              {/* Primary table column chips */}
               {summary.columns.length > 0 && (
-                <div className="flex max-h-14 flex-wrap gap-1 overflow-y-auto">
+                <div className="flex max-h-14 flex-wrap items-center gap-1 overflow-y-auto">
+                  {attachedTables.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleInsertColumn('result_set')}
+                      className="rounded border border-line bg-surface-sunken px-1.5 py-0.5 font-mono text-[11px] text-fg-subtle hover:text-fg"
+                    >
+                      result_set
+                    </button>
+                  )}
                   {summary.columns.map((col) => (
                     <button
                       key={col.name}
@@ -1063,8 +1241,17 @@ export function LocalAnalyticsDialog({ source, onClose }: LocalAnalyticsDialogPr
                       key={col.name}
                       column={col}
                       copiedKey={copiedKey}
+                      sourceDialect={sourceDialect}
                       onCopySql={handleCopySql}
                       onRunFilterSql={handleRunFromProfile}
+                      onApplyTableFilter={
+                        onApplyTableFilter
+                          ? (columnName, operator, value) => {
+                              onApplyTableFilter(columnName, operator, value);
+                              onClose();
+                            }
+                          : undefined
+                      }
                     />
                   ))}
                 </div>

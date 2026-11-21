@@ -212,17 +212,26 @@ export function numericOutlierFilter(profile: ColumnProfile): NumericOutlierSugg
     };
   }
   if (
-    profile.p95 !== undefined
+    columnCardinalityHint(profile) !== 'unique-key'
+    && profile.p95 !== undefined
     && Number.isFinite(profile.p95)
     && Number.isFinite(maxVal)
     && maxVal > profile.p95
   ) {
-    const thresholdNum = Number(profile.p95.toFixed(4));
-    return {
-      kind: 'high',
-      threshold: formatProfileNumber(profile.p95),
-      sql: `SELECT * FROM result_set WHERE ${col} > ${thresholdNum} ORDER BY ${col} DESC`
-    };
+    // 排除近似均匀递增序列（如 1..50，P50=25.5, P95=47.55, Max=50，右尾宽度仅 11%）；
+    // 仅当存在明显右偏长尾时提示高位离群下钻。
+    const spread =
+      profile.p50 !== undefined && Number.isFinite(profile.p50) && profile.p95 > profile.p50
+        ? profile.p95 - profile.p50
+        : 0;
+    if (spread === 0 || maxVal - profile.p95 > spread * 0.25) {
+      const thresholdNum = Number(profile.p95.toFixed(4));
+      return {
+        kind: 'high',
+        threshold: formatProfileNumber(profile.p95),
+        sql: `SELECT * FROM result_set WHERE ${col} > ${thresholdNum} ORDER BY ${col} DESC`
+      };
+    }
   }
   return null;
 }

@@ -206,6 +206,22 @@ describe('analyticsProfile', () => {
       p95: 5
     });
     expect(numericOutlierFilter(flat)).toBeNull();
+
+    // 100% 唯一自增主键 id（1..50）不误报高位异常
+    const autoId = makeColumn({
+      name: 'id',
+      inferredType: 'integer',
+      totalCount: 50,
+      nullCount: 0,
+      distinctCount: 50,
+      distinctRatio: 1,
+      min: '1',
+      max: '50',
+      p25: 13,
+      p50: 25.5,
+      p95: 47.55
+    });
+    expect(numericOutlierFilter(autoId)).toBeNull();
   });
 
   it('builds dialect-aware source WHERE clauses and sparkline coordinates', () => {
