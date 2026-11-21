@@ -50,7 +50,11 @@ import {
   nextAttachTableName,
   quoteDuckIdentifier
 } from '../utils/analyticsQuery';
-import { filterAndSortProfiles, type ProfileSortMode } from '../utils/analyticsProfile';
+import {
+  filterAndSortProfiles,
+  type ProfileSortMode,
+  type ProfileTableFilterOperator
+} from '../utils/analyticsProfile';
 import { describeError } from '../utils/describeError';
 import { editorPhrases } from '../utils/editorPhrases';
 import { appEditorTheme } from '../utils/editorTheme';
@@ -63,7 +67,11 @@ import {
   DEFAULT_TABLE_SAMPLE_SIZE,
   TABLE_SAMPLE_SIZE_OPTIONS
 } from '../utils/tableSampleQuery';
-import { ColumnProfileCard, type TableSampleConfig } from './DataProfileDialog';
+import {
+  ColumnProfileCard,
+  ProfileHealthSummaryBar,
+  type TableSampleConfig
+} from './DataProfileDialog';
 import { ExportResultDialog } from './ExportResultDialog';
 import { PLAIN_TEXT_INPUT } from './FormControls';
 import { ResultChartDialog } from './ResultChartDialog';
@@ -91,7 +99,7 @@ interface LocalAnalyticsDialogProps {
   source: LocalAnalyticsSource;
   tableSample?: TableSampleConfig;
   sourceDialect?: SqlIdentifierDialect;
-  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
+  onApplyTableFilter?: (columnName: string, operator: ProfileTableFilterOperator, value: string) => void;
   onClose: () => void;
 }
 
@@ -1192,35 +1200,44 @@ export function LocalAnalyticsDialog({
           /* Profile tab */
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {profile && !profileLoading && (
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
-                <div className="relative max-w-xs flex-1 min-w-[200px]">
-                  <Search
-                    size={13}
-                    className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
-                  />
-                  <input
-                    {...PLAIN_TEXT_INPUT}
-                    type="text"
-                    value={profileSearch}
-                    onChange={(event) => setProfileSearch(event.target.value)}
-                    placeholder={t('profile.searchPlaceholder')}
-                    className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
-                  />
+              <>
+                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
+                  <div className="relative max-w-xs flex-1 min-w-[200px]">
+                    <Search
+                      size={13}
+                      className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
+                    />
+                    <input
+                      {...PLAIN_TEXT_INPUT}
+                      type="text"
+                      value={profileSearch}
+                      onChange={(event) => setProfileSearch(event.target.value)}
+                      placeholder={t('profile.searchPlaceholder')}
+                      className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
+                    />
+                  </div>
+                  <select
+                    value={profileSort}
+                    onChange={(event) => setProfileSort(event.target.value as ProfileSortMode)}
+                    className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
+                  >
+                    {(['order', 'nulls', 'distinct', 'drift'] as const)
+                      .filter((m) => m !== 'drift' || hasPresenceInfo)
+                      .map((mode) => (
+                        <option key={mode} value={mode}>
+                          {t(`profile.sort.${mode}` as const)}
+                        </option>
+                      ))}
+                  </select>
                 </div>
-                <select
-                  value={profileSort}
-                  onChange={(event) => setProfileSort(event.target.value as ProfileSortMode)}
-                  className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
-                >
-                  {(['order', 'nulls', 'distinct', 'drift'] as const)
-                    .filter((m) => m !== 'drift' || hasPresenceInfo)
-                    .map((mode) => (
-                      <option key={mode} value={mode}>
-                        {t(`profile.sort.${mode}` as const)}
-                      </option>
-                    ))}
-                </select>
-              </div>
+                <ProfileHealthSummaryBar
+                  columns={profile.columns}
+                  activeSearch={profileSearch}
+                  onSelectColumn={(columnName) =>
+                    setProfileSearch((current) => (current === columnName ? '' : columnName))
+                  }
+                />
+              </>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4">
               {profileLoading ? (

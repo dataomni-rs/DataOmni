@@ -195,9 +195,13 @@ export function shouldCollapseTopValues(profile: ColumnProfile): boolean {
   return false;
 }
 
+export type ProfileTableFilterOperator = 'eq' | 'is-null' | 'lt' | 'gt';
+
 export interface NumericOutlierSuggestion {
   readonly kind: 'negative' | 'high';
   readonly threshold: string;
+  readonly operator: 'lt' | 'gt';
+  readonly filterValue: string;
   readonly sql: string;
 }
 
@@ -220,6 +224,8 @@ export function numericOutlierFilter(profile: ColumnProfile): NumericOutlierSugg
     return {
       kind: 'negative',
       threshold: '0',
+      operator: 'lt',
+      filterValue: '0',
       sql: `SELECT * FROM result_set WHERE ${col} < 0`
     };
   }
@@ -241,11 +247,112 @@ export function numericOutlierFilter(profile: ColumnProfile): NumericOutlierSugg
       return {
         kind: 'high',
         threshold: formatProfileNumber(profile.p95),
+        operator: 'gt',
+        filterValue: String(thresholdNum),
         sql: `SELECT * FROM result_set WHERE ${col} > ${thresholdNum} ORDER BY ${col} DESC`
       };
     }
   }
   return null;
+}
+
+export function buildProfileEmptyStringFilterSql(columnName: string): string {
+  const col = quoteDuckIdent(columnName);
+  return `SELECT * FROM result_set WHERE ${col} = ''`;
+}
+
+export function buildProfilePaddedWhitespaceFilterSql(columnName: string): string {
+  const col = quoteDuckIdent(columnName);
+  return `SELECT * FROM result_set WHERE ${col} IS NOT NULL AND ${col} <> '' AND TRIM(${col}) <> ${col}`;
+}
+
+export type ProfileHealthFindingKind =
+  | 'negative'
+  | 'high-outlier'
+  | 'empty-strings'
+  | 'padded-whitespace'
+  | 'high-nulls'
+  | 'schema-drift';
+
+export interface ProfileHealthFinding {
+  readonly id: string;
+  readonly kind: ProfileHealthFindingKind;
+  readonly severity: 'high' | 'warn';
+  readonly column: string;
+  readonly count?: number;
+  readonly ratio?: number;
+  readonly threshold?: string;
+}
+
+/**
+ * 从整份列级画像中提炼高信噪比异常摘要（宽表速览用），按严重度排序：
+ * - 意外负值 / 高空值率（>= 50%）标为 high；
+ * - 长尾高位 / 中等空值（>= 1%）/ 空串 / 首尾空格 / Schema 漂移标为 warn。
+ */
+export function summarizeProfileFindings(columns: readonly ColumnProfile[]): ProfileHealthFinding[] {
+  const findings: ProfileHealthFinding[] = [];
+  for (const col of columns) {
+    const outlier = numericOutlierFilter(col);
+    if (outlier?.kind === 'negative') {
+      findings.push({
+        id: `${col.name}:negative`,
+        kind: 'negative',
+        severity: 'high',
+        column: col.name
+      });
+    } else if (outlier?.kind === 'high') {
+      findings.push({
+        id: `${col.name}:high-outlier`,
+        kind: 'high-outlier',
+        severity: 'warn',
+        column: col.name,
+        threshold: outlier.threshold
+      });
+    }
+    if (col.nullCount > 0 && col.nullRatio >= 0.01) {
+      findings.push({
+        id: `${col.name}:high-nulls`,
+        kind: 'high-nulls',
+        severity: col.nullRatio >= 0.5 ? 'high' : 'warn',
+        column: col.name,
+        count: col.nullCount,
+        ratio: col.nullRatio
+      });
+    }
+    if (col.emptyStringCount !== undefined && col.emptyStringCount > 0) {
+      findings.push({
+        id: `${col.name}:empty-strings`,
+        kind: 'empty-strings',
+        severity: 'warn',
+        column: col.name,
+        count: col.emptyStringCount
+      });
+    }
+    if (col.paddedWhitespaceCount !== undefined && col.paddedWhitespaceCount > 0) {
+      findings.push({
+        id: `${col.name}:padded-whitespace`,
+        kind: 'padded-whitespace',
+        severity: 'warn',
+        column: col.name,
+        count: col.paddedWhitespaceCount
+      });
+    }
+    if (hasSchemaDrift(col)) {
+      findings.push({
+        id: `${col.name}:schema-drift`,
+        kind: 'schema-drift',
+        severity: 'warn',
+        column: col.name,
+        ratio: col.presentRatio
+      });
+    }
+  }
+  findings.sort((a, b) => {
+    const rankA = a.severity === 'high' ? 0 : 1;
+    const rankB = b.severity === 'high' ? 0 : 1;
+    return rankA - rankB;
+  });
+  return findings;
 }
 
 /** 生成可粘贴回原数据库查询框的方言 `WHERE` 条件片段 */

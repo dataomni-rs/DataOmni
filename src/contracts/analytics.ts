@@ -107,6 +107,8 @@ export interface ColumnProfile {
   readonly timeBins?: readonly TimeHistogramBin[];
   readonly minLength?: number;
   readonly maxLength?: number;
+  readonly emptyStringCount?: number;
+  readonly paddedWhitespaceCount?: number;
   readonly topValues: readonly TopValueEntry[];
 }
 

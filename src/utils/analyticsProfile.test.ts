@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ColumnProfile } from '../contracts/analytics';
 import {
+  buildProfileEmptyStringFilterSql,
   buildProfileFilterSql,
   buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  buildProfilePaddedWhitespaceFilterSql,
   buildSourceWhereClause,
   columnCardinalityHint,
   extractEsJsonDocs,
@@ -16,6 +18,7 @@ import {
   nullSeverity,
   numericOutlierFilter,
   shouldCollapseTopValues,
+  summarizeProfileFindings,
   timeSparklinePoints
 } from './analyticsProfile';
 
@@ -196,6 +199,8 @@ describe('analyticsProfile', () => {
     expect(numericOutlierFilter(negativeAmount)).toEqual({
       kind: 'negative',
       threshold: '0',
+      operator: 'lt',
+      filterValue: '0',
       sql: 'SELECT * FROM result_set WHERE "amount" < 0'
     });
 
@@ -211,6 +216,8 @@ describe('analyticsProfile', () => {
     expect(numericOutlierFilter(highTail)).toEqual({
       kind: 'high',
       threshold: '180',
+      operator: 'gt',
+      filterValue: '180',
       sql: 'SELECT * FROM result_set WHERE "latency_ms" > 180 ORDER BY "latency_ms" DESC'
     });
 
@@ -256,5 +263,37 @@ describe('analyticsProfile', () => {
     expect(pts[0].y).toBe(28);
     expect(pts[1].y).toBe(4);
     expect(pts[2].y).toBe(16);
+  });
+
+  it('summarizes profile health findings sorted by severity and builds whitespace filter SQL', () => {
+    const findings = summarizeProfileFindings([
+      makeColumn({
+        name: 'status',
+        inferredType: 'text',
+        totalCount: 100,
+        nullCount: 5,
+        nullRatio: 0.05,
+        emptyStringCount: 3,
+        paddedWhitespaceCount: 2
+      }),
+      makeColumn({
+        name: 'amount',
+        inferredType: 'numeric',
+        totalCount: 100,
+        min: '-10',
+        max: '500',
+        p25: 20,
+        p95: 300
+      })
+    ]);
+    expect(findings[0]).toMatchObject({ column: 'amount', kind: 'negative', severity: 'high' });
+    expect(findings.map((f) => f.kind)).toEqual([
+      'negative',
+      'high-nulls',
+      'empty-strings',
+      'padded-whitespace'
+    ]);
+    expect(buildProfileEmptyStringFilterSql('status')).toBe('SELECT * FROM result_set WHERE "status" = \'\'');
+    expect(buildProfilePaddedWhitespaceFilterSql('status')).toContain('TRIM("status") <> "status"');
   });
 });

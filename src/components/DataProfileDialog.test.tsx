@@ -349,6 +349,8 @@ describe('DataProfileDialog', () => {
 
     expect(fetchSample).toHaveBeenCalledWith(5000, expect.any(String));
     expect(container.textContent).toContain('样本口径 · 继承当前筛选');
+    expect(container.textContent).toContain('体检发现');
+    expect(container.textContent).toContain('amount 含负值');
     expect(container.textContent).toContain('已折叠高基数示例值');
     expect(container.textContent).toContain('时间分布趋势');
     expect(container.textContent).toContain('负值 (< 0)');
