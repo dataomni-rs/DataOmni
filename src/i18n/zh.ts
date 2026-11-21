@@ -595,6 +595,10 @@ export const zh = {
   'profile.aiInsights.inspectPrompt': '查看发给模型的完整脱敏提示词',
 
   'chart.title': '快速图表',
+  'chart.correlationTitle': '相关性矩阵（Pearson）',
+  'chart.correlationNegative': '-1 负相关',
+  'chart.correlationNeutral': '0 无明显线性相关',
+  'chart.correlationPositive': '+1 正相关',
   'chart.type.bar': '柱状图',
   'chart.type.stackedBar': '堆叠柱图',
   'chart.type.line': '折线图',

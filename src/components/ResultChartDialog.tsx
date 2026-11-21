@@ -15,8 +15,10 @@ import {
   buildStackedSegments,
   chartDataToMarkdown,
   chartScale,
+  correlationHeatmapStyle,
   detectNumericColumnIndexes,
   hasSeriesScaleMismatch,
+  heatmapDataToMarkdown,
   heatmapIntensity,
   isChartRejection,
   labelStride,
@@ -68,16 +70,17 @@ interface AggregatedDataset {
 interface ResultChartDialogProps {
   columns: readonly string[];
   rows: ReadonlyArray<readonly SerializedResultValue[]>;
-  initialChartType?: ChartType;
+  preset?: 'correlation';
   onClose: () => void;
 }
 
 export function ResultChartDialog({
   columns,
   rows,
-  initialChartType,
+  preset,
   onClose
 }: ResultChartDialogProps) {
+  const isCorrelation = preset === 'correlation';
   const t = useLanguageStore((state) => state.t);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const mountedRef = useRef(true);
@@ -94,7 +97,7 @@ export function ResultChartDialog({
     };
   }, []);
 
-  const [type, setType] = useState<ChartType>(initialChartType ?? 'bar');
+  const [type, setType] = useState<ChartType>(isCorrelation ? 'heatmap' : 'bar');
   /** null 表示还没动过，用推荐的那一组 */
   const [chosenValues, setChosenValues] = useState<readonly number[] | null>(null);
   const [scatterX, setScatterX] = useState<number | null>(null);
@@ -317,8 +320,9 @@ export function ResultChartDialog({
   const allNumericIndexes = detectNumericColumnIndexes(activeColumns, activeRows as SerializedResultValue[][]);
   const canScatter = allNumericIndexes.length >= 2;
   const canHeatmap = activeColumns.length >= 2;
-  const effectiveType: ChartType =
-    type === 'scatter' && !canScatter
+  const effectiveType: ChartType = isCorrelation
+    ? 'heatmap'
+    : type === 'scatter' && !canScatter
       ? 'bar'
       : type === 'heatmap' && !canHeatmap
         ? 'bar'
@@ -347,15 +351,21 @@ export function ResultChartDialog({
         )
       : null;
 
-  const resolvedHeatX = heatX !== null && heatX < activeColumns.length ? heatX : 0;
-  const resolvedHeatY =
-    heatY !== null && heatY < activeColumns.length
+  const resolvedHeatX = isCorrelation
+    ? 0
+    : heatX !== null && heatX < activeColumns.length
+      ? heatX
+      : 0;
+  const resolvedHeatY = isCorrelation
+    ? (activeColumns.length > 1 ? 1 : 0)
+    : heatY !== null && heatY < activeColumns.length
       ? heatY
       : activeColumns.length > 1
         ? 1
         : 0;
-  const resolvedHeatVal: number | null =
-    heatValue === 'count'
+  const resolvedHeatVal: number | null = isCorrelation
+    ? (numericIndexes[0] ?? allNumericIndexes[0] ?? null)
+    : heatValue === 'count'
       ? null
       : heatValue !== null && allNumericIndexes.includes(heatValue)
         ? heatValue
@@ -438,9 +448,17 @@ export function ResultChartDialog({
   };
 
   const handleCopyMarkdown = () => {
-    const categoryHeader =
-      spec.categoryIndex === null ? '#' : (activeColumns[spec.categoryIndex] ?? 'Category');
-    const md = chartDataToMarkdown(data, categoryHeader);
+    const md =
+      effectiveType === 'heatmap' && heatmapData
+        ? heatmapDataToMarkdown(
+            heatmapData,
+            isCorrelation ? (val) => val.toFixed(2) : undefined,
+            isCorrelation ? 'r' : undefined
+          )
+        : chartDataToMarkdown(
+            data,
+            spec.categoryIndex === null ? '#' : (activeColumns[spec.categoryIndex] ?? 'Category')
+          );
     navigator.clipboard
       .writeText(md)
       .then(() => {
@@ -477,7 +495,7 @@ export function ResultChartDialog({
   return (
     <ChartShell
       onClose={onClose}
-      title={t('chart.title')}
+      title={isCorrelation ? t('chart.correlationTitle') : t('chart.title')}
       headerActions={
         <div className="flex items-center gap-1.5">
           <button
@@ -536,12 +554,37 @@ export function ResultChartDialog({
       )}
 
       {/* Controls */}
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-line px-5 py-2.5">
-        <SegmentedControl
-          value={effectiveType}
-          onChange={setType}
-          options={typeOptions}
-        />
+      {isCorrelation ? (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-b border-line px-5 py-2.5 text-xs text-fg-muted">
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-sm"
+              style={{ backgroundColor: 'var(--dm-danger)', opacity: 0.85 }}
+            />
+            <span>{t('chart.correlationNegative')}</span>
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-sm"
+              style={{ backgroundColor: 'var(--dm-fg-muted)', opacity: 0.25 }}
+            />
+            <span>{t('chart.correlationNeutral')}</span>
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-sm"
+              style={{ backgroundColor: 'var(--dm-accent)', opacity: 0.85 }}
+            />
+            <span>{t('chart.correlationPositive')}</span>
+          </span>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-line px-5 py-2.5">
+          <SegmentedControl
+            value={effectiveType}
+            onChange={setType}
+            options={typeOptions}
+          />
 
         {isCartesianSeries && (
           <>
@@ -649,7 +692,8 @@ export function ResultChartDialog({
             </label>
           </div>
         )}
-      </div>
+        </div>
+      )}
 
       {exportError && <p className="px-5 pt-2 text-xs text-danger">{exportError}</p>}
       {exportNotice && <p className="px-5 pt-2 text-xs text-success">{exportNotice}</p>}
@@ -910,22 +954,44 @@ export function ResultChartDialog({
           {effectiveType === 'heatmap' && heatmapData && (() => {
             const cols = Math.max(1, heatmapData.xLabels.length);
             const rowsCount = Math.max(1, heatmapData.yLabels.length);
-            const cellW = innerWidth / cols;
+            const longestYLabel = heatmapData.yLabels.reduce(
+              (acc, label) => Math.max(acc, Math.min(label.length, 18)),
+              0
+            );
+            const heatLeft = Math.min(148, Math.max(PLOT.left, longestYLabel * 7 + 16));
+            const heatInnerWidth = PLOT.width - heatLeft - PLOT.right;
+            const cellW = heatInnerWidth / cols;
             const cellH = innerHeight / rowsCount;
-            const xStride = labelStride(cols, Math.max(2, Math.floor(innerWidth / 56)));
+            const xStride = labelStride(cols, Math.max(2, Math.floor(heatInnerWidth / 56)));
             const yStride = labelStride(rowsCount, Math.max(2, Math.floor(innerHeight / 18)));
+            const maxXChars = Math.max(8, Math.min(20, Math.floor((cellW - 8) / 6.5)));
             return (
               <>
                 {heatmapData.cells.map((cell) => {
-                  const x = PLOT.left + cell.xIdx * cellW + 1;
+                  const x = heatLeft + cell.xIdx * cellW + 1;
                   const y = PLOT.top + cell.yIdx * cellH + 1;
                   const w = Math.max(2, cellW - 2);
                   const h = Math.max(2, cellH - 2);
-                  const intensity = heatmapIntensity(cell.value, heatmapData.min, heatmapData.max);
-                  const showCellLabel = w >= 42 && h >= 20;
-                  const labelText = Number.isInteger(cell.value)
-                    ? String(cell.value)
-                    : Number(cell.value.toFixed(2)).toString();
+                  const style = isCorrelation
+                    ? correlationHeatmapStyle(cell.value)
+                    : (() => {
+                        const opacity = heatmapIntensity(
+                          cell.value,
+                          heatmapData.min,
+                          heatmapData.max
+                        );
+                        return {
+                          fill: 'var(--dm-accent)',
+                          opacity,
+                          highContrast: opacity >= 0.6
+                        };
+                      })();
+                  const showCellLabel = w >= 40 && h >= 20;
+                  const labelText = isCorrelation
+                    ? cell.value.toFixed(2)
+                    : Number.isInteger(cell.value)
+                      ? String(cell.value)
+                      : Number(cell.value.toFixed(2)).toString();
                   return (
                     <g key={`${cell.xIdx}-${cell.yIdx}`}>
                       <rect
@@ -934,8 +1000,8 @@ export function ResultChartDialog({
                         width={w}
                         height={h}
                         rx={2}
-                        fill="var(--dm-accent)"
-                        opacity={intensity}
+                        fill={style.fill}
+                        opacity={style.opacity}
                       >
                         <title>{`${heatmapData.xLabels[cell.xIdx]} × ${heatmapData.yLabels[cell.yIdx]} · ${heatmapData.valueName}: ${cell.value}`}</title>
                       </rect>
@@ -947,7 +1013,7 @@ export function ResultChartDialog({
                           dominantBaseline="middle"
                           pointerEvents="none"
                           className={
-                            intensity >= 0.6
+                            style.highContrast
                               ? 'fill-[var(--dm-fg-on-accent)] font-mono text-[11px] font-medium'
                               : 'fill-[var(--dm-fg)] font-mono text-[11px]'
                           }
@@ -962,12 +1028,12 @@ export function ResultChartDialog({
                   idx % xStride === 0 || idx === cols - 1 ? (
                     <text
                       key={`hx-${idx}`}
-                      x={PLOT.left + (idx + 0.5) * cellW}
+                      x={heatLeft + (idx + 0.5) * cellW}
                       y={PLOT.height - PLOT.bottom + 16}
                       textAnchor="middle"
                       className="fill-[var(--dm-fg-muted)] text-[10px]"
                     >
-                      {truncate(label, 9)}
+                      {truncate(label, maxXChars)}
                     </text>
                   ) : null
                 )}
@@ -975,13 +1041,13 @@ export function ResultChartDialog({
                   idx % yStride === 0 || idx === rowsCount - 1 ? (
                     <text
                       key={`hy-${idx}`}
-                      x={PLOT.left - 8}
+                      x={heatLeft - 8}
                       y={PLOT.top + (idx + 0.5) * cellH}
                       textAnchor="end"
                       dominantBaseline="middle"
                       className="fill-[var(--dm-fg-subtle)] text-[10px]"
                     >
-                      {truncate(label, 10)}
+                      {truncate(label, 18)}
                     </text>
                   ) : null
                 )}

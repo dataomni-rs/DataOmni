@@ -1443,7 +1443,7 @@ export function LocalAnalyticsDialog({
         <ResultChartDialog
           columns={corrResult.columns}
           rows={corrResult.rows}
-          initialChartType="heatmap"
+          preset="correlation"
           onClose={() => setCorrResult(null)}
         />
       )}

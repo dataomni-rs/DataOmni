@@ -578,6 +578,10 @@ export const en: Translations = {
   'profile.aiInsights.inspectPrompt': 'Inspect exact redacted prompt sent to model',
 
   'chart.title': 'Quick chart',
+  'chart.correlationTitle': 'Correlation Matrix (Pearson)',
+  'chart.correlationNegative': '-1 Negative',
+  'chart.correlationNeutral': '0 No linear correlation',
+  'chart.correlationPositive': '+1 Positive',
   'chart.type.bar': 'Bars',
   'chart.type.stackedBar': 'Stacked',
   'chart.type.line': 'Line',
