@@ -714,7 +714,7 @@ export function LocalAnalyticsDialog({
                   >
                     {TABLE_SAMPLE_SIZE_OPTIONS.map((size) => (
                       <option key={size} value={size}>
-                        {size.toLocaleString()}
+                        {t('profile.scopeSampleOption', { count: size.toLocaleString() })}
                       </option>
                     ))}
                   </select>

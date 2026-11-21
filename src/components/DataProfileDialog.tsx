@@ -359,7 +359,7 @@ export function DataProfileDialog({
                     aria-label={t('profile.scopeTableSample')}
                     value={sampleSize}
                     onChange={(event) => setSampleSize(Number(event.target.value))}
-                    className="rounded border-l border-line bg-transparent px-1.5 py-0.5 text-xs text-fg focus:outline-none"
+                    className="rounded border-none bg-transparent px-1 py-0.5 font-mono text-[11px] text-fg focus:outline-none"
                   >
                     {TABLE_SAMPLE_SIZE_OPTIONS.map((size) => (
                       <option key={size} value={size}>

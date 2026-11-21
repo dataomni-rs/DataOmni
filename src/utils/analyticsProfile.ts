@@ -176,11 +176,23 @@ export function shouldCollapseTopValues(profile: ColumnProfile): boolean {
   if (columnCardinalityHint(profile) === 'unique-key') {
     return true;
   }
-  return (
+  if (
     profile.totalCount >= 5
     && profile.distinctRatio >= 0.98
     && profile.topValues.every((entry) => entry.count <= 1)
-  );
+  ) {
+    return true;
+  }
+  // 已有时间分布迷你图的高基数时间列（如 20,000 行里偶发同秒碰撞），精确到秒的 Top-5 列表噪音大于信息
+  if (
+    profile.timeBins
+    && profile.timeBins.length >= 2
+    && profile.distinctRatio >= 0.9
+    && profile.topValues.every((entry) => entry.ratio < 0.01)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export interface NumericOutlierSuggestion {

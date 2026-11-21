@@ -163,6 +163,24 @@ describe('analyticsProfile', () => {
     });
     expect(shouldCollapseTopValues(uniqueId)).toBe(true);
     expect(shouldCollapseTopValues(statusEnum)).toBe(false);
+
+    // 高基数时间列（20,000 行中偶发 2 条同秒碰撞，但已有 timeBins 迷你图）默认折叠 Top-5
+    const timestampCol = makeColumn({
+      name: 'created_at',
+      inferredType: 'datetime',
+      totalCount: 20000,
+      nullCount: 0,
+      distinctCount: 19972,
+      distinctRatio: 0.9986,
+      timeBins: [
+        { label: '2026-01', count: 1500 },
+        { label: '2026-06', count: 4200 }
+      ],
+      topValues: [
+        { value: '2026-06-05 08:39:10', count: 2, ratio: 0.0001 }
+      ]
+    });
+    expect(shouldCollapseTopValues(timestampCol)).toBe(true);
   });
 
   it('suggests numeric outlier filters for negative anomalies and >P95 tails', () => {

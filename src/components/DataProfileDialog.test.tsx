@@ -349,14 +349,14 @@ describe('DataProfileDialog', () => {
 
     expect(fetchSample).toHaveBeenCalledWith(5000, expect.any(String));
     expect(container.textContent).toContain('样本口径 · 继承当前筛选');
-    expect(container.textContent).toContain('已折叠全唯一值示例');
+    expect(container.textContent).toContain('已折叠高基数示例值');
     expect(container.textContent).toContain('时间分布趋势');
     expect(container.textContent).toContain('负值 (< 0)');
     expect(container.querySelector('svg[aria-label="created_at 时间分布趋势"]')).toBeTruthy();
 
     // Expand collapsed unique values
     const expandBtn = Array.from(container.querySelectorAll('button')).find(
-      (btn) => btn.textContent?.includes('已折叠全唯一值示例')
+      (btn) => btn.textContent?.includes('已折叠高基数示例值')
     );
     await act(async () => {
       expandBtn?.click();
