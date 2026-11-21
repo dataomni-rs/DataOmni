@@ -224,4 +224,48 @@ describe('ResultChartDialog', () => {
     expect(container.textContent).toContain('COUNT(*) BY global_skill_id');
     expect(container.querySelector('svg')).toBeTruthy();
   });
+
+  it('locks correlation preset to Pearson heatmap without chart-type or COUNT(*) controls and copies 2D Markdown', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText }
+    });
+
+    await act(async () => {
+      root.render(
+        <ResultChartDialog
+          preset="correlation"
+          columns={['col_x', 'col_y', 'corr']}
+          rows={[
+            ['amount', 'amount', 1],
+            ['amount', 'discount_amount', -0.62],
+            ['discount_amount', 'amount', -0.62],
+            ['discount_amount', 'discount_amount', 1]
+          ]}
+          onClose={vi.fn()}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain('相关性矩阵（Pearson）');
+    expect(container.textContent).not.toContain('行数 COUNT(*)');
+    expect(container.querySelectorAll('select')).toHaveLength(0);
+    expect(container.textContent).toContain('1.00');
+    expect(container.textContent).toContain('-0.62');
+    expect(container.textContent).toContain('discount_amount');
+
+    const copyBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('复制 Markdown')
+    );
+    expect(copyBtn).toBeTruthy();
+    await act(async () => {
+      copyBtn?.click();
+    });
+    await flush();
+
+    expect(writeText).toHaveBeenCalledWith(
+      '| r | amount | discount_amount |\n| --- | --- | --- |\n| amount | 1.00 | -0.62 |\n| discount_amount | -0.62 | 1.00 |'
+    );
+  });
 });

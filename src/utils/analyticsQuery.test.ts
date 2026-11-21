@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AnalyticsColumnMeta } from '../contracts/analytics';
 import {
+  buildCorrelationMatrixSql,
   buildDuplicateCheckTemplate,
   buildExceptDiffTemplate,
   buildGroupByTemplate,
@@ -8,7 +9,9 @@ import {
   buildPivotTemplate,
   defaultParquetFileName,
   localFileBasename,
-  nextAttachTableName
+  MAX_CORRELATION_COLUMNS,
+  nextAttachTableName,
+  selectCorrelationColumns
 } from './analyticsQuery';
 
 const SAMPLE_COLUMNS: AnalyticsColumnMeta[] = [
@@ -59,5 +62,33 @@ describe('analyticsQuery', () => {
 
     const exceptSql = buildExceptDiffTemplate(SAMPLE_COLUMNS, 'ref_1', refCols);
     expect(exceptSql).toContain('SELECT "quarter"\nFROM result_set\nEXCEPT\nSELECT "QUARTER"\nFROM "ref_1"');
+  });
+
+  it('builds single-scan correlation matrix SQL for numeric columns capped at 12', () => {
+    expect(
+      buildCorrelationMatrixSql([
+        { name: 'status', inferredType: 'text', distinctCount: 4 },
+        { name: 'amount', inferredType: 'numeric', distinctCount: 50 },
+        { name: 'const_num', inferredType: 'integer', distinctCount: 1 }
+      ])
+    ).toBeNull();
+
+    const sql = buildCorrelationMatrixSql([
+      { name: 'amount', inferredType: 'numeric', distinctCount: 100 },
+      { name: 'discount', inferredType: 'numeric', distinctCount: 10 },
+      { name: 'qty', inferredType: 'integer', distinctCount: 5 }
+    ]);
+    expect(sql).toBeTruthy();
+    expect(sql).toContain('WITH _corr_agg AS');
+    expect(sql).toContain('corr(CAST("amount" AS DOUBLE), CAST("discount" AS DOUBLE))');
+    expect(sql).toContain("'amount' AS col_x, 'amount' AS col_y, 1.0 AS corr");
+    expect(sql).toContain("'discount' AS col_x, 'amount' AS col_y, r_0_1 AS corr");
+
+    const many = Array.from({ length: 18 }, (_, i) => ({
+      name: `m_${i}`,
+      inferredType: 'numeric' as const,
+      distinctCount: 20
+    }));
+    expect(selectCorrelationColumns(many)).toHaveLength(MAX_CORRELATION_COLUMNS);
   });
 });

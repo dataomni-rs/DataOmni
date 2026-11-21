@@ -10,26 +10,35 @@ import {
   Copy,
   Database,
   Filter,
+  Grid,
   Loader2,
   RotateCcw,
   Search,
+  Sparkles,
   X
 } from 'lucide-react';
+import type { ConnectionEnvironment } from '../contracts';
 import type {
   AnalyticsColumnInput,
+  AnalyticsQueryResult,
   AnalyticsSessionSummary,
   ColumnProfile,
   ProfileResult
 } from '../contracts/analytics';
 import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
+import { useSettingsStore } from '../stores/settingsStore';
+import { aiAvailable } from '../utils/aiSettings';
 import {
+  buildProfileEmptyStringFilterSql,
   buildProfileFilterSql,
   buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  buildProfilePaddedWhitespaceFilterSql,
   buildSourceWhereClause,
   columnCardinalityHint,
   filterAndSortProfiles,
+  formatProfileMarkdownReport,
   formatProfileNumber,
   formatProfileRatio,
   hasSchemaDrift,
@@ -37,17 +46,23 @@ import {
   nullSeverity,
   numericOutlierFilter,
   shouldCollapseTopValues,
+  summarizeProfileFindings,
   timeSparklinePoints,
-  type ProfileSortMode
+  type ProfileHealthFinding,
+  type ProfileSortMode,
+  type ProfileTableFilterOperator
 } from '../utils/analyticsProfile';
 import { describeError } from '../utils/describeError';
 import { isImeKeyEvent } from '../utils/shortcuts';
 import type { SqlIdentifierDialect } from '../utils/sqlIdentifiers';
+import { buildCorrelationMatrixSql } from '../utils/analyticsQuery';
 import {
   DEFAULT_TABLE_SAMPLE_SIZE,
   TABLE_SAMPLE_SIZE_OPTIONS
 } from '../utils/tableSampleQuery';
+import { AiProfileInsightsPanel } from './AiProfileInsightsPanel';
 import { PLAIN_TEXT_INPUT } from './FormControls';
+import { ResultChartDialog } from './ResultChartDialog';
 
 export interface TableSampleResult {
   readonly columns: readonly AnalyticsColumnInput[];
@@ -74,9 +89,11 @@ export type DataProfileSource =
 
 interface DataProfileDialogProps {
   source: DataProfileSource;
+  title?: string;
+  environment?: ConnectionEnvironment;
   tableSample?: TableSampleConfig;
   sourceDialect?: SqlIdentifierDialect;
-  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
+  onApplyTableFilter?: (columnName: string, operator: ProfileTableFilterOperator, value: string) => void;
   onClose: () => void;
 }
 
@@ -84,12 +101,18 @@ const SORT_OPTIONS: readonly ProfileSortMode[] = ['order', 'nulls', 'distinct', 
 
 export function DataProfileDialog({
   source,
+  title,
+  environment = 'development',
   tableSample,
   sourceDialect,
   onApplyTableFilter,
   onClose
 }: DataProfileDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const language = useLanguageStore((state) => state.resolved);
+  const aiEnabled = useSettingsStore((state) => state.ai.enabled);
+  const [aiCompiled, setAiCompiled] = useState(false);
+  const [showAiInsights, setShowAiInsights] = useState(false);
   const [scope, setScope] = useState<'current' | 'sample'>('current');
   const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
   const [sampling, setSampling] = useState(false);
@@ -103,6 +126,8 @@ export function DataProfileDialog({
   const [sortMode, setSortMode] = useState<ProfileSortMode>('order');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [corrLoading, setCorrLoading] = useState(false);
+  const [corrResult, setCorrResult] = useState<AnalyticsQueryResult | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
   const sampleExecutionIdRef = useRef<string | null>(null);
@@ -110,6 +135,18 @@ export function DataProfileDialog({
 
   const currentRowCount = source.kind === 'resultSet' ? source.rows.length : source.documents.length;
   const inputRowCount = scope === 'sample' ? sampleSize : currentRowCount;
+
+  useEffect(() => {
+    let active = true;
+    void aiAvailable().then((ok) => {
+      if (active) {
+        setAiCompiled(ok);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -130,14 +167,17 @@ export function DataProfileDialog({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isImeKeyEvent(event)) {
+      if (event.defaultPrevented) {
+        return;
+      }
+      if (event.key === 'Escape' && !isImeKeyEvent(event) && !corrResult) {
         event.preventDefault();
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [onClose, corrResult]);
 
   useEffect(() => {
     if (scope === 'current' && currentRowCount === 0) {
@@ -285,6 +325,39 @@ export function DataProfileDialog({
     [profile, search, sortMode]
   );
 
+  const correlationSql = useMemo(
+    () => (profile ? buildCorrelationMatrixSql(profile.columns) : null),
+    [profile]
+  );
+
+  const handleOpenCorrelation = useCallback(async () => {
+    const id = sessionIdRef.current;
+    if (!id || !correlationSql || corrLoading) {
+      return;
+    }
+    setCorrLoading(true);
+    setError(null);
+    try {
+      const res = await invoke<AnalyticsQueryResult>('analytics_query', {
+        analyticsId: id,
+        sql: correlationSql,
+        limit: 200,
+        timeoutSeconds: 15
+      });
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrResult(res);
+      }
+    } catch (err) {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setError(describeError(err));
+      }
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrLoading(false);
+      }
+    }
+  }, [correlationSql, corrLoading]);
+
   const sortOptions = useMemo(
     () => SORT_OPTIONS.filter((mode) => mode !== 'drift' || hasPresenceInfo),
     [hasPresenceInfo]
@@ -391,35 +464,135 @@ export function DataProfileDialog({
 
         {/* Toolbar */}
         {profile && !loading && (
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
-            <div className="relative min-w-[200px] flex-1 max-w-xs">
-              <Search
-                size={13}
-                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
-              />
-              <input
-                {...PLAIN_TEXT_INPUT}
-                type="text"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={t('profile.searchPlaceholder')}
-                className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
-              />
+          <>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
+              <div className="relative min-w-[200px] flex-1 max-w-xs">
+                <Search
+                  size={13}
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
+                />
+                <input
+                  {...PLAIN_TEXT_INPUT}
+                  type="text"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder={t('profile.searchPlaceholder')}
+                  className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                {aiCompiled && aiEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAiInsights((open) => !open)}
+                    className={clsx(
+                      'flex items-center gap-1 rounded-control border px-2.5 py-1 text-xs transition-colors',
+                      showAiInsights
+                        ? 'border-accent bg-accent-soft font-medium text-accent'
+                        : 'border-line-strong bg-surface text-fg hover:bg-surface-hover'
+                    )}
+                  >
+                    <Sparkles size={12} />
+                    <span>{t('profile.aiInsights.button')}</span>
+                  </button>
+                )}
+                {correlationSql && (
+                  <button
+                    type="button"
+                    disabled={corrLoading}
+                    onClick={() => void handleOpenCorrelation()}
+                    className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover disabled:opacity-50"
+                  >
+                    {corrLoading ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <Grid size={12} />
+                    )}
+                    <span>
+                      {corrLoading
+                        ? t('profile.correlationLoading')
+                        : t('profile.correlationMatrix')}
+                    </span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const scopeLabel =
+                      scope === 'sample' && tableSample
+                        ? tableSample.hasActiveFilters
+                          ? t('profile.sampleBadgeFiltered', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                          : t('profile.sampleBadge', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                        : t('profile.scopeCurrentPage', {
+                            count: profile.rowCount.toLocaleString()
+                          });
+                    const md = formatProfileMarkdownReport({
+                      profile,
+                      scopeLabel,
+                      language
+                    });
+                    handleCopySql('__report__', md);
+                  }}
+                  className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover"
+                >
+                  {copiedKey === '__report__' ? (
+                    <Check size={12} className="text-success" />
+                  ) : (
+                    <Copy size={12} />
+                  )}
+                  <span>
+                    {copiedKey === '__report__'
+                      ? t('profile.copiedReport')
+                      : t('profile.copyReport')}
+                  </span>
+                </button>
+                <select
+                  value={sortMode}
+                  onChange={(event) => setSortMode(event.target.value as ProfileSortMode)}
+                  className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
+                >
+                  {sortOptions.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {t(`profile.sort.${mode}` as const)}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <select
-                value={sortMode}
-                onChange={(event) => setSortMode(event.target.value as ProfileSortMode)}
-                className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
-              >
-                {sortOptions.map((mode) => (
-                  <option key={mode} value={mode}>
-                    {t(`profile.sort.${mode}` as const)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
+            <ProfileHealthSummaryBar
+              columns={profile.columns}
+              activeSearch={search}
+              onSelectColumn={(columnName) =>
+                setSearch((current) => (current === columnName ? '' : columnName))
+              }
+            />
+            {showAiInsights && aiCompiled && aiEnabled && (
+              <AiProfileInsightsPanel
+                title={title}
+                dialect={sourceDialect}
+                scopeLabel={
+                  scope === 'sample' && tableSample
+                    ? tableSample.hasActiveFilters
+                      ? t('profile.sampleBadgeFiltered', {
+                          count: profile.rowCount.toLocaleString()
+                        })
+                      : t('profile.sampleBadge', {
+                          count: profile.rowCount.toLocaleString()
+                        })
+                    : t('profile.scopeCurrentPage', {
+                        count: profile.rowCount.toLocaleString()
+                      })
+                }
+                environment={environment}
+                profile={profile}
+                onClose={() => setShowAiInsights(false)}
+              />
+            )}
+          </>
         )}
 
         {/* Body */}
@@ -493,6 +666,91 @@ export function DataProfileDialog({
           )}
         </div>
       </div>
+
+      {corrResult && (
+        <ResultChartDialog
+          columns={corrResult.columns}
+          rows={corrResult.rows}
+          preset="correlation"
+          onClose={() => setCorrResult(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+export interface ProfileHealthSummaryBarProps {
+  columns: readonly ColumnProfile[];
+  activeSearch: string;
+  onSelectColumn: (columnName: string) => void;
+}
+
+export function ProfileHealthSummaryBar({
+  columns,
+  activeSearch,
+  onSelectColumn
+}: ProfileHealthSummaryBarProps) {
+  const t = useLanguageStore((state) => state.t);
+  const findings = useMemo(() => summarizeProfileFindings(columns), [columns]);
+  if (findings.length === 0) {
+    return null;
+  }
+
+  const labelFor = (finding: ProfileHealthFinding): string => {
+    switch (finding.kind) {
+      case 'negative':
+        return t('profile.finding.negative', { column: finding.column });
+      case 'high-outlier':
+        return t('profile.finding.highOutlier', {
+          column: finding.column,
+          threshold: finding.threshold ?? ''
+        });
+      case 'high-nulls':
+        return t('profile.finding.highNulls', {
+          column: finding.column,
+          ratio: formatProfileRatio(finding.ratio ?? 0)
+        });
+      case 'empty-strings':
+        return t('profile.finding.emptyStrings', {
+          column: finding.column,
+          count: finding.count ?? 0
+        });
+      case 'padded-whitespace':
+        return t('profile.finding.paddedWhitespace', {
+          column: finding.column,
+          count: finding.count ?? 0
+        });
+      case 'schema-drift':
+        return t('profile.finding.schemaDrift', { column: finding.column });
+    }
+  };
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-surface px-5 py-2 text-[11px]">
+      <span className="flex items-center gap-1 font-medium text-fg-muted">
+        <AlertTriangle size={12} className="text-warning" />
+        <span>{t('profile.findingsSummary', { count: findings.length })}</span>
+      </span>
+      {findings.slice(0, 10).map((finding) => {
+        const active = activeSearch === finding.column;
+        return (
+          <button
+            key={finding.id}
+            type="button"
+            onClick={() => onSelectColumn(finding.column)}
+            className={clsx(
+              'rounded border px-1.5 py-0.5 font-mono text-[10px] transition-colors',
+              active
+                ? 'border-accent bg-accent-soft font-medium text-accent'
+                : finding.severity === 'high'
+                  ? 'border-danger-line bg-danger-soft text-danger hover:opacity-90'
+                  : 'border-warning-line bg-warning-soft text-warning hover:opacity-90'
+            )}
+          >
+            {labelFor(finding)}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -506,7 +764,7 @@ export interface ColumnProfileCardProps {
   /** 原库方言（提供时允许一键复制原库 WHERE 条件） */
   sourceDialect?: SqlIdentifierDialect;
   /** 表视图回填筛选（提供时允许一键带条件回到原表网格） */
-  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
+  onApplyTableFilter?: (columnName: string, operator: ProfileTableFilterOperator, value: string) => void;
 }
 
 export function ColumnProfileCard({
@@ -744,7 +1002,7 @@ export function ColumnProfileCard({
               </div>
             )}
             {outlier && (
-              <div className="flex items-center justify-end">
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <button
                   type="button"
                   onClick={() => {
@@ -770,6 +1028,19 @@ export function ColumnProfileCard({
                         : t('profile.outlierHigh', { threshold: outlier.threshold })}
                   </span>
                 </button>
+                {onApplyTableFilter && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onApplyTableFilter(column.name, outlier.operator, outlier.filterValue)
+                    }
+                    title={t('profile.applyTableFilterTitle')}
+                    className="flex items-center gap-1 rounded border border-line-strong px-1.5 py-0.5 text-[10px] text-fg-muted transition-colors hover:bg-surface-hover hover:text-fg"
+                  >
+                    <Filter size={10} />
+                    <span>{t('profile.applyTableFilter')}</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -825,19 +1096,75 @@ export function ColumnProfileCard({
           </div>
         )}
 
-      {/* Length / Byte length range */}
+      {/* Length / Byte length range & whitespace dirt chips */}
       {column.minLength !== undefined && column.maxLength !== undefined && (
-        <p className="font-mono text-[11px] text-fg-muted">
-          {column.inferredType === 'binary'
-            ? t('profile.bytesRange', {
-                min: column.minLength.toLocaleString(),
-                max: column.maxLength.toLocaleString()
-              })
-            : t('profile.lengthRange', {
-                min: column.minLength.toLocaleString(),
-                max: column.maxLength.toLocaleString()
-              })}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
+          <p className="font-mono text-[11px] text-fg-muted">
+            {column.inferredType === 'binary'
+              ? t('profile.bytesRange', {
+                  min: column.minLength.toLocaleString(),
+                  max: column.maxLength.toLocaleString()
+                })
+              : t('profile.lengthRange', {
+                  min: column.minLength.toLocaleString(),
+                  max: column.maxLength.toLocaleString()
+                })}
+          </p>
+          {((column.emptyStringCount ?? 0) > 0 || (column.paddedWhitespaceCount ?? 0) > 0) && (
+            <div className="flex flex-wrap items-center gap-1">
+              {(column.emptyStringCount ?? 0) > 0 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const sql = buildProfileEmptyStringFilterSql(column.name);
+                      if (onRunFilterSql) {
+                        onRunFilterSql(sql);
+                      } else {
+                        onCopySql(`empty:${column.name}`, sql);
+                      }
+                    }}
+                    className="rounded border border-warning-line bg-warning-soft px-1.5 py-0.5 font-mono text-[10px] text-warning hover:opacity-90"
+                  >
+                    {copiedKey === `empty:${column.name}`
+                      ? t('profile.copiedSql')
+                      : t('profile.emptyStringChip', { count: column.emptyStringCount ?? 0 })}
+                  </button>
+                  {onApplyTableFilter && (
+                    <button
+                      type="button"
+                      onClick={() => onApplyTableFilter(column.name, 'eq', '')}
+                      title={t('profile.applyTableFilterTitle')}
+                      className="rounded border border-line-strong px-1 py-0.5 text-[10px] text-fg-muted hover:bg-surface-hover hover:text-fg"
+                    >
+                      {t('profile.applyTableFilter')}
+                    </button>
+                  )}
+                </>
+              )}
+              {(column.paddedWhitespaceCount ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sql = buildProfilePaddedWhitespaceFilterSql(column.name);
+                    if (onRunFilterSql) {
+                      onRunFilterSql(sql);
+                    } else {
+                      onCopySql(`padded:${column.name}`, sql);
+                    }
+                  }}
+                  className="rounded border border-warning-line bg-warning-soft px-1.5 py-0.5 font-mono text-[10px] text-warning hover:opacity-90"
+                >
+                  {copiedKey === `padded:${column.name}`
+                    ? t('profile.copiedSql')
+                    : t('profile.paddedWhitespaceChip', {
+                        count: column.paddedWhitespaceCount ?? 0
+                      })}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Top 5 values (default-collapsed for unique/high-cardinality noise columns) */}

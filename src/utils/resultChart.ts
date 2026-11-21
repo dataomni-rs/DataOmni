@@ -551,6 +551,30 @@ export function heatmapIntensity(value: number, min: number, max: number): numbe
   return 0.14 + t * 0.78;
 }
 
+export interface CorrelationCellStyle {
+  readonly fill: string;
+  readonly opacity: number;
+  readonly highContrast: boolean;
+}
+
+/**
+ * Pearson 相关系数（[-1, 1]）双极色阶：
+ * - 正相关走 --dm-accent（蓝），负相关走 --dm-danger（红），接近 0 走浅中性底色。
+ * - 透明度随 |r| 线性递增；|r| >= 0.58 时文字切换反色以保证对比度。
+ */
+export function correlationHeatmapStyle(value: number): CorrelationCellStyle {
+  const clamped = Math.max(-1, Math.min(1, value));
+  const abs = Math.abs(clamped);
+  if (abs < 0.005) {
+    return { fill: 'var(--dm-fg-muted)', opacity: 0.1, highContrast: false };
+  }
+  return {
+    fill: clamped > 0 ? 'var(--dm-accent)' : 'var(--dm-danger)',
+    opacity: 0.1 + abs * 0.78,
+    highContrast: abs >= 0.58
+  };
+}
+
 export type ChartAggregateFn = 'SUM' | 'AVG' | 'COUNT' | 'MAX' | 'MIN';
 
 export interface ChartAggregationSpec {
@@ -607,6 +631,37 @@ export function chartDataToMarkdown(data: ChartData, categoryHeader: string): st
       })
     ];
     lines.push(`| ${cells.join(' | ')} |`);
+  }
+  return lines.join('\n');
+}
+
+/** 将二维热力图转为标准二维矩阵 Markdown 表格 */
+export function heatmapDataToMarkdown(
+  data: HeatmapData,
+  formatValue?: (value: number) => string,
+  cornerLabel?: string
+): string {
+  const valueMap = new Map<string, number>();
+  for (const cell of data.cells) {
+    valueMap.set(`${cell.xIdx}:${cell.yIdx}`, cell.value);
+  }
+  const headers = [cornerLabel ?? (data.yName || 'Row'), ...data.xLabels];
+  const lines = [
+    `| ${headers.map(escapeMdCell).join(' | ')} |`,
+    `| ${headers.map(() => '---').join(' | ')} |`
+  ];
+  for (let yIdx = 0; yIdx < data.yLabels.length; yIdx += 1) {
+    const rowCells = [
+      escapeMdCell(data.yLabels[yIdx] ?? ''),
+      ...data.xLabels.map((_, xIdx) => {
+        const val = valueMap.get(`${xIdx}:${yIdx}`);
+        if (val === undefined) {
+          return '—';
+        }
+        return escapeMdCell(formatValue ? formatValue(val) : String(val));
+      })
+    ];
+    lines.push(`| ${rowCells.join(' | ')} |`);
   }
   return lines.join('\n');
 }

@@ -224,6 +224,10 @@ pub struct ColumnProfile {
   pub min_length: Option<u64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub max_length: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub empty_string_count: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub padded_whitespace_count: Option<u64>,
   pub top_values: Vec<TopValueEntry>,
 }
 
@@ -2004,6 +2008,8 @@ fn profile_single_column(
       time_bins: Vec::new(),
       min_length: None,
       max_length: None,
+      empty_string_count: None,
+      padded_whitespace_count: None,
       top_values: Vec::new(),
     });
   }
@@ -2189,6 +2195,8 @@ fn profile_numeric_column(
     time_bins: Vec::new(),
     min_length: None,
     max_length: None,
+    empty_string_count: None,
+    padded_whitespace_count: None,
     top_values,
   })
 }
@@ -2287,6 +2295,8 @@ fn profile_binary_column(
     time_bins: Vec::new(),
     min_length: min_len.map(|v| v.max(0) as u64),
     max_length: max_len.map(|v| v.max(0) as u64),
+    empty_string_count: None,
+    padded_whitespace_count: None,
     top_values: Vec::new(),
   })
 }
@@ -2334,6 +2344,8 @@ fn profile_boolean_column(
     time_bins: Vec::new(),
     min_length: None,
     max_length: None,
+    empty_string_count: None,
+    padded_whitespace_count: None,
     top_values,
   })
 }
@@ -2397,6 +2409,8 @@ fn profile_temporal_column(
     time_bins,
     min_length: None,
     max_length: None,
+    empty_string_count: None,
+    padded_whitespace_count: None,
     top_values,
   })
 }
@@ -2484,21 +2498,37 @@ fn profile_text_column(
        MIN({col}), \
        MAX({col}), \
        MIN(length({col})), \
-       MAX(length({col})) \
+       MAX(length({col})), \
+       CAST(COALESCE(SUM(CASE WHEN {col} = '' THEN 1 ELSE 0 END), 0) AS BIGINT), \
+       CAST(COALESCE(SUM(CASE WHEN {col} IS NOT NULL AND {col} <> '' AND trim({col}) <> {col} THEN 1 ELSE 0 END), 0) AS BIGINT) \
      FROM result_set"
   );
-  let (null_count, distinct_count, min, max, min_len, max_len): (
-    i64,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<i64>,
-  ) = conn
-    .query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+  struct TextColumnAgg {
+    null_count: i64,
+    distinct_count: i64,
+    min: Option<String>,
+    max: Option<String>,
+    min_len: Option<i64>,
+    max_len: Option<i64>,
+    empty_strings: i64,
+    padded_ws: i64,
+  }
+  let agg = conn
+    .query_row(&sql, [], |r| {
+      Ok(TextColumnAgg {
+        null_count: r.get(0)?,
+        distinct_count: r.get(1)?,
+        min: r.get(2)?,
+        max: r.get(3)?,
+        min_len: r.get(4)?,
+        max_len: r.get(5)?,
+        empty_strings: r.get(6)?,
+        padded_ws: r.get(7)?,
+      })
+    })
     .map_err(duck_error)?;
-  let null_count = null_count.max(0) as u64;
-  let distinct_count = distinct_count.max(0) as u64;
+  let null_count = agg.null_count.max(0) as u64;
+  let distinct_count = agg.distinct_count.max(0) as u64;
   let non_null = total_rows.saturating_sub(null_count);
   let top_values = if non_null > 0 { query_top_values(conn, col, non_null)? } else { Vec::new() };
 
@@ -2515,8 +2545,8 @@ fn profile_text_column(
     present_count,
     present_ratio,
     explicit_null_count,
-    min,
-    max,
+    min: agg.min,
+    max: agg.max,
     mean: None,
     stddev: None,
     p25: None,
@@ -2525,8 +2555,10 @@ fn profile_text_column(
     p95: None,
     bins: Vec::new(),
     time_bins: Vec::new(),
-    min_length: min_len.map(|v| v.max(0) as u64),
-    max_length: max_len.map(|v| v.max(0) as u64),
+    min_length: agg.min_len.map(|v| v.max(0) as u64),
+    max_length: agg.max_len.map(|v| v.max(0) as u64),
+    empty_string_count: Some(agg.empty_strings.max(0) as u64),
+    padded_whitespace_count: Some(agg.padded_ws.max(0) as u64),
     top_values,
   })
 }
@@ -3218,5 +3250,40 @@ mod tests {
     assert!(!profile.columns[0].time_bins.is_empty(), "created_at should emit time_bins");
     assert!(!profile.columns[1].time_bins.is_empty(), "order_date should emit time_bins");
     assert!(profile.columns[2].time_bins.is_empty(), "invalid date column stays text");
+  }
+
+  #[test]
+  fn text_profile_counts_empty_strings_and_padded_whitespace() {
+    let cols = vec![
+      AnalyticsColumnInput {
+        name: "status".to_string(),
+        logical_type: None,
+        database_type: Some("VARCHAR".to_string()),
+      },
+      AnalyticsColumnInput {
+        name: "amount".to_string(),
+        logical_type: None,
+        database_type: Some("DOUBLE".to_string()),
+      },
+    ];
+    let rows = vec![
+      vec![json!("paid"), json!(10.0)],
+      vec![json!(""), json!(20.0)],
+      vec![json!(""), json!(30.0)],
+      vec![json!(" paid "), json!(40.0)],
+      vec![json!("   "), json!(50.0)],
+      vec![json!(null), json!(60.0)],
+    ];
+
+    let session = create_result_session(&cols, &rows, 100).expect("load text whitespace rows");
+    let profile = profile_session("ws-check", &session).expect("profile");
+    let status = &profile.columns[0];
+    assert_eq!(status.null_count, 1);
+    assert_eq!(status.empty_string_count, Some(2));
+    assert_eq!(status.padded_whitespace_count, Some(2));
+
+    let amount = &profile.columns[1];
+    assert_eq!(amount.empty_string_count, None);
+    assert_eq!(amount.padded_whitespace_count, None);
   }
 }

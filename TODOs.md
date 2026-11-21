@@ -26,7 +26,7 @@
 | v1.1 与官网 | 代码生成、结构比对、绑定参数、只读 MCP 与 `dataomni.dev` 上线 | [x] `v1.1.0` 2026-11-16 发布，官网 `https://dataomni.dev` 2026-11-17 上线 |
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已合入 `main`（PR `#59`–`#63`），`v1.3.0` 标签已推送触发发版（`V1` 跨平台实机验收继续跟踪） |
-| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6` 全部实现并通过验收（见下方明细，在 `feat/multi-engine-analytics` 分支待合入） |
+| v1.4 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6` 已合入 `main`（PR `#64`）；`AN7–AN10` 全部实现并通过验收 |
 | 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
 
 ---
@@ -167,6 +167,13 @@
 - [x] AN6 Neo4j 图谱拓扑与超级节点（Supernode）体检（前端 `neo4jAnalytics`/`Neo4jTopologyAnalyticsDialog`/`CypherWorkbench`/`catalog` 31 条全绿含只读 Cypher 门禁 + `tsc`/`eslint`/`cargo fmt` 通过）
   - `commands/neo4j_commands.rs` `neo4j_run` 开放可选 `read_only` 协议级只读事务标志；落地 `src/utils/neo4jAnalytics.ts` 与 `Neo4jTopologyAnalyticsDialog`，接入 `CypherWorkbench`「图谱体检」入口；
   - 分层执行：第一层经 O(1) count store 统计各 Label 节点数与 Relationship Type 边数并直连 `ResultChartDialog` 出图；第二层按需受限采样（500 / 1,000 / 5,000 节点，兼容 Neo4j 5 `COUNT { (n)--() }` 与 Neo4j 4 `size()` 回退）统计度分位数（P50 / P95 / Max）、孤立节点占比、Top 20 超级节点与稀疏属性覆盖率，点击超级节点一键载入并执行只读邻域 Cypher 在图视图展开。
+
+### 阶段 4：分析高价值低膨胀增强（`AN7–AN10`）
+
+- [x] AN7 画像体检增强：顶部异常摘要条、文本空串/首尾空格检测与数值 `<` / `>` 一键回表筛选（Rust `local_analytics::tests` 13 条 + 前端 `analyticsProfile`/`DataProfileDialog`/`LocalAnalyticsDialog`/`catalog` 39 条全绿）
+- [x] AN8 画像体检 Markdown 报告一键复制导出（前端 `analyticsProfile`/`DataProfileDialog`/`LocalAnalyticsDialog`/`catalog` 40 条全绿，不外泄样本值）
+- [x] AN9 数值列相关性矩阵（内存 DuckDB 单次扫描 `CORR` 复用 `ResultChartDialog` 热力图，上限 12 列；`analyticsQuery`/`ResultChartDialog`/`DataProfileDialog`/`LocalAnalyticsDialog`/`catalog` 全绿）
+- [x] AN10 基于脱敏统计摘要的 AI 体检解读（剥离文本样本值与 `topValues`、零原始行外发，复用 `ai_available` / `completeWithAi` / 敏感环境守卫，留在 `ai` feature 后面；`aiProfileInsights`/`AiProfileInsightsPanel`/`catalog` 全绿）
 
 ---
 

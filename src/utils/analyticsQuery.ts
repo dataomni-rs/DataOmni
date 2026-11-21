@@ -1,4 +1,4 @@
-import type { AnalyticsColumnMeta } from '../contracts/analytics';
+import type { AnalyticsColumnMeta, ColumnProfile } from '../contracts/analytics';
 
 export const LOCAL_DATA_FILE_EXTENSIONS = [
   'parquet',
@@ -12,6 +12,8 @@ export const LOCAL_DATA_FILE_EXTENSIONS = [
 
 export const ANALYTICS_QUERY_LIMIT_OPTIONS = [200, 1000, 10000] as const;
 export const MAX_ATTACHED_TABLES = 4;
+/** 相关性热力图最多纳入的数值列数（12×12 = 144 行，稳稳落在热力图 200 行上限内且单次扫描毫秒级完成） */
+export const MAX_CORRELATION_COLUMNS = 12;
 
 export function quoteDuckIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
@@ -200,4 +202,73 @@ export function defaultParquetFileName(sourceName: string): string {
     .replace(/[^\w.-]+/g, '_')
     .replace(/^_+|_+$/g, '');
   return `${base || 'result_set'}.parquet`;
+}
+
+function quoteDuckStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** 挑选适合计算 Pearson 相关系数的数值列（排除全空或常量列，最多 12 列） */
+export function selectCorrelationColumns(
+  columns: ReadonlyArray<Pick<ColumnProfile, 'name' | 'inferredType'> & { distinctCount?: number }>
+): string[] {
+  const selected: string[] = [];
+  for (const col of columns) {
+    if (col.inferredType !== 'integer' && col.inferredType !== 'numeric') {
+      continue;
+    }
+    if (col.distinctCount !== undefined && col.distinctCount < 2) {
+      continue;
+    }
+    selected.push(col.name);
+    if (selected.length >= MAX_CORRELATION_COLUMNS) {
+      break;
+    }
+  }
+  return selected;
+}
+
+/**
+ * 为内存 DuckDB `result_set` 构造单次扫描的 Pearson 相关性矩阵 SQL，
+ * 输出长表 `(col_x, col_y, corr)` 直接供 `ResultChartDialog` 热力图渲染。
+ * 不足 2 个有效数值列时返回 `null`。
+ */
+export function buildCorrelationMatrixSql(
+  columns: ReadonlyArray<Pick<ColumnProfile, 'name' | 'inferredType'> & { distinctCount?: number }>
+): string | null {
+  const names = selectCorrelationColumns(columns);
+  if (names.length < 2) {
+    return null;
+  }
+
+  const pairExprs: string[] = [];
+  const pairAlias = (i: number, j: number) => `r_${i}_${j}`;
+  for (let i = 0; i < names.length; i += 1) {
+    for (let j = i + 1; j < names.length; j += 1) {
+      const a = `CAST(${quoteDuckIdentifier(names[i])} AS DOUBLE)`;
+      const b = `CAST(${quoteDuckIdentifier(names[j])} AS DOUBLE)`;
+      pairExprs.push(
+        `ROUND(CASE WHEN isfinite(corr(${a}, ${b})) THEN corr(${a}, ${b}) ELSE NULL END, 4) AS ${pairAlias(i, j)}`
+      );
+    }
+  }
+
+  const rows: string[] = [];
+  for (let i = 0; i < names.length; i += 1) {
+    const labelI = quoteDuckStringLiteral(names[i]);
+    for (let j = 0; j < names.length; j += 1) {
+      const labelJ = quoteDuckStringLiteral(names[j]);
+      if (i === j) {
+        rows.push(`SELECT ${labelI} AS col_x, ${labelJ} AS col_y, 1.0 AS corr FROM _corr_agg`);
+      } else {
+        const lo = Math.min(i, j);
+        const hi = Math.max(i, j);
+        rows.push(
+          `SELECT ${labelI} AS col_x, ${labelJ} AS col_y, ${pairAlias(lo, hi)} AS corr FROM _corr_agg`
+        );
+      }
+    }
+  }
+
+  return `WITH _corr_agg AS (\n  SELECT\n    ${pairExprs.join(',\n    ')}\n  FROM result_set\n)\n${rows.join('\nUNION ALL\n')}`;
 }

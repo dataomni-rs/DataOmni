@@ -176,3 +176,21 @@
 | 在线上关系库直接执行无保护的全表 `ORDER BY RAND()` 或全表 `PERCENTILE_CONT` | 大表上极易打满线上 CPU/IO，风险远大于收益 | 不重估；大表全量分析统一走「抽样 / 导出 Parquet 后交本地 DuckDB」 |
 | 为 NoSQL 分析引入独立重型图表库（ECharts / D3 / Vega） | 破坏现有纯函数单测与深浅色 Tailwind Token 统一性 | 与 `rfcs/duckdb-analytics.md` 同一把尺子：手写 SVG 实测帧渲染耗时 `> 150ms` 时再评估 Canvas 层 |
 | CLI / MCP 立即新增全部 NoSQL 分析子命令 | 等 GUI 真实使用一轮沉淀出最稳定的 JSON 字段契约，避免过早固化 CLI 输出格式 | `AN3–AN5` 合入稳定版并收集到外部 Agent 调用 Redis/Mongo/ES 诊断的真实反馈时开放 |
+
+---
+
+## 8. 高价值低膨胀增强（`AN7–AN10`，2026-11-21 增补）
+
+在 `AN0–AN6` 合入 `main`（PR `#64`）并经过真实数据实测后，聚焦以下 4 项零重型依赖、复用既有 DuckDB 沙盒、`ResultChartDialog` 与 `ai_complete` 的高信噪比增强：
+
+1. **`AN7` 画像体检增强**：
+   - 在 `local_analytics.rs` 文本列单次扫描中顺带统计 `empty_string_count`（`""`）与 `padded_whitespace_count`（含首尾空格的非空字符串），零额外表扫描；
+   - 在 `DataProfileDialog` 与 `LocalAnalyticsDialog` 列级画像上方新增可点击的「异常体检摘要条」（仅存在异常时出现，点击快速聚焦问题列）；
+   - 将回表筛选算子从 `eq`/`is-null` 扩展到 `lt`/`gt`，让数值列 `< 0` / `> P95` 离群项与文本列空串支持一键回表筛选。
+2. **`AN8` 画像体检 Markdown 报告导出**：
+   - 纯函数 `formatProfileMarkdownReport` 将当前列画像（样本口径、异常摘要、各列关键分布指标）生成结构化 Markdown，支持一键复制，便于粘贴至工单、IM 或 PR。
+3. **`AN9` 数值列相关性矩阵**：
+   - 纯函数 `buildCorrelationMatrixSql` 针对内存 DuckDB 会话中最多 12 个数值列生成只读 `CORR(a, b)` 矩阵查询，直接复用 `ResultChartDialog`（新增 `initialChartType="heatmap"`）绘制相关系数热力图并支持 SVG/PNG 导出。
+4. **`AN10` 基于脱敏统计摘要的 AI 体检解读**：
+   - 严格留在 Cargo feature `ai` 之后（复用 `ai_available`、`ai_complete`、`ai_cancel` 与敏感环境路由守卫）；
+   - **隐私硬门禁**：提示词仅发送聚合统计指标（列名、类型、空值率、唯一率、数值分位数、空串/空格计数、时间跨度），**主动剥离 `topValues` 样本值与所有原始行数据**，支持展开查看发包原文，且绝不自动执行任何 SQL。

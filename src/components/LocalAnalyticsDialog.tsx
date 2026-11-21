@@ -12,18 +12,23 @@ import {
   AlertTriangle,
   BarChart2,
   BarChart3,
+  Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Database,
   Download,
   FilePlus2,
   FileSpreadsheet,
+  Grid,
   Loader2,
   Play,
   Search,
+  Sparkles,
   Square,
   X
 } from 'lucide-react';
+import type { ConnectionEnvironment } from '../contracts';
 import type {
   AnalyticsColumnInput,
   AnalyticsQueryResult,
@@ -35,9 +40,12 @@ import type {
 import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
 import { useQueryStore } from '../stores/queryStore';
+import { useSettingsStore } from '../stores/settingsStore';
 import { useThemeStore } from '../stores/themeStore';
+import { aiAvailable } from '../utils/aiSettings';
 import {
   ANALYTICS_QUERY_LIMIT_OPTIONS,
+  buildCorrelationMatrixSql,
   buildDuplicateCheckTemplate,
   buildExceptDiffTemplate,
   buildGroupByTemplate,
@@ -50,7 +58,12 @@ import {
   nextAttachTableName,
   quoteDuckIdentifier
 } from '../utils/analyticsQuery';
-import { filterAndSortProfiles, type ProfileSortMode } from '../utils/analyticsProfile';
+import {
+  filterAndSortProfiles,
+  formatProfileMarkdownReport,
+  type ProfileSortMode,
+  type ProfileTableFilterOperator
+} from '../utils/analyticsProfile';
 import { describeError } from '../utils/describeError';
 import { editorPhrases } from '../utils/editorPhrases';
 import { appEditorTheme } from '../utils/editorTheme';
@@ -63,7 +76,12 @@ import {
   DEFAULT_TABLE_SAMPLE_SIZE,
   TABLE_SAMPLE_SIZE_OPTIONS
 } from '../utils/tableSampleQuery';
-import { ColumnProfileCard, type TableSampleConfig } from './DataProfileDialog';
+import { AiProfileInsightsPanel } from './AiProfileInsightsPanel';
+import {
+  ColumnProfileCard,
+  ProfileHealthSummaryBar,
+  type TableSampleConfig
+} from './DataProfileDialog';
 import { ExportResultDialog } from './ExportResultDialog';
 import { PLAIN_TEXT_INPUT } from './FormControls';
 import { ResultChartDialog } from './ResultChartDialog';
@@ -89,9 +107,10 @@ type WorkbenchTab = 'sql' | 'profile';
 
 interface LocalAnalyticsDialogProps {
   source: LocalAnalyticsSource;
+  environment?: ConnectionEnvironment;
   tableSample?: TableSampleConfig;
   sourceDialect?: SqlIdentifierDialect;
-  onApplyTableFilter?: (columnName: string, operator: 'eq' | 'is-null', value: string) => void;
+  onApplyTableFilter?: (columnName: string, operator: ProfileTableFilterOperator, value: string) => void;
   onClose: () => void;
 }
 
@@ -109,12 +128,17 @@ function formatBytes(bytes: number): string {
 
 export function LocalAnalyticsDialog({
   source,
+  environment = 'development',
   tableSample,
   sourceDialect,
   onApplyTableFilter,
   onClose
 }: LocalAnalyticsDialogProps) {
   const t = useLanguageStore((state) => state.t);
+  const language = useLanguageStore((state) => state.resolved);
+  const aiEnabled = useSettingsStore((state) => state.ai.enabled);
+  const [aiCompiled, setAiCompiled] = useState(false);
+  const [showAiInsights, setShowAiInsights] = useState(false);
   const [tab, setTab] = useState<WorkbenchTab>('sql');
   const [scope, setScope] = useState<'current' | 'sample'>('current');
   const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
@@ -146,6 +170,8 @@ export function LocalAnalyticsDialog({
     Array<AttachedTableSummary & { label: string }>
   >([]);
   const [attaching, setAttaching] = useState(false);
+  const [corrLoading, setCorrLoading] = useState(false);
+  const [corrResult, setCorrResult] = useState<AnalyticsQueryResult | null>(null);
   const [showChart, setShowChart] = useState(false);
   const [showExport, setShowExport] = useState(false);
 
@@ -236,6 +262,18 @@ export function LocalAnalyticsDialog({
   }, [attachedTables, summary?.columns, t]);
 
   useEffect(() => {
+    let active = true;
+    void aiAvailable().then((ok) => {
+      if (active) {
+        setAiCompiled(ok);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -257,14 +295,14 @@ export function LocalAnalyticsDialog({
       if (event.defaultPrevented) {
         return;
       }
-      if (event.key === 'Escape' && !isImeKeyEvent(event) && !showChart && !showExport) {
+      if (event.key === 'Escape' && !isImeKeyEvent(event) && !showChart && !showExport && !corrResult) {
         event.preventDefault();
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, showChart, showExport]);
+  }, [onClose, showChart, showExport, corrResult]);
 
   const runSql = useCallback(
     async (targetId: string, statement: string, limit: number) => {
@@ -639,6 +677,39 @@ export function LocalAnalyticsDialog({
     () => filterAndSortProfiles(profile?.columns ?? [], profileSearch, profileSort),
     [profile, profileSearch, profileSort]
   );
+  const correlationSql = useMemo(
+    () => (profile ? buildCorrelationMatrixSql(profile.columns) : null),
+    [profile]
+  );
+
+  const handleOpenCorrelation = useCallback(async () => {
+    const id = sessionIdRef.current;
+    if (!id || !correlationSql || corrLoading) {
+      return;
+    }
+    setCorrLoading(true);
+    setProfileError(null);
+    try {
+      const res = await invoke<AnalyticsQueryResult>('analytics_query', {
+        analyticsId: id,
+        sql: correlationSql,
+        limit: 200,
+        timeoutSeconds: 15
+      });
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrResult(res);
+      }
+    } catch (err) {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setProfileError(describeError(err));
+      }
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrLoading(false);
+      }
+    }
+  }, [correlationSql, corrLoading]);
+
   const hasPresenceInfo = useMemo(
     () => (profile?.columns ?? []).some((col) => col.presentRatio !== undefined),
     [profile]
@@ -1192,35 +1263,134 @@ export function LocalAnalyticsDialog({
           /* Profile tab */
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {profile && !profileLoading && (
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
-                <div className="relative max-w-xs flex-1 min-w-[200px]">
-                  <Search
-                    size={13}
-                    className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
-                  />
-                  <input
-                    {...PLAIN_TEXT_INPUT}
-                    type="text"
-                    value={profileSearch}
-                    onChange={(event) => setProfileSearch(event.target.value)}
-                    placeholder={t('profile.searchPlaceholder')}
-                    className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
-                  />
+              <>
+                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
+                  <div className="relative max-w-xs flex-1 min-w-[200px]">
+                    <Search
+                      size={13}
+                      className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
+                    />
+                    <input
+                      {...PLAIN_TEXT_INPUT}
+                      type="text"
+                      value={profileSearch}
+                      onChange={(event) => setProfileSearch(event.target.value)}
+                      placeholder={t('profile.searchPlaceholder')}
+                      className="w-full rounded-control border border-line-strong bg-surface py-1 pl-8 pr-2.5 text-xs text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {aiCompiled && aiEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAiInsights((open) => !open)}
+                        className={clsx(
+                          'flex items-center gap-1 rounded-control border px-2.5 py-1 text-xs transition-colors',
+                          showAiInsights
+                            ? 'border-accent bg-accent-soft font-medium text-accent'
+                            : 'border-line-strong bg-surface text-fg hover:bg-surface-hover'
+                        )}
+                      >
+                        <Sparkles size={12} />
+                        <span>{t('profile.aiInsights.button')}</span>
+                      </button>
+                    )}
+                    {correlationSql && (
+                      <button
+                        type="button"
+                        disabled={corrLoading}
+                        onClick={() => void handleOpenCorrelation()}
+                        className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover disabled:opacity-50"
+                      >
+                        {corrLoading ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Grid size={12} />
+                        )}
+                        <span>
+                          {corrLoading
+                            ? t('profile.correlationLoading')
+                            : t('profile.correlationMatrix')}
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const scopeLabel =
+                          scope === 'sample' && tableSample
+                            ? tableSample.hasActiveFilters
+                              ? t('profile.sampleBadgeFiltered', {
+                                  count: profile.rowCount.toLocaleString()
+                                })
+                              : t('profile.sampleBadge', {
+                                  count: profile.rowCount.toLocaleString()
+                                })
+                            : undefined;
+                        const md = formatProfileMarkdownReport({
+                          title: titleLabel,
+                          profile,
+                          scopeLabel,
+                          language
+                        });
+                        handleCopySql('__report__', md);
+                      }}
+                      className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover"
+                    >
+                      {copiedKey === '__report__' ? (
+                        <Check size={12} className="text-success" />
+                      ) : (
+                        <Copy size={12} />
+                      )}
+                      <span>
+                        {copiedKey === '__report__'
+                          ? t('profile.copiedReport')
+                          : t('profile.copyReport')}
+                      </span>
+                    </button>
+                    <select
+                      value={profileSort}
+                      onChange={(event) => setProfileSort(event.target.value as ProfileSortMode)}
+                      className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
+                    >
+                      {(['order', 'nulls', 'distinct', 'drift'] as const)
+                        .filter((m) => m !== 'drift' || hasPresenceInfo)
+                        .map((mode) => (
+                          <option key={mode} value={mode}>
+                            {t(`profile.sort.${mode}` as const)}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
                 </div>
-                <select
-                  value={profileSort}
-                  onChange={(event) => setProfileSort(event.target.value as ProfileSortMode)}
-                  className="rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg"
-                >
-                  {(['order', 'nulls', 'distinct', 'drift'] as const)
-                    .filter((m) => m !== 'drift' || hasPresenceInfo)
-                    .map((mode) => (
-                      <option key={mode} value={mode}>
-                        {t(`profile.sort.${mode}` as const)}
-                      </option>
-                    ))}
-                </select>
-              </div>
+                <ProfileHealthSummaryBar
+                  columns={profile.columns}
+                  activeSearch={profileSearch}
+                  onSelectColumn={(columnName) =>
+                    setProfileSearch((current) => (current === columnName ? '' : columnName))
+                  }
+                />
+                {showAiInsights && aiCompiled && aiEnabled && (
+                  <AiProfileInsightsPanel
+                    title={titleLabel}
+                    dialect={sourceDialect}
+                    scopeLabel={
+                      scope === 'sample' && tableSample
+                        ? tableSample.hasActiveFilters
+                          ? t('profile.sampleBadgeFiltered', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                          : t('profile.sampleBadge', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                        : undefined
+                    }
+                    environment={environment}
+                    profile={profile}
+                    onClose={() => setShowAiInsights(false)}
+                  />
+                )}
+              </>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4">
               {profileLoading ? (
@@ -1266,6 +1436,15 @@ export function LocalAnalyticsDialog({
           columns={queryResult.columns}
           rows={queryResult.rows}
           onClose={() => setShowChart(false)}
+        />
+      )}
+
+      {corrResult && (
+        <ResultChartDialog
+          columns={corrResult.columns}
+          rows={corrResult.rows}
+          preset="correlation"
+          onClose={() => setCorrResult(null)}
         />
       )}
 

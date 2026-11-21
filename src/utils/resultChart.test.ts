@@ -12,8 +12,10 @@ import {
   chartLabel,
   chartScale,
   chartValue,
+  correlationHeatmapStyle,
   detectNumericColumnIndexes,
   hasSeriesScaleMismatch,
+  heatmapDataToMarkdown,
   heatmapIntensity,
   isChartRejection,
   labelStride,
@@ -330,6 +332,34 @@ describe('DA3 extended chart types, aggregation SQL, and Markdown export', () =>
     );
     expect(md).toBe(
       '| region | val |\n| --- | --- |\n| a\\|b | 10 |\n| c d |  |'
+    );
+  });
+
+  it('uses diverging colors for correlation values and formats 2D heatmap Markdown matrices', () => {
+    const pos = correlationHeatmapStyle(0.85);
+    const neg = correlationHeatmapStyle(-0.72);
+    const zero = correlationHeatmapStyle(0.001);
+    expect(pos.fill).toBe('var(--dm-accent)');
+    expect(pos.highContrast).toBe(true);
+    expect(neg.fill).toBe('var(--dm-danger)');
+    expect(neg.highContrast).toBe(true);
+    expect(zero.fill).toBe('var(--dm-fg-muted)');
+    expect(zero.highContrast).toBe(false);
+
+    const heatmap = buildHeatmapData(
+      ['col_x', 'col_y', 'corr'],
+      [
+        ['amount', 'amount', 1],
+        ['amount', 'discount', -0.45],
+        ['discount', 'discount', 1]
+      ],
+      0,
+      1,
+      2
+    );
+    const md = heatmapDataToMarkdown(heatmap, (val) => val.toFixed(2), 'r');
+    expect(md).toBe(
+      '| r | amount | discount |\n| --- | --- | --- |\n| amount | 1.00 | — |\n| discount | -0.45 | 1.00 |'
     );
   });
 });

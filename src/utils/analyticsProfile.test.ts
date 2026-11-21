@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { ColumnProfile } from '../contracts/analytics';
 import {
+  buildProfileEmptyStringFilterSql,
   buildProfileFilterSql,
   buildProfileGroupBySql,
   buildProfileNullFilterSql,
+  buildProfilePaddedWhitespaceFilterSql,
   buildSourceWhereClause,
   columnCardinalityHint,
   extractEsJsonDocs,
   filterAndSortProfiles,
+  formatProfileMarkdownReport,
   formatProfileNumber,
   formatProfileRatio,
   hasSchemaDrift,
@@ -16,6 +19,7 @@ import {
   nullSeverity,
   numericOutlierFilter,
   shouldCollapseTopValues,
+  summarizeProfileFindings,
   timeSparklinePoints
 } from './analyticsProfile';
 
@@ -196,6 +200,8 @@ describe('analyticsProfile', () => {
     expect(numericOutlierFilter(negativeAmount)).toEqual({
       kind: 'negative',
       threshold: '0',
+      operator: 'lt',
+      filterValue: '0',
       sql: 'SELECT * FROM result_set WHERE "amount" < 0'
     });
 
@@ -211,6 +217,8 @@ describe('analyticsProfile', () => {
     expect(numericOutlierFilter(highTail)).toEqual({
       kind: 'high',
       threshold: '180',
+      operator: 'gt',
+      filterValue: '180',
       sql: 'SELECT * FROM result_set WHERE "latency_ms" > 180 ORDER BY "latency_ms" DESC'
     });
 
@@ -256,5 +264,82 @@ describe('analyticsProfile', () => {
     expect(pts[0].y).toBe(28);
     expect(pts[1].y).toBe(4);
     expect(pts[2].y).toBe(16);
+  });
+
+  it('summarizes profile health findings sorted by severity and builds whitespace filter SQL', () => {
+    const findings = summarizeProfileFindings([
+      makeColumn({
+        name: 'status',
+        inferredType: 'text',
+        totalCount: 100,
+        nullCount: 5,
+        nullRatio: 0.05,
+        emptyStringCount: 3,
+        paddedWhitespaceCount: 2
+      }),
+      makeColumn({
+        name: 'amount',
+        inferredType: 'numeric',
+        totalCount: 100,
+        min: '-10',
+        max: '500',
+        p25: 20,
+        p95: 300
+      })
+    ]);
+    expect(findings[0]).toMatchObject({ column: 'amount', kind: 'negative', severity: 'high' });
+    expect(findings.map((f) => f.kind)).toEqual([
+      'negative',
+      'high-nulls',
+      'empty-strings',
+      'padded-whitespace'
+    ]);
+    expect(buildProfileEmptyStringFilterSql('status')).toBe('SELECT * FROM result_set WHERE "status" = \'\'');
+    expect(buildProfilePaddedWhitespaceFilterSql('status')).toContain('TRIM("status") <> "status"');
+  });
+
+  it('formats Markdown profile report with findings and strips raw sample values', () => {
+    const md = formatProfileMarkdownReport({
+      title: 'orders',
+      scopeLabel: 'Sampled · first 5,000 rows',
+      language: 'zh',
+      profile: {
+        rowCount: 5000,
+        columnCount: 2,
+        elapsedMs: 18,
+        columns: [
+          makeColumn({
+            name: 'email|raw',
+            inferredType: 'text',
+            duckdbType: 'VARCHAR',
+            totalCount: 5000,
+            nullCount: 250,
+            nullRatio: 0.05,
+            minLength: 0,
+            maxLength: 40,
+            emptyStringCount: 4,
+            topValues: [{ value: 'secret-user@example.com', count: 10, ratio: 0.002 }]
+          }),
+          makeColumn({
+            name: 'amount',
+            inferredType: 'numeric',
+            duckdbType: 'DOUBLE',
+            totalCount: 5000,
+            min: '-12',
+            max: '9999',
+            p25: 30,
+            p50: 100,
+            p95: 500
+          })
+        ]
+      }
+    });
+    expect(md).toContain('## 数据画像体检报告 · orders');
+    expect(md).toContain('Sampled · first 5,000 rows');
+    expect(md).toContain('`amount`: 存在负值 (< 0)');
+    expect(md).toContain('`email\\|raw`');
+    expect(md).toContain('空串 4');
+    // 隐私保护：不泄露 topValues 里的具体样本值
+    expect(md).not.toContain('secret-user@example.com');
   });
 });
