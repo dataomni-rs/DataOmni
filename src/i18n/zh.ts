@@ -583,6 +583,8 @@ export const zh = {
   'profile.paddedWhitespaceChip.one': '首尾空格 {count}',
   'profile.copyReport': '复制 Markdown',
   'profile.copiedReport': '已复制报告',
+  'profile.correlationMatrix': '相关性矩阵',
+  'profile.correlationLoading': '计算相关性…',
 
   'chart.title': '快速图表',
   'chart.type.bar': '柱状图',

@@ -20,6 +20,7 @@ import {
   Download,
   FilePlus2,
   FileSpreadsheet,
+  Grid,
   Loader2,
   Play,
   Search,
@@ -40,6 +41,7 @@ import { useQueryStore } from '../stores/queryStore';
 import { useThemeStore } from '../stores/themeStore';
 import {
   ANALYTICS_QUERY_LIMIT_OPTIONS,
+  buildCorrelationMatrixSql,
   buildDuplicateCheckTemplate,
   buildExceptDiffTemplate,
   buildGroupByTemplate,
@@ -158,6 +160,8 @@ export function LocalAnalyticsDialog({
     Array<AttachedTableSummary & { label: string }>
   >([]);
   const [attaching, setAttaching] = useState(false);
+  const [corrLoading, setCorrLoading] = useState(false);
+  const [corrResult, setCorrResult] = useState<AnalyticsQueryResult | null>(null);
   const [showChart, setShowChart] = useState(false);
   const [showExport, setShowExport] = useState(false);
 
@@ -269,14 +273,14 @@ export function LocalAnalyticsDialog({
       if (event.defaultPrevented) {
         return;
       }
-      if (event.key === 'Escape' && !isImeKeyEvent(event) && !showChart && !showExport) {
+      if (event.key === 'Escape' && !isImeKeyEvent(event) && !showChart && !showExport && !corrResult) {
         event.preventDefault();
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, showChart, showExport]);
+  }, [onClose, showChart, showExport, corrResult]);
 
   const runSql = useCallback(
     async (targetId: string, statement: string, limit: number) => {
@@ -651,6 +655,39 @@ export function LocalAnalyticsDialog({
     () => filterAndSortProfiles(profile?.columns ?? [], profileSearch, profileSort),
     [profile, profileSearch, profileSort]
   );
+  const correlationSql = useMemo(
+    () => (profile ? buildCorrelationMatrixSql(profile.columns) : null),
+    [profile]
+  );
+
+  const handleOpenCorrelation = useCallback(async () => {
+    const id = sessionIdRef.current;
+    if (!id || !correlationSql || corrLoading) {
+      return;
+    }
+    setCorrLoading(true);
+    setProfileError(null);
+    try {
+      const res = await invoke<AnalyticsQueryResult>('analytics_query', {
+        analyticsId: id,
+        sql: correlationSql,
+        limit: 200,
+        timeoutSeconds: 15
+      });
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrResult(res);
+      }
+    } catch (err) {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setProfileError(describeError(err));
+      }
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrLoading(false);
+      }
+    }
+  }, [correlationSql, corrLoading]);
+
   const hasPresenceInfo = useMemo(
     () => (profile?.columns ?? []).some((col) => col.presentRatio !== undefined),
     [profile]
@@ -1221,6 +1258,25 @@ export function LocalAnalyticsDialog({
                     />
                   </div>
                   <div className="flex items-center gap-2">
+                    {correlationSql && (
+                      <button
+                        type="button"
+                        disabled={corrLoading}
+                        onClick={() => void handleOpenCorrelation()}
+                        className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover disabled:opacity-50"
+                      >
+                        {corrLoading ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Grid size={12} />
+                        )}
+                        <span>
+                          {corrLoading
+                            ? t('profile.correlationLoading')
+                            : t('profile.correlationMatrix')}
+                        </span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {
@@ -1323,6 +1379,15 @@ export function LocalAnalyticsDialog({
           columns={queryResult.columns}
           rows={queryResult.rows}
           onClose={() => setShowChart(false)}
+        />
+      )}
+
+      {corrResult && (
+        <ResultChartDialog
+          columns={corrResult.columns}
+          rows={corrResult.rows}
+          initialChartType="heatmap"
+          onClose={() => setCorrResult(null)}
         />
       )}
 

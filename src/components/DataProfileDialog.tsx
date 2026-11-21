@@ -10,6 +10,7 @@ import {
   Copy,
   Database,
   Filter,
+  Grid,
   Loader2,
   RotateCcw,
   Search,
@@ -17,6 +18,7 @@ import {
 } from 'lucide-react';
 import type {
   AnalyticsColumnInput,
+  AnalyticsQueryResult,
   AnalyticsSessionSummary,
   ColumnProfile,
   ProfileResult
@@ -49,11 +51,13 @@ import {
 import { describeError } from '../utils/describeError';
 import { isImeKeyEvent } from '../utils/shortcuts';
 import type { SqlIdentifierDialect } from '../utils/sqlIdentifiers';
+import { buildCorrelationMatrixSql } from '../utils/analyticsQuery';
 import {
   DEFAULT_TABLE_SAMPLE_SIZE,
   TABLE_SAMPLE_SIZE_OPTIONS
 } from '../utils/tableSampleQuery';
 import { PLAIN_TEXT_INPUT } from './FormControls';
+import { ResultChartDialog } from './ResultChartDialog';
 
 export interface TableSampleResult {
   readonly columns: readonly AnalyticsColumnInput[];
@@ -110,6 +114,8 @@ export function DataProfileDialog({
   const [sortMode, setSortMode] = useState<ProfileSortMode>('order');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [corrLoading, setCorrLoading] = useState(false);
+  const [corrResult, setCorrResult] = useState<AnalyticsQueryResult | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
   const sampleExecutionIdRef = useRef<string | null>(null);
@@ -137,14 +143,17 @@ export function DataProfileDialog({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isImeKeyEvent(event)) {
+      if (event.defaultPrevented) {
+        return;
+      }
+      if (event.key === 'Escape' && !isImeKeyEvent(event) && !corrResult) {
         event.preventDefault();
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [onClose, corrResult]);
 
   useEffect(() => {
     if (scope === 'current' && currentRowCount === 0) {
@@ -292,6 +301,39 @@ export function DataProfileDialog({
     [profile, search, sortMode]
   );
 
+  const correlationSql = useMemo(
+    () => (profile ? buildCorrelationMatrixSql(profile.columns) : null),
+    [profile]
+  );
+
+  const handleOpenCorrelation = useCallback(async () => {
+    const id = sessionIdRef.current;
+    if (!id || !correlationSql || corrLoading) {
+      return;
+    }
+    setCorrLoading(true);
+    setError(null);
+    try {
+      const res = await invoke<AnalyticsQueryResult>('analytics_query', {
+        analyticsId: id,
+        sql: correlationSql,
+        limit: 200,
+        timeoutSeconds: 15
+      });
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrResult(res);
+      }
+    } catch (err) {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setError(describeError(err));
+      }
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === id) {
+        setCorrLoading(false);
+      }
+    }
+  }, [correlationSql, corrLoading]);
+
   const sortOptions = useMemo(
     () => SORT_OPTIONS.filter((mode) => mode !== 'drift' || hasPresenceInfo),
     [hasPresenceInfo]
@@ -415,6 +457,25 @@ export function DataProfileDialog({
                 />
               </div>
               <div className="flex items-center gap-2">
+                {correlationSql && (
+                  <button
+                    type="button"
+                    disabled={corrLoading}
+                    onClick={() => void handleOpenCorrelation()}
+                    className="flex items-center gap-1 rounded-control border border-line-strong bg-surface px-2.5 py-1 text-xs text-fg hover:bg-surface-hover disabled:opacity-50"
+                  >
+                    {corrLoading ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <Grid size={12} />
+                    )}
+                    <span>
+                      {corrLoading
+                        ? t('profile.correlationLoading')
+                        : t('profile.correlationMatrix')}
+                    </span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -544,6 +605,15 @@ export function DataProfileDialog({
           )}
         </div>
       </div>
+
+      {corrResult && (
+        <ResultChartDialog
+          columns={corrResult.columns}
+          rows={corrResult.rows}
+          initialChartType="heatmap"
+          onClose={() => setCorrResult(null)}
+        />
+      )}
     </div>
   );
 }

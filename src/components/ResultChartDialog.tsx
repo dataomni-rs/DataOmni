@@ -68,10 +68,16 @@ interface AggregatedDataset {
 interface ResultChartDialogProps {
   columns: readonly string[];
   rows: ReadonlyArray<readonly SerializedResultValue[]>;
+  initialChartType?: ChartType;
   onClose: () => void;
 }
 
-export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogProps) {
+export function ResultChartDialog({
+  columns,
+  rows,
+  initialChartType,
+  onClose
+}: ResultChartDialogProps) {
   const t = useLanguageStore((state) => state.t);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const mountedRef = useRef(true);
@@ -88,7 +94,7 @@ export function ResultChartDialog({ columns, rows, onClose }: ResultChartDialogP
     };
   }, []);
 
-  const [type, setType] = useState<ChartType>('bar');
+  const [type, setType] = useState<ChartType>(initialChartType ?? 'bar');
   /** null 表示还没动过，用推荐的那一组 */
   const [chosenValues, setChosenValues] = useState<readonly number[] | null>(null);
   const [scatterX, setScatterX] = useState<number | null>(null);

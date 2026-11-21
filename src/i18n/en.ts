@@ -566,6 +566,8 @@ export const en: Translations = {
   'profile.paddedWhitespaceChip.one': '{count} padded space',
   'profile.copyReport': 'Copy Markdown',
   'profile.copiedReport': 'Report copied',
+  'profile.correlationMatrix': 'Correlation matrix',
+  'profile.correlationLoading': 'Correlating…',
 
   'chart.title': 'Quick chart',
   'chart.type.bar': 'Bars',
