@@ -14,8 +14,10 @@ import {
   Loader2,
   RotateCcw,
   Search,
+  Sparkles,
   X
 } from 'lucide-react';
+import type { ConnectionEnvironment } from '../contracts';
 import type {
   AnalyticsColumnInput,
   AnalyticsQueryResult,
@@ -25,6 +27,8 @@ import type {
 } from '../contracts/analytics';
 import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
+import { useSettingsStore } from '../stores/settingsStore';
+import { aiAvailable } from '../utils/aiSettings';
 import {
   buildProfileEmptyStringFilterSql,
   buildProfileFilterSql,
@@ -56,6 +60,7 @@ import {
   DEFAULT_TABLE_SAMPLE_SIZE,
   TABLE_SAMPLE_SIZE_OPTIONS
 } from '../utils/tableSampleQuery';
+import { AiProfileInsightsPanel } from './AiProfileInsightsPanel';
 import { PLAIN_TEXT_INPUT } from './FormControls';
 import { ResultChartDialog } from './ResultChartDialog';
 
@@ -84,6 +89,8 @@ export type DataProfileSource =
 
 interface DataProfileDialogProps {
   source: DataProfileSource;
+  title?: string;
+  environment?: ConnectionEnvironment;
   tableSample?: TableSampleConfig;
   sourceDialect?: SqlIdentifierDialect;
   onApplyTableFilter?: (columnName: string, operator: ProfileTableFilterOperator, value: string) => void;
@@ -94,6 +101,8 @@ const SORT_OPTIONS: readonly ProfileSortMode[] = ['order', 'nulls', 'distinct', 
 
 export function DataProfileDialog({
   source,
+  title,
+  environment = 'development',
   tableSample,
   sourceDialect,
   onApplyTableFilter,
@@ -101,6 +110,9 @@ export function DataProfileDialog({
 }: DataProfileDialogProps) {
   const t = useLanguageStore((state) => state.t);
   const language = useLanguageStore((state) => state.resolved);
+  const aiEnabled = useSettingsStore((state) => state.ai.enabled);
+  const [aiCompiled, setAiCompiled] = useState(false);
+  const [showAiInsights, setShowAiInsights] = useState(false);
   const [scope, setScope] = useState<'current' | 'sample'>('current');
   const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
   const [sampling, setSampling] = useState(false);
@@ -123,6 +135,18 @@ export function DataProfileDialog({
 
   const currentRowCount = source.kind === 'resultSet' ? source.rows.length : source.documents.length;
   const inputRowCount = scope === 'sample' ? sampleSize : currentRowCount;
+
+  useEffect(() => {
+    let active = true;
+    void aiAvailable().then((ok) => {
+      if (active) {
+        setAiCompiled(ok);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -457,6 +481,21 @@ export function DataProfileDialog({
                 />
               </div>
               <div className="flex items-center gap-2">
+                {aiCompiled && aiEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAiInsights((open) => !open)}
+                    className={clsx(
+                      'flex items-center gap-1 rounded-control border px-2.5 py-1 text-xs transition-colors',
+                      showAiInsights
+                        ? 'border-accent bg-accent-soft font-medium text-accent'
+                        : 'border-line-strong bg-surface text-fg hover:bg-surface-hover'
+                    )}
+                  >
+                    <Sparkles size={12} />
+                    <span>{t('profile.aiInsights.button')}</span>
+                  </button>
+                )}
                 {correlationSql && (
                   <button
                     type="button"
@@ -531,6 +570,28 @@ export function DataProfileDialog({
                 setSearch((current) => (current === columnName ? '' : columnName))
               }
             />
+            {showAiInsights && aiCompiled && aiEnabled && (
+              <AiProfileInsightsPanel
+                title={title}
+                dialect={sourceDialect}
+                scopeLabel={
+                  scope === 'sample' && tableSample
+                    ? tableSample.hasActiveFilters
+                      ? t('profile.sampleBadgeFiltered', {
+                          count: profile.rowCount.toLocaleString()
+                        })
+                      : t('profile.sampleBadge', {
+                          count: profile.rowCount.toLocaleString()
+                        })
+                    : t('profile.scopeCurrentPage', {
+                        count: profile.rowCount.toLocaleString()
+                      })
+                }
+                environment={environment}
+                profile={profile}
+                onClose={() => setShowAiInsights(false)}
+              />
+            )}
           </>
         )}
 

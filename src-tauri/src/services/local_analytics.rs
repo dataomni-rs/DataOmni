@@ -2503,22 +2503,32 @@ fn profile_text_column(
        CAST(COALESCE(SUM(CASE WHEN {col} IS NOT NULL AND {col} <> '' AND trim({col}) <> {col} THEN 1 ELSE 0 END), 0) AS BIGINT) \
      FROM result_set"
   );
-  let (null_count, distinct_count, min, max, min_len, max_len, empty_strings, padded_ws): (
-    i64,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<i64>,
-    i64,
-    i64,
-  ) = conn
+  struct TextColumnAgg {
+    null_count: i64,
+    distinct_count: i64,
+    min: Option<String>,
+    max: Option<String>,
+    min_len: Option<i64>,
+    max_len: Option<i64>,
+    empty_strings: i64,
+    padded_ws: i64,
+  }
+  let agg = conn
     .query_row(&sql, [], |r| {
-      Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+      Ok(TextColumnAgg {
+        null_count: r.get(0)?,
+        distinct_count: r.get(1)?,
+        min: r.get(2)?,
+        max: r.get(3)?,
+        min_len: r.get(4)?,
+        max_len: r.get(5)?,
+        empty_strings: r.get(6)?,
+        padded_ws: r.get(7)?,
+      })
     })
     .map_err(duck_error)?;
-  let null_count = null_count.max(0) as u64;
-  let distinct_count = distinct_count.max(0) as u64;
+  let null_count = agg.null_count.max(0) as u64;
+  let distinct_count = agg.distinct_count.max(0) as u64;
   let non_null = total_rows.saturating_sub(null_count);
   let top_values = if non_null > 0 { query_top_values(conn, col, non_null)? } else { Vec::new() };
 
@@ -2535,8 +2545,8 @@ fn profile_text_column(
     present_count,
     present_ratio,
     explicit_null_count,
-    min,
-    max,
+    min: agg.min,
+    max: agg.max,
     mean: None,
     stddev: None,
     p25: None,
@@ -2545,10 +2555,10 @@ fn profile_text_column(
     p95: None,
     bins: Vec::new(),
     time_bins: Vec::new(),
-    min_length: min_len.map(|v| v.max(0) as u64),
-    max_length: max_len.map(|v| v.max(0) as u64),
-    empty_string_count: Some(empty_strings.max(0) as u64),
-    padded_whitespace_count: Some(padded_ws.max(0) as u64),
+    min_length: agg.min_len.map(|v| v.max(0) as u64),
+    max_length: agg.max_len.map(|v| v.max(0) as u64),
+    empty_string_count: Some(agg.empty_strings.max(0) as u64),
+    padded_whitespace_count: Some(agg.padded_ws.max(0) as u64),
     top_values,
   })
 }

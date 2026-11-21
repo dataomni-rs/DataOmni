@@ -24,9 +24,11 @@ import {
   Loader2,
   Play,
   Search,
+  Sparkles,
   Square,
   X
 } from 'lucide-react';
+import type { ConnectionEnvironment } from '../contracts';
 import type {
   AnalyticsColumnInput,
   AnalyticsQueryResult,
@@ -38,7 +40,9 @@ import type {
 import type { SerializedResultValue } from '../contracts/resultSet';
 import { useLanguageStore } from '../stores/languageStore';
 import { useQueryStore } from '../stores/queryStore';
+import { useSettingsStore } from '../stores/settingsStore';
 import { useThemeStore } from '../stores/themeStore';
+import { aiAvailable } from '../utils/aiSettings';
 import {
   ANALYTICS_QUERY_LIMIT_OPTIONS,
   buildCorrelationMatrixSql,
@@ -72,6 +76,7 @@ import {
   DEFAULT_TABLE_SAMPLE_SIZE,
   TABLE_SAMPLE_SIZE_OPTIONS
 } from '../utils/tableSampleQuery';
+import { AiProfileInsightsPanel } from './AiProfileInsightsPanel';
 import {
   ColumnProfileCard,
   ProfileHealthSummaryBar,
@@ -102,6 +107,7 @@ type WorkbenchTab = 'sql' | 'profile';
 
 interface LocalAnalyticsDialogProps {
   source: LocalAnalyticsSource;
+  environment?: ConnectionEnvironment;
   tableSample?: TableSampleConfig;
   sourceDialect?: SqlIdentifierDialect;
   onApplyTableFilter?: (columnName: string, operator: ProfileTableFilterOperator, value: string) => void;
@@ -122,6 +128,7 @@ function formatBytes(bytes: number): string {
 
 export function LocalAnalyticsDialog({
   source,
+  environment = 'development',
   tableSample,
   sourceDialect,
   onApplyTableFilter,
@@ -129,6 +136,9 @@ export function LocalAnalyticsDialog({
 }: LocalAnalyticsDialogProps) {
   const t = useLanguageStore((state) => state.t);
   const language = useLanguageStore((state) => state.resolved);
+  const aiEnabled = useSettingsStore((state) => state.ai.enabled);
+  const [aiCompiled, setAiCompiled] = useState(false);
+  const [showAiInsights, setShowAiInsights] = useState(false);
   const [tab, setTab] = useState<WorkbenchTab>('sql');
   const [scope, setScope] = useState<'current' | 'sample'>('current');
   const [sampleSize, setSampleSize] = useState<number>(DEFAULT_TABLE_SAMPLE_SIZE);
@@ -250,6 +260,18 @@ export function LocalAnalyticsDialog({
       appEditorTheme
     ];
   }, [attachedTables, summary?.columns, t]);
+
+  useEffect(() => {
+    let active = true;
+    void aiAvailable().then((ok) => {
+      if (active) {
+        setAiCompiled(ok);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1258,6 +1280,21 @@ export function LocalAnalyticsDialog({
                     />
                   </div>
                   <div className="flex items-center gap-2">
+                    {aiCompiled && aiEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAiInsights((open) => !open)}
+                        className={clsx(
+                          'flex items-center gap-1 rounded-control border px-2.5 py-1 text-xs transition-colors',
+                          showAiInsights
+                            ? 'border-accent bg-accent-soft font-medium text-accent'
+                            : 'border-line-strong bg-surface text-fg hover:bg-surface-hover'
+                        )}
+                      >
+                        <Sparkles size={12} />
+                        <span>{t('profile.aiInsights.button')}</span>
+                      </button>
+                    )}
                     {correlationSql && (
                       <button
                         type="button"
@@ -1333,6 +1370,26 @@ export function LocalAnalyticsDialog({
                     setProfileSearch((current) => (current === columnName ? '' : columnName))
                   }
                 />
+                {showAiInsights && aiCompiled && aiEnabled && (
+                  <AiProfileInsightsPanel
+                    title={titleLabel}
+                    dialect={sourceDialect}
+                    scopeLabel={
+                      scope === 'sample' && tableSample
+                        ? tableSample.hasActiveFilters
+                          ? t('profile.sampleBadgeFiltered', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                          : t('profile.sampleBadge', {
+                              count: profile.rowCount.toLocaleString()
+                            })
+                        : undefined
+                    }
+                    environment={environment}
+                    profile={profile}
+                    onClose={() => setShowAiInsights(false)}
+                  />
+                )}
               </>
             )}
             <div className="flex-1 overflow-y-auto px-5 py-4">

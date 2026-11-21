@@ -2219,6 +2219,8 @@ export default function TableDataViewer({
       {showProfile && (
         <DataProfileDialog
           source={profileSource}
+          title={tableName}
+          environment={connection.environment}
           tableSample={tableSampleConfig}
           sourceDialect={dialect}
           onApplyTableFilter={(columnName, operator, value) => {
@@ -2240,6 +2242,7 @@ export default function TableDataViewer({
       {showAnalyze && (
         <LocalAnalyticsDialog
           source={analyticsSource}
+          environment={connection.environment}
           tableSample={tableSampleConfig}
           sourceDialect={dialect}
           onApplyTableFilter={(columnName, operator, value) => {
