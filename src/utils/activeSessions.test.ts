@@ -193,6 +193,11 @@ describe('activeSessions', () => {
     expect(buildSessionActionSql(DatabaseType.Oracle, 'cancel', '128,4567')).toBeNull();
     expect(buildSessionActionSql(DatabaseType.Oracle, 'terminate', "128,1'; DROP USER x")).toBeNull();
 
+    expect(buildSessionActionSql(DatabaseType.Dameng, 'terminate', '140123'))
+      .toBe('CALL SP_CLOSE_SESSION(140123)');
+    expect(buildSessionActionSql(DatabaseType.Dameng, 'cancel', '140123')).toBeNull();
+    expect(buildSessionActionSql(DatabaseType.Dameng, 'terminate', '140123; DROP TABLE x')).toBeNull();
+
     expect(buildSessionActionSql(DatabaseType.ClickHouse, 'cancel', 'q-123_abc:1'))
       .toBe("KILL QUERY WHERE query_id = 'q-123_abc:1' SYNC");
     expect(buildSessionActionSql(DatabaseType.ClickHouse, 'terminate', 'q-123')).toBeNull();

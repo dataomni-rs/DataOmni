@@ -15,6 +15,7 @@ export const SUPPORTED_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set([
   DatabaseType.PostgreSQL,
   DatabaseType.SqlServer,
   DatabaseType.Oracle,
+  DatabaseType.Dameng,
   DatabaseType.DuckDB,
   DatabaseType.ClickHouse,
   DatabaseType.MongoDB,
@@ -34,6 +35,7 @@ export const SQLX_DRIVER_FEATURES: Readonly<Record<string, DatabaseType>> = {
 export const STANDALONE_DRIVER_CRATES: Readonly<Record<string, readonly DatabaseType[]>> = {
   tiberius: [DatabaseType.SqlServer],
   oracle: [DatabaseType.Oracle],
+  'odbc-api': [DatabaseType.Dameng],
   duckdb: [DatabaseType.DuckDB],
   mongodb: [DatabaseType.MongoDB],
   redis: [DatabaseType.Redis],
@@ -146,7 +148,9 @@ export type PendingFeature =
  * 执行前后各数一遍（`pendingChanges` 的 ClickHouse 那一段）；查询结果里不开这套，到表数据页改
  */
 export const PENDING_FEATURES: Readonly<Partial<Record<DatabaseType, readonly PendingFeature[]>>> = {
-  [DatabaseType.ClickHouse]: ['resultEditing', 'transactions', 'structureEditing', 'import']
+  [DatabaseType.ClickHouse]: ['resultEditing', 'transactions', 'structureEditing', 'import'],
+  // 达梦 DM8 ODBC `EXPLAIN` 不返回结果集游标（见 rfcs/driver-and-gap-closure.md §2.2），结构可视化改表待后续迭代
+  [DatabaseType.Dameng]: ['explain', 'structureEditing']
 };
 
 /**

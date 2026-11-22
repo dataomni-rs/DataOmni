@@ -51,6 +51,7 @@ const SUPPORTED_TYPES: ReadonlySet<string> = new Set([
   DatabaseType.PostgreSQL,
   DatabaseType.SqlServer,
   DatabaseType.Oracle,
+  DatabaseType.Dameng,
   DatabaseType.ClickHouse
 ]);
 
@@ -142,7 +143,7 @@ export function isActiveSessionState(state: string, dbType: DatabaseType): boole
   if (dbType === DatabaseType.SqlServer) {
     return normalized !== 'sleeping' && normalized !== 'dormant';
   }
-  if (dbType === DatabaseType.Oracle) {
+  if (dbType === DatabaseType.Oracle || dbType === DatabaseType.Dameng) {
     return normalized === 'active';
   }
   return true;
@@ -293,6 +294,9 @@ export function buildSessionActionSql(
     case DatabaseType.Oracle:
       if (action !== 'terminate' || !/^[1-9]\d*,\d+$/.test(trimmed)) return null;
       return `ALTER SYSTEM KILL SESSION '${trimmed}' IMMEDIATE`;
+    case DatabaseType.Dameng:
+      if (action !== 'terminate' || !/^[1-9]\d*$/.test(trimmed)) return null;
+      return `CALL SP_CLOSE_SESSION(${trimmed})`;
     case DatabaseType.ClickHouse:
       if (action !== 'cancel' || trimmed.length > 128 || !/^[A-Za-z0-9._:@/-]+$/.test(trimmed)) {
         return null;

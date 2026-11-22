@@ -48,7 +48,7 @@ const RESERVED_WORDS = new Set(`
 export function sqlIdentifierAsTyped(identifier: string, dialect: SqlIdentifierDialect): string {
   const plain = dialect === 'postgresql'
     ? /^[a-z_][a-z0-9_]*$/
-    : dialect === 'oracle'
+    : dialect === 'oracle' || dialect === 'dameng'
       ? /^[A-Z][A-Z0-9_$#]*$/
       : /^[A-Za-z_][A-Za-z0-9_]*$/;
   return plain.test(identifier) && !RESERVED_WORDS.has(identifier.toLowerCase())
@@ -67,6 +67,7 @@ export function identifierDialectFor(dbType: string): SqlIdentifierDialect {
     dbType === 'mysql'
     || dbType === 'sqlserver'
     || dbType === 'oracle'
+    || dbType === 'dameng'
     || dbType === 'duckdb'
     || dbType === 'clickhouse'
   ) {

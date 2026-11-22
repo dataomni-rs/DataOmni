@@ -106,6 +106,18 @@ const NON_TRANSACTIONAL: Record<SqlDialect, readonly KeywordPrefix[]> = {
     ['PURGE'],
     ['FLASHBACK']
   ],
+  // 达梦 DM8 与 Oracle 同样 DDL 隐式提交
+  dameng: [
+    ['CREATE'],
+    ['ALTER'],
+    ['DROP'],
+    ['TRUNCATE'],
+    ['RENAME'],
+    ['GRANT'],
+    ['REVOKE'],
+    ['COMMENT'],
+    ['ANALYZE']
+  ],
   // ClickHouse 没有通用事务：写什么都是执行即落库，改在「事务里」跑也撤不回来。
   // 列出会写的顶层动词，确认框据此说「事务包不住它」，而不是「改成在事务里跑就能回滚」
   clickhouse: [

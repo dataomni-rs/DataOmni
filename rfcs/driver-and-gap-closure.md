@@ -146,9 +146,9 @@
 
 ## 4. Phase 2–3 概要规划（待外部环境 / 下一阶段）
 
-- **`DC5`（达梦 DM8）**：`DC0-E2` 实测拍板后，置于独立 Cargo feature（`dameng` 或 `odbc`，纳入 `M1` `compiled_drivers`），按 `TODOs.md` 核心验收标准补齐：连接、对象目录、结构元数据、查询执行/取消、分页、导入导出、只读 CLI/MCP、真库冒烟测试与手册。
-- **`DC6`（人大金仓 KingbaseES）**：基于 PG 协议兼容路径，拿到试用镜像/实例后验证握手、系统目录（`pg_catalog` 差异）、执行计划、类型解码、DDL 与真库冒烟，按需做最小方言修补并补齐入口预设。
-- **`DC7`（活跃会话与锁诊断面板）**：为关系库（MySQL / PostgreSQL / SQL Server / Oracle / ClickHouse）提供独立只读会话列表（PID/用户/库/状态/耗时/等待事件/截断 SQL），终止会话强制二次确认（`PROD` 红色警示），严格不做后台持续轮询（按需手动刷新）。
+- **`DC5`（达梦 DM8）**：已按 `DC0-E2` 推荐路线落地为可选 Cargo feature `odbc = ["dep:odbc-api"]`（默认关闭，纳入 `M1` `compiled_drivers` 动态收窄，零闭源驱动随包分发）。后端新增 `services/dameng.rs`（自动初始化临时 `DM_SVC_PATH` `CHAR_CODE=(PG_UTF8)` 根治中文 GBK 乱码、`LongVarchar` 走 `get_wide_text` 规避 DM8 off-row CLOB indicator panic、`Binary` 走 `get_binary`）、全套目录/元数据/补全/ER/会话目标/活跃会话（`V$SESSIONS` + `SP_CLOSE_SESSION`）查询、流式导出、事务批量写入、只读 CLI/MCP 及 `tests/dameng_smoke.rs`；前端接入 `DatabaseType.Dameng`、连接表单可选 ODBC 驱动路径与全方言纯函数。真库实测 `cu` DM8 12 条目录/元数据/会话查询与 60,000 字 off-row CLOB / 含 LOB 参数化查询 / `GET_DDL` / 事务回滚全通。
+- **`DC6`（人大金仓 KingbaseES）**：已完成 V9（PG 模式）42/42 真库冒烟、9 个系统 schema 过滤与前端快捷入口预设（PR `#69`）。
+- **`DC7`（活跃会话与锁诊断面板）**：已完成 MySQL / PostgreSQL / SQL Server / Oracle / ClickHouse / Dameng DM8 统一 10 列投影查询与按需刷新、二次确认终止面板（PR `#70` + `DC5` 扩展）。
 
 ---
 

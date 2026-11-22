@@ -60,6 +60,7 @@ pub fn run() {
     .manage(services::SqlxRegistry::default())
     .manage(services::SqlServerRegistry::default())
     .manage(services::oracle::OracleRegistry::default())
+    .manage(services::dameng::DamengRegistry::default())
     .manage(services::mongodb::MongoRegistry::default())
     .manage(services::redis::RedisRegistry::default())
     .manage(services::redis::RedisAnalysisState::default())
@@ -114,6 +115,8 @@ pub fn run() {
       close_sql_server,
       oracle_select,
       close_oracle,
+      dameng_select,
+      close_dameng,
       duckdb_select,
       close_duckdb,
       clickhouse_select,

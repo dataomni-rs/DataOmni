@@ -2447,5 +2447,14 @@ export const en: Translations = {
   'sessions.result.applied': 'Executed: {statement}',
   'sessions.result.notApplied': 'The server reported no effect (session #{id} may have ended or requires higher privileges)',
   'sessions.empty': 'No database sessions reported',
-  'sessions.emptyFiltered': 'No sessions match the current filter'
+  'sessions.emptyFiltered': 'No sessions match the current filter',
+
+  // Dameng DM8 ODBC connection (DC5)
+  'form.db.dameng.desc': 'Dameng DM8 relational database via official ODBC driver',
+  'form.damengOdbcDriver': 'ODBC driver name or path (optional)',
+  'form.damengOdbcDriverPlaceholder': 'DM8 ODBC DRIVER or /opt/dmdbms/bin/libdodbc.so',
+  'form.damengOdbcDriverHint': 'Bring your own official Dameng ODBC driver; leave blank to use DM8 ODBC DRIVER or DATAOMNI_DM8_ODBC_DRIVER',
+  'error.backend.damengDriverMissing': 'Dameng ODBC driver or unixODBC manager not found: {detail}',
+  'error.backend.damengConnectFailed': 'Dameng DM8 connection failed: {detail}',
+  'error.backend.damengTlsUnsupported': 'Dameng DM8 TLS requires specifying the SSL certificate directory path'
 };

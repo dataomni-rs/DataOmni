@@ -17,7 +17,7 @@ use crate::services::query_executor::{
 };
 use crate::services::ssh_tunnel::{default_known_hosts, TunnelRegistry};
 use crate::services::DEFAULT_QUERY_BATCH_SIZE;
-use crate::services::{clickhouse, duckdb, oracle, sqlx_pool, DbPool, QueryError};
+use crate::services::{clickhouse, dameng, duckdb, oracle, sqlx_pool, DbPool, QueryError};
 use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +41,7 @@ pub(super) fn supports(db_type: &DatabaseType) -> bool {
         | DatabaseType::DuckDB
         | DatabaseType::ClickHouse
         | DatabaseType::Oracle
+        | DatabaseType::Dameng
     )
 }
 
@@ -73,6 +74,8 @@ enum Pool {
   DuckDb(Arc<duckdb::DuckDbPool>),
   #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
   Oracle(Arc<oracle::OraclePool>),
+  #[cfg_attr(not(feature = "odbc"), allow(dead_code))]
+  Dameng(Arc<dameng::DamengPool>),
   ClickHouse(Arc<clickhouse::ClickHousePool>),
 }
 
@@ -145,6 +148,17 @@ async fn connect(
       // DDL 在只读事务里照样执行（§3.1 E3），挡它的是语句门；这里挡的是 DML
       (Pool::Oracle(oracle::OraclePool::new(target, connection)), Some("SET TRANSACTION READ ONLY"))
     }
+    #[cfg(feature = "odbc")]
+    DatabaseType::Dameng => {
+      let reachable = match tunnel_port {
+        Some(port) => profile.redirected_to("127.0.0.1", port),
+        None => profile.clone(),
+      };
+      let target = dameng::DamengTarget::from_profile(&reachable).map_err(Failure::Connect)?;
+      let connection =
+        dameng::connect(&target).await.map_err(|error| Failure::Connect(error.message))?;
+      (Pool::Dameng(dameng::DamengPool::new(target, connection)), Some("SET TRANSACTION READ ONLY"))
+    }
     DatabaseType::ClickHouse => {
       // 不换主机：经隧道的 HTTPS 仍按原来的主机名校验证书（同界面）
       let target = clickhouse::ClickHouseTarget::from_profile(profile, tunnel_port);
@@ -184,6 +198,7 @@ impl Opened {
       Pool::Sqlx(pool) => PoolRef::Sqlx(pool),
       Pool::DuckDb(pool) => PoolRef::DuckDb(pool),
       Pool::Oracle(pool) => PoolRef::Oracle(pool),
+      Pool::Dameng(pool) => PoolRef::Dameng(pool),
       Pool::ClickHouse(pool) => PoolRef::ClickHouse(pool),
     }
   }
@@ -210,6 +225,7 @@ impl Opened {
       }),
       Pool::DuckDb(pool) => pool.select(sql, &params).await.map(objects),
       Pool::Oracle(pool) => pool.select(sql, &params).await.map(objects),
+      Pool::Dameng(pool) => pool.select(sql, &params).await.map(objects),
       Pool::ClickHouse(pool) => pool.select(sql, &params).await.map(objects),
     };
     rows.map_err(Failure::Database)

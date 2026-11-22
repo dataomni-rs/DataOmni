@@ -7,6 +7,7 @@
 //! 表用 `schema` + `name` 两段标识：PostgreSQL 的一个库里可以有
 //! `public.orders` 和 `billing.orders` 两张不同的表，只按名字会把它们画成一个。
 
+use crate::dameng_user_schemas;
 use crate::models::DatabaseType;
 use crate::services::oracle::{oracle_type_name, oracle_user_schemas};
 use crate::services::sql_server::sql_server_type_name;
@@ -50,6 +51,11 @@ pub fn er_diagram_queries(db_type: &DatabaseType) -> Option<ErDiagramQueries> {
     DatabaseType::Oracle => Some(ErDiagramQueries {
       columns: ORACLE_COLUMNS,
       foreign_keys: ORACLE_FOREIGN_KEYS,
+      parameter_count: 0,
+    }),
+    DatabaseType::Dameng => Some(ErDiagramQueries {
+      columns: DAMENG_COLUMNS,
+      foreign_keys: DAMENG_FOREIGN_KEYS,
       parameter_count: 0,
     }),
     DatabaseType::DuckDB => Some(ErDiagramQueries {
@@ -310,6 +316,58 @@ WHERE "#,
   r#"
   AND c.table_name NOT LIKE 'BIN$%'
 ORDER BY c.owner, c.table_name, c.column_id
+"#
+);
+
+const DAMENG_COLUMNS: &str = concat!(
+  r#"
+SELECT
+  c.owner AS "table_schema",
+  c.table_name AS "table_name",
+  c.column_name AS "column_name",
+  c.data_type AS "data_type",
+  CAST(c.column_id AS INTEGER) AS "ordinal",
+  CAST(CASE WHEN pk.column_name IS NULL THEN 0 ELSE 1 END AS INTEGER) AS "is_primary_key",
+  CAST(CASE WHEN c.nullable = 'Y' THEN 1 ELSE 0 END AS INTEGER) AS "is_nullable"
+FROM all_tab_columns c
+JOIN all_tables t ON t.owner = c.owner AND t.table_name = c.table_name
+LEFT JOIN (
+  SELECT cc.owner, cc.table_name, cc.column_name
+  FROM all_constraints k
+  JOIN all_cons_columns cc ON cc.owner = k.owner AND cc.constraint_name = k.constraint_name
+  WHERE k.constraint_type = 'P'
+) pk ON pk.owner = c.owner AND pk.table_name = c.table_name AND pk.column_name = c.column_name
+WHERE "#,
+  dameng_user_schemas!("c.owner"),
+  r#"
+  AND c.table_name NOT LIKE 'SYS_%'
+  AND c.table_name NOT LIKE '##%'
+ORDER BY c.owner, c.table_name, c.column_id
+"#
+);
+
+const DAMENG_FOREIGN_KEYS: &str = concat!(
+  r#"
+SELECT
+  c.owner AS "table_schema",
+  c.table_name AS "table_name",
+  cc.column_name AS "column_name",
+  rc.owner AS "referenced_schema",
+  rc.table_name AS "referenced_table",
+  rcc.column_name AS "referenced_column",
+  c.constraint_name AS "constraint_name",
+  CAST(cc.position AS INTEGER) AS "ordinal"
+FROM all_constraints c
+JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+JOIN all_constraints rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name
+JOIN all_cons_columns rcc
+  ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name
+ AND rcc.position = cc.position
+WHERE c.constraint_type = 'R'
+  AND "#,
+  dameng_user_schemas!("c.owner"),
+  r#"
+ORDER BY c.owner, c.table_name, c.constraint_name, cc.position
 "#
 );
 

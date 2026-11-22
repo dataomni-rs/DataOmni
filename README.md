@@ -65,6 +65,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 | KingbaseES | V9（V009R001C，PG 模式） | PostgreSQL | ✅ 支持 | 42 / 0 / 0（UTF-8 库全量通过，含目录过滤、执行计划、改结构、导入导出与 `pg_dump` 备份） |
 | SQL Server | 2022 | SQL Server | ✅ 支持 | 33 / 0 / 0（独立用例，`sql_server_smoke.rs`，含改结构语料与绑定参数；几条共用测试表，要 `--test-threads=1`） |
 | Oracle | 23ai Free（23.26） | Oracle（ODPI-C + 随包的 Instant Client） | ✅ 支持 | 31 / 1 / 0（独立用例，`oracle_smoke.rs`，含改结构语料、绑定参数与约束索引区分；1 条 ignored 只计时、不做断言） |
+| Dameng DM8 | V8（`0x7000c`） | Dameng DM8（可选 `--features odbc` + 本机官方 `libdodbc`/`dodbc` 驱动） | ⚠️ 可选 feature，BYO 官方驱动（无执行计划与可视化改结构） | 真库实测通过（`dameng_smoke.rs` + 12 条目录/元数据/ER/补全/会话查询全通、60K off-row CLOB 与含 LOB 参数化查询无损；Linux x64 / Windows x64 支持，macOS ARM64 暂缺官方 ODBC 驱动） |
 | DuckDB | 2.0.0（编进应用） | DuckDB（libduckdb） | ✅ 支持 | 19 / 0 / 0（独立用例，`duckdb_smoke.rs`，每次都跑，含改结构语料） |
 | ClickHouse | 25.8 | ClickHouse（HTTP 接口，reqwest） | ⚠️ 表格一次改一行，没有事务 | 16 / 0 / 0 ＋ 1 / 0 / 0（独立用例，`clickhouse_smoke.rs` 与最重的一条 `clickhouse_mutation_smoke.rs`；经 SSH 隧道那一条未设隧道变量时记为跳过） |
 | MongoDB | 8.0 | MongoDB（官方 Rust 驱动） | ⚠️ 文档级，有缺口 | 34 / 0 / 0（独立用例，`mongodb_smoke.rs`；未设 SRV / 客户端证书变量时对应 7 条记为跳过） |
@@ -96,6 +97,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   只存 sha256（`password_encryption_type = 2`，openGauss 默认）或国密 SM3（`password_encryption_type = 3`）口令的用户都连得上：标准 PostgreSQL 驱动不认这两类认证，应用在本机开一个只给这条连接用的转发口代为登录，TLS 照连接里的设置。序列的属性页查序列关系本身（它没有 `pg_sequences`，也就没有数据类型那一项）。
   缺口：违反约束时不给约束名与表名（服务端不填那两个字段）。
 - **KingbaseES**（人大金仓 V9）：初始化时选 PostgreSQL 兼容模式（`DB_MODE=pg`，建库建议使用 UTF-8 编码，默认端口 54321，连接表单提供 KingbaseES 快捷入口）。内置的 `sys_catalog`、`sysmac`、`sysaudit`、`sys_hm`、`anon`、`src_restrict`、`perf`、`xlog_record_read` 与 `pg_bitmapindex` 系统 schema 会自动从对象树、补全目录、ER 图与结构比对中过滤。
+- **Dameng DM8**（达梦 V8）：通过可选 Cargo feature `odbc`（默认关闭，不引入系统 `unixODBC` 强制链接、不随包分发闭源动态库）对接用户本机安装的达梦官方 ODBC 驱动（Linux `/opt/dmdbms/bin/libdodbc.so` 或 Windows `DM8 ODBC DRIVER`；可在连接表单填写驱动路径/名称或设置 `DATAOMNI_DM8_ODBC_DRIVER`）。开启 `--features odbc` 构建后前端自动展示达梦入口；内置自动临时 `dm_svc.conf`（`CHAR_CODE=(PG_UTF8)`）防中文乱码、宽字符读取超长 CLOB 与系统模式过滤。缺口：ODBC `EXPLAIN` 不返回结果集游标、可视化改结构暂未开放，macOS ARM64 暂缺达梦官方原生 ODBC 驱动。
 - **CockroachDB 的缺口**：错误里没有出错位置和表名。结构页的触发器它的目录表里查不到，
   改用 `SHOW TRIGGERS` / `SHOW CREATE TRIGGER` 读（24.3 之前的版本没有触发器，那一段说「列不出」）。执行计划
   解析的是它的 `EXPLAIN (VERBOSE)` 文本树，「真的执行一遍」走 `EXPLAIN ANALYZE`。

@@ -83,7 +83,7 @@ export function transactionStatement(command: TransactionCommand, dialect: SqlDi
   }
   // Oracle 没有 BEGIN（那是 PL/SQL 块的开头）；`SET TRANSACTION` 开一个事务，
   // 服务端随即报得出事务号
-  if (dialect === 'oracle') {
+  if (dialect === 'oracle' || dialect === 'dameng') {
     return 'SET TRANSACTION READ WRITE';
   }
   return dialect === 'sqlserver' ? 'BEGIN TRANSACTION' : command;

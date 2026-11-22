@@ -991,6 +991,7 @@ fn validate_tls_configuration(config: &ConnectionProfile) -> Result<(), String> 
         | DatabaseType::Neo4j
         | DatabaseType::Elasticsearch
         | DatabaseType::ClickHouse
+        | DatabaseType::Dameng
     )
   {
     return Err(TLS_CERTIFICATES_UNSUPPORTED.to_string());
@@ -1005,6 +1006,7 @@ fn validate_tls_configuration(config: &ConnectionProfile) -> Result<(), String> 
         | DatabaseType::Neo4j
         | DatabaseType::Elasticsearch
         | DatabaseType::ClickHouse
+        | DatabaseType::Dameng
     )
   {
     return Err(TLS_CERTIFICATES_UNSUPPORTED.to_string());
@@ -2131,7 +2133,7 @@ mod tests {
     let mut entries = sample_entries();
     let mut newer_type = entries[0].clone();
     newer_type["id"] = "f0000000-0000-4000-8000-000000000001".into();
-    newer_type["db_type"] = "dameng".into();
+    newer_type["db_type"] = "future_db".into();
     let mut newer_environment = entries[1].clone();
     newer_environment["id"] = "f0000000-0000-4000-8000-000000000002".into();
     newer_environment["environment"] = "qa".into();

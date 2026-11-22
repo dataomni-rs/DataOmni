@@ -17,7 +17,7 @@ export const QUERY_EXECUTION_STATUSES = [
 
 export type QueryExecutionStatus = (typeof QUERY_EXECUTION_STATUSES)[number];
 
-export type SqlDialect = 'mysql' | 'postgresql' | 'sqlite' | 'sqlserver' | 'oracle' | 'duckdb' | 'clickhouse';
+export type SqlDialect = 'mysql' | 'postgresql' | 'sqlite' | 'sqlserver' | 'oracle' | 'dameng' | 'duckdb' | 'clickhouse';
 
 /**
  * 按方言选语法的 `switch` 收尾用：漏了一种方言就编译不过。

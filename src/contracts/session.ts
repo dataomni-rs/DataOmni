@@ -33,6 +33,7 @@ export function createDatabaseSession(
     DatabaseType.SQLite,
     DatabaseType.SqlServer,
     DatabaseType.Oracle,
+    DatabaseType.Dameng,
     DatabaseType.DuckDB,
     DatabaseType.ClickHouse
   ].includes(profile.db_type);
@@ -49,6 +50,7 @@ export function createDatabaseSession(
         || profile.db_type === DatabaseType.PostgreSQL
         || profile.db_type === DatabaseType.SqlServer
         || profile.db_type === DatabaseType.Oracle
+        || profile.db_type === DatabaseType.Dameng
         || profile.db_type === DatabaseType.DuckDB
         || profile.db_type === DatabaseType.ClickHouse,
       transactions: has('transactions'),

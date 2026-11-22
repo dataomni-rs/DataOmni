@@ -152,6 +152,13 @@ const databaseTypes: ReadonlyArray<{
     descriptionKey: 'form.db.oracle.desc'
   },
   {
+    type: DatabaseType.Dameng,
+    name: 'Dameng DM8',
+    icon: <Database size={16} />,
+    categoryKey: 'form.category.relational',
+    descriptionKey: 'form.db.dameng.desc'
+  },
+  {
     type: DatabaseType.MongoDB,
     name: 'MongoDB',
     icon: <Globe size={16} />,
@@ -966,6 +973,35 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                   </div>
                 )}
 
+                {formData.db_type === DatabaseType.Dameng && (
+                  <div>
+                    <label htmlFor="dameng-odbc-driver" className="block text-sm font-medium text-fg mb-1">
+                      {t('form.damengOdbcDriver')}
+                    </label>
+                    <input
+                      id="dameng-odbc-driver"
+                      type="text"
+                      value={formData.options?.odbcDriver ?? ''}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setFormData((previous) => {
+                          const nextOptions = { ...(previous.options ?? {}) };
+                          if (value.trim()) {
+                            nextOptions.odbcDriver = value;
+                          } else {
+                            delete nextOptions.odbcDriver;
+                          }
+                          return { ...previous, options: nextOptions };
+                        });
+                      }}
+                      placeholder={t('form.damengOdbcDriverPlaceholder')}
+                      className="w-full px-3 py-2 border border-line-strong rounded-control focus:outline-none focus:ring-2 focus:ring-accent"
+                      {...PLAIN_TEXT_INPUT}
+                    />
+                    <p className="text-xs text-fg-muted mt-1">{t('form.damengOdbcDriverHint')}</p>
+                  </div>
+                )}
+
                 {formData.db_type === DatabaseType.Redis && (
                   <div>
                     <label htmlFor="redis-mode" className="block text-sm font-medium text-fg mb-1">
@@ -1060,6 +1096,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                   formData.db_type === DatabaseType.PostgreSQL || 
                   formData.db_type === DatabaseType.SqlServer ||
                   formData.db_type === DatabaseType.Oracle ||
+                  formData.db_type === DatabaseType.Dameng ||
                   formData.db_type === DatabaseType.MongoDB ||
                   formData.db_type === DatabaseType.Neo4j ||
                   formData.db_type === DatabaseType.ClickHouse) && (
@@ -1082,6 +1119,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                         formData.db_type === DatabaseType.PostgreSQL ? "postgres" :
                         formData.db_type === DatabaseType.SqlServer ? "master" :
                         formData.db_type === DatabaseType.Oracle ? (oracleSid ? "ORCL" : ORACLE_DEFAULT_SERVICE) :
+                        formData.db_type === DatabaseType.Dameng ? "SYSDBA" :
                         formData.db_type === DatabaseType.MongoDB ? (srv ? "" : "admin") :
                         formData.db_type === DatabaseType.ClickHouse ? "default" : ""
                       }
@@ -1127,6 +1165,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                   formData.db_type === DatabaseType.PostgreSQL || 
                   formData.db_type === DatabaseType.SqlServer ||
                   formData.db_type === DatabaseType.Oracle ||
+                  formData.db_type === DatabaseType.Dameng ||
                   formData.db_type === DatabaseType.MongoDB ||
                   formData.db_type === DatabaseType.Redis ||
                   formData.db_type === DatabaseType.Neo4j ||

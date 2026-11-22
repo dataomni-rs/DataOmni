@@ -36,6 +36,7 @@ function placeholder(dialect: SqlDialect, position: number): string | null {
     case 'mysql':
     case 'sqlite':
     case 'duckdb':
+    case 'dameng':
       return '?';
     case 'postgresql':
       return `$${position}`;

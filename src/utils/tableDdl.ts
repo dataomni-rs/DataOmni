@@ -1044,6 +1044,7 @@ function defaultSchemaName(dialect: SqlIdentifierDialect, username?: string | nu
     case 'duckdb':
       return 'main';
     case 'oracle':
+    case 'dameng':
       return username ? username.toUpperCase() : null;
     // 这几家没有「库里的 schema」这一层（库就是 schema），列表里第一个就是
     case 'mysql':

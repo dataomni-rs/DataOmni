@@ -118,6 +118,7 @@ const DATABASE_NAMES: Readonly<Record<DatabaseType, string>> = {
   [DatabaseType.SQLite]: 'SQLite',
   [DatabaseType.SqlServer]: 'SQL Server',
   [DatabaseType.Oracle]: 'Oracle',
+  [DatabaseType.Dameng]: 'Dameng DM8',
   [DatabaseType.MongoDB]: 'MongoDB',
   [DatabaseType.Redis]: 'Redis',
   [DatabaseType.Neo4j]: 'Neo4j',

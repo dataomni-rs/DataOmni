@@ -36,6 +36,7 @@ pub enum SqlDialect {
   Sqlite,
   Sqlserver,
   Oracle,
+  Dameng,
   Duckdb,
   Clickhouse,
 }
@@ -434,7 +435,8 @@ pub fn json_field(value: &JsonValue) -> JsonValue {
 /// 与前端 `sqlLiteral` 一一对应。日期时间写成字符串由数据库隐式转换，只有 Oracle
 /// 按会话的 NLS_DATE_FORMAT 解析字符串，所以写成 ANSI 的 `DATE '…'` / `TIMESTAMP '…'`
 pub fn sql_literal(value: &JsonValue, dialect: SqlDialect) -> String {
-  let numeric_boolean = matches!(dialect, SqlDialect::Sqlserver | SqlDialect::Oracle);
+  let numeric_boolean =
+    matches!(dialect, SqlDialect::Sqlserver | SqlDialect::Oracle | SqlDialect::Dameng);
   match tagged_parts(value) {
     None => match value {
       JsonValue::Null => "NULL".to_string(),
@@ -452,8 +454,12 @@ pub fn sql_literal(value: &JsonValue, dialect: SqlDialect) -> String {
     // PostgreSQL numeric 的 NaN、±Infinity 不加引号就成了列名
     Some(("bigint" | "decimal", text)) if is_number_text(text) => text.to_string(),
     Some(("binary", hex)) => binary_literal(hex, dialect),
-    Some(("date", text)) if dialect == SqlDialect::Oracle => format!("DATE '{text}'"),
-    Some(("datetime", text)) if dialect == SqlDialect::Oracle => format!("TIMESTAMP '{text}'"),
+    Some(("date", text)) if matches!(dialect, SqlDialect::Oracle | SqlDialect::Dameng) => {
+      format!("DATE '{text}'")
+    }
+    Some(("datetime", text)) if matches!(dialect, SqlDialect::Oracle | SqlDialect::Dameng) => {
+      format!("TIMESTAMP '{text}'")
+    }
     Some((_, text)) => text_literal(text, dialect),
   }
 }
@@ -465,7 +471,9 @@ const ORACLE_LITERAL_BYTES: usize = 4000;
 
 /// 与前端 `textLiteral` 一致
 fn text_literal(text: &str, dialect: SqlDialect) -> String {
-  if dialect != SqlDialect::Oracle || text.len() <= ORACLE_LITERAL_BYTES {
+  if !matches!(dialect, SqlDialect::Oracle | SqlDialect::Dameng)
+    || text.len() <= ORACLE_LITERAL_BYTES
+  {
     return string_literal(text, dialect);
   }
   let mut pieces = Vec::new();
@@ -521,7 +529,7 @@ fn binary_literal(hex: &str, dialect: SqlDialect) -> String {
   let normalized = normalized.to_lowercase();
   match dialect {
     SqlDialect::Sqlserver => format!("0x{normalized}"),
-    SqlDialect::Oracle => format!("HEXTORAW('{normalized}')"),
+    SqlDialect::Oracle | SqlDialect::Dameng => format!("HEXTORAW('{normalized}')"),
     SqlDialect::Duckdb => format!("from_hex('{normalized}')"),
     SqlDialect::Postgresql => format!("'\\x{normalized}'::bytea"),
     _ => format!("X'{normalized}'"),

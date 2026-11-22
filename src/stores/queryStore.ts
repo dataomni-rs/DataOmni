@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import {
   openDatabase,
   ORACLE_SCHEME,
+  DAMENG_SCHEME,
   DUCKDB_SCHEME,
   CLICKHOUSE_SCHEME,
   SQL_SERVER_SCHEME,
@@ -209,6 +210,9 @@ const getSqlDialect = (connectionString: string | null): SqlDialect => {
   }
   if (connectionString?.startsWith(ORACLE_SCHEME)) {
     return 'oracle';
+  }
+  if (connectionString?.startsWith(DAMENG_SCHEME)) {
+    return 'dameng';
   }
   if (connectionString?.startsWith(DUCKDB_SCHEME)) {
     return 'duckdb';

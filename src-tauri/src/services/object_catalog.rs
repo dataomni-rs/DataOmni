@@ -72,6 +72,14 @@ pub fn object_catalog_queries(db_type: &DatabaseType) -> Option<ObjectCatalogQue
       object_parameter_count: 0,
       routine_parameter_count: 1,
     }),
+    DatabaseType::Dameng => Some(ObjectCatalogQueries {
+      objects: DAMENG_OBJECTS,
+      routine_definition: DAMENG_ROUTINE_DEFINITION,
+      sequence_properties: Some(DAMENG_SEQUENCE_PROPERTIES),
+      sequence_properties_by_relation: None,
+      object_parameter_count: 0,
+      routine_parameter_count: 1,
+    }),
     DatabaseType::DuckDB => Some(ObjectCatalogQueries {
       objects: DUCKDB_OBJECTS,
       routine_definition: DUCKDB_ROUTINE_DEFINITION,
@@ -337,6 +345,64 @@ SELECT
   TO_CHAR(s.last_number) AS "last_value"
 FROM all_sequences s
 WHERE s.sequence_owner || '.' || s.sequence_name = :1
+"#;
+
+/// 达梦 DM8 不进对象树的内置系统模式
+#[macro_export]
+macro_rules! dameng_user_schemas {
+  ($owner:expr) => {
+    concat!(
+      $owner,
+      " NOT IN ('SYS', 'CTISYS', 'SYSAUDITOR', 'SYSSSO', 'SYSGEO', 'SYSGEO2', 'SYSJOB')"
+    )
+  };
+}
+
+const DAMENG_OBJECTS: &str = concat!(
+  r#"
+SELECT
+  o.owner AS "object_schema",
+  o.object_name AS "object_name",
+  CASE o.object_type
+    WHEN 'TABLE' THEN 'table'
+    WHEN 'VIEW' THEN 'view'
+    WHEN 'PROCEDURE' THEN 'procedure'
+    WHEN 'FUNCTION' THEN 'function'
+    WHEN 'PACKAGE' THEN 'function'
+    WHEN 'SEQUENCE' THEN 'sequence'
+  END AS "object_kind",
+  o.owner || '.' || o.object_name AS "object_id"
+FROM all_objects o
+WHERE "#,
+  dameng_user_schemas!("o.owner"),
+  r#"
+  AND o.object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'SEQUENCE')
+  AND o.object_name NOT LIKE 'SYS_%'
+  AND o.object_name NOT LIKE 'CTI$%'
+  AND o.object_name NOT LIKE '##%'
+ORDER BY 1, 3, 2
+"#
+);
+
+const DAMENG_ROUTINE_DEFINITION: &str = r#"
+SELECT DBMS_METADATA.GET_DDL(o.object_type, o.object_name, o.owner) AS "definition"
+FROM all_objects o
+WHERE o.owner || '.' || o.object_name = ?
+  AND o.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+"#;
+
+const DAMENG_SEQUENCE_PROPERTIES: &str = r#"
+SELECT
+  CAST(NULL AS VARCHAR(1)) AS "start_value",
+  TO_CHAR(s.increment_by) AS "increment_by",
+  TO_CHAR(s.min_value) AS "min_value",
+  TO_CHAR(s.max_value) AS "max_value",
+  TO_CHAR(s.cache_size) AS "cache_size",
+  CASE WHEN s.cycle_flag = 'Y' THEN 'true' ELSE 'false' END AS "cycles",
+  'BIGINT' AS "data_type",
+  TO_CHAR(s.last_number) AS "last_value"
+FROM all_sequences s
+WHERE s.sequence_owner || '.' || s.sequence_name = ?
 "#;
 
 /// DuckDB：表、视图、序列与宏（`CREATE MACRO`，它唯一的「用户函数」）。只看当前库，

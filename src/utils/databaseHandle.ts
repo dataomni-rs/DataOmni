@@ -17,6 +17,8 @@ export interface DatabaseHandle {
 export const SQL_SERVER_SCHEME = 'sqlserver://';
 /** 与后端 `ORACLE_SCHEME` 一致 */
 export const ORACLE_SCHEME = 'oracle://';
+/** 与后端 `DAMENG_SCHEME` 一致 */
+export const DAMENG_SCHEME = 'dameng://';
 /** 与后端 `DUCKDB_SCHEME` 一致：后面跟的是文件路径 */
 export const DUCKDB_SCHEME = 'duckdb:';
 /** 与后端 `MONGODB_SCHEME` 一致 */
@@ -45,6 +47,9 @@ export async function openDatabase(connectionString: string): Promise<DatabaseHa
   }
   if (connectionString.startsWith(ORACLE_SCHEME)) {
     return backendHandle(connectionString, 'oracle_select', 'close_oracle');
+  }
+  if (connectionString.startsWith(DAMENG_SCHEME)) {
+    return backendHandle(connectionString, 'dameng_select', 'close_dameng');
   }
   if (connectionString.startsWith(DUCKDB_SCHEME)) {
     return backendHandle(connectionString, 'duckdb_select', 'close_duckdb');
@@ -91,7 +96,7 @@ export async function openDatabase(connectionString: string): Promise<DatabaseHa
  */
 function poolRegisteredByTestConnection(connectionString: string): boolean {
   return [
-    SQL_SERVER_SCHEME, ORACLE_SCHEME, DUCKDB_SCHEME, CLICKHOUSE_SCHEME, MONGODB_SCHEME,
+    SQL_SERVER_SCHEME, ORACLE_SCHEME, DAMENG_SCHEME, DUCKDB_SCHEME, CLICKHOUSE_SCHEME, MONGODB_SCHEME,
     MONGODB_SRV_SCHEME, REDIS_SCHEME, NEO4J_SCHEME, ELASTICSEARCH_SCHEME
   ].some((scheme) => connectionString.startsWith(scheme));
 }

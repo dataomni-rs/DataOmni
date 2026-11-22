@@ -8,6 +8,7 @@ pub mod connection_probe;
 pub mod connection_semantics;
 pub mod connection_service;
 pub mod csv_import;
+pub mod dameng;
 pub mod duckdb;
 pub mod elasticsearch;
 pub mod er_diagram;

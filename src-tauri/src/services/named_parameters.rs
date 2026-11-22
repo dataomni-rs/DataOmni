@@ -57,7 +57,10 @@ enum LexerState {
 }
 
 fn nests_block_comments(dialect: &DatabaseType) -> bool {
-  !matches!(dialect, DatabaseType::MySQL | DatabaseType::SQLite | DatabaseType::Oracle)
+  !matches!(
+    dialect,
+    DatabaseType::MySQL | DatabaseType::SQLite | DatabaseType::Oracle | DatabaseType::Dameng
+  )
 }
 
 fn is_identifier_word_byte(byte: u8) -> bool {
@@ -344,7 +347,9 @@ pub fn scan_parameters(sql: &str, dialect: &DatabaseType) -> Vec<NamedParameter>
 
 fn placeholder_for(dialect: &DatabaseType, position: usize) -> Option<String> {
   match dialect {
-    DatabaseType::MySQL | DatabaseType::SQLite | DatabaseType::DuckDB => Some("?".to_string()),
+    DatabaseType::MySQL | DatabaseType::SQLite | DatabaseType::DuckDB | DatabaseType::Dameng => {
+      Some("?".to_string())
+    }
     DatabaseType::PostgreSQL => Some(format!("${position}")),
     DatabaseType::SqlServer => Some(format!("@P{position}")),
     DatabaseType::Oracle => Some(format!(":{position}")),

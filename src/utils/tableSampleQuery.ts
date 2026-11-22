@@ -65,6 +65,7 @@ export function buildTableSampleQuery(request: TableSampleQueryRequest): string 
     case 'sqlite':
     case 'duckdb':
     case 'clickhouse':
+    case 'dameng':
       return [`SELECT ${selectCols}`, `FROM ${tableReference}`, whereClause, `LIMIT ${safeLimit}`]
         .filter((part) => part.trim().length > 0)
         .join(' ');
