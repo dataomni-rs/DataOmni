@@ -41,7 +41,8 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 | TiDB | 8.5 | MySQL | ✅ Supported |
 | OceanBase | 4.4.2 CE, MySQL mode | MySQL | ⚠️ Usable, with gaps |
 | CockroachDB | 25.2 | PostgreSQL | ⚠️ Usable, with gaps |
-| openGauss | 5.0.3 | PostgreSQL | ⚠️ Usable, with gaps (sha256-password users supported) |
+| openGauss | 5.0.3 | PostgreSQL | ⚠️ Usable, with gaps (sha256 & SM3 password users supported) |
+| KingbaseES | V9 (PG mode) | PostgreSQL | ✅ Supported |
 | SQL Server | 2022 | SQL Server | ✅ Supported |
 | Oracle | 23ai Free | Oracle (Instant Client bundled) | ✅ Supported (service name or SID; TLS needs a wallet and is not supported, use an SSH tunnel) |
 | DuckDB | 2.0.0, built in | DuckDB | ✅ Supported |

@@ -98,15 +98,18 @@ pub fn object_catalog_queries(db_type: &DatabaseType) -> Option<ObjectCatalogQue
 /// 对象树里多出 91 张系统表、20 个视图和 133 个内建函数，内建函数的参数签名还是 NULL，整行名字跟着
 /// 成了 NULL。这两个名字在 PostgreSQL 上不存在（`pg_` 前缀是保留的），排了等于没排。
 ///
-/// openGauss 自带的十个 schema（`db4ai`、`dbe_perf` 等）按名字**并且** OID 小于 16384 排：
-/// 名字是普通的词，PostgreSQL 上用户完全可能建一个叫 `snapshot` 的 schema，而用户建的对象
-/// OID 从 16384（FirstNormalObjectId）起。不能只看 OID：CockroachDB 的用户 schema OID 是
-/// 一百出头的小数。
+/// openGauss 自带的十个 schema（`db4ai`、`dbe_perf` 等）与 KingbaseES 自带的八个非 `pg_`
+/// 系统 schema（`sys_catalog`、`sysmac`、`sysaudit` 等，含 170+ 系统关系与 460+ 内建函数）
+/// 按名字**并且** OID 小于 16384 排：名字是普通的词，PostgreSQL 上用户完全可能建一个叫
+/// `snapshot` 或 `perf` 的 schema，而用户建的对象 OID 从 16384（FirstNormalObjectId）起。
+/// 不能只看 OID：CockroachDB 的用户 schema OID 是一百出头的小数。
+/// KingbaseES 的 `pg_bitmapindex` 带保留前缀 `pg_`，直接放进静态排除表。
 macro_rules! postgres_hidden_schemas {
   () => {
-    "  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'crdb_internal', 'pg_extension')
+    "  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'crdb_internal', 'pg_extension', 'pg_bitmapindex')
   AND NOT (n.oid < 16384 AND n.nspname IN ('cstore', 'pkg_service', 'dbe_perf', 'snapshot', 'blockchain',
-    'db4ai', 'dbe_pldebugger', 'dbe_pldeveloper', 'sqladvisor', 'dbe_sql_util'))
+    'db4ai', 'dbe_pldebugger', 'dbe_pldeveloper', 'sqladvisor', 'dbe_sql_util',
+    'sys_catalog', 'sysaudit', 'src_restrict', 'sysmac', 'anon', 'sys_hm', 'perf', 'xlog_record_read'))
 "
   };
 }

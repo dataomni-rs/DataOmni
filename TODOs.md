@@ -80,8 +80,8 @@
 - [x] M1 数据库驱动按 Cargo feature 解耦（承接 `B4`）（`0f64974`）
   - 已将 `oracle`（ODPI-C 动态库驱动）拆为默认开启的 Cargo feature（`default = ["ai", "oracle"]`），关闭时不编译链接 `oracle` crate 且不注入 Linux `instantclient` `DT_RPATH`；`DatabaseType` 枚举保持完整以无损读写跨版本 `connections.json`，未编入时以零尺寸空枚举封闭池类型并在 `resolve_for_connection` 与 CLI/MCP 返回 `DATAOMNI_UNSUPPORTED_DATABASE`；新增 `compiled_drivers` 供 `ConnectionForm` 动态隐藏未编译驱动（编辑旧配置保留只读显示），CI 新增 `--no-default-features` 单测门禁（默认 455 条、无默认特性 443 条、前端 193 文件 2331 条全绿）。
 - [ ] M2 国产与更多数据库按安装包接入（承接 `E4` / `B1b`）
-  - [!] KingbaseES（人大金仓）：当前阻塞于缺试用安装包/镜像；拿到镜像后补齐连接、目录元数据、分页、导入导出与真库冒烟门禁。
-  - [ ] 达梦（DM8）：有明确接入诉求时基于 `M1` feature 隔离落地。
+  - [x] KingbaseES（人大金仓）：已随 `DC6` 完成 V9（`V009R001C`，PG 模式）全量 42/42 真库冒烟、系统 schema 过滤、连接表单快捷入口与文档更新。
+  - [ ] 达梦（DM8）：见下方 `DC0-E2` 实测结论与 `DC5`（待拍板可选 `odbc` Cargo feature 路线后落地）。
 - [ ] M3 Mac App Store（MAS）沙盒构建变体（可选上架渠道，前置 `U2` + `M1`）
   - 决定上架 MAS 时先写 `rfcs/mac-app-store.md`：基于关闭内置 `oracle` 的 feature 变体，补齐 `Entitlements.mas.plist` / `Entitlements.mas.inherit.plist`（`app-sandbox`、`network.client`、`network.server`、`files.user-selected.read-write`）与 `ITSAppUsesNonExemptEncryption = false`；为 SQLite（含同目录伴生文件权限）、DuckDB、SSH 私钥与 TLS 证书实现 macOS Security-Scoped Bookmarks 跨重启持久化，沙盒下将 `known_hosts` 迁入应用容器目录，并提供一键打开的内置示例 SQLite 库供审核体验。
 
@@ -197,7 +197,7 @@
 ### Phase 2（P1，依赖外部实验环境，承接 `M2` / `B1b`）
 
 - [!] DC5 达梦 DM8 完整接入（`DC0-E2` 实测推荐走 `M1` 可选 `odbc` Cargo feature + BYO 官方驱动路线，待确认是否拍板该路线并做 `odbc-api` + `libdodbc.so` 实测后进入实现）
-- [!] DC6 人大金仓 KingbaseES（PG 模式）完整接入（`cu` 上实测公开社区镜像 `xuxuclassmate/kingbase` 内置 2020 `license.dat` 已过期 `FATAL: XX000: License file expired.`；待提供官网新申请的 90 天开发试用 `license.dat` 或 V8R6/V9 试用包上传至 `cu` 后即可立刻启动实测）
+- [x] DC6 人大金仓 KingbaseES（PG 模式）完整接入（`cu` 上 `if010/kingbase:v009r001c001b0025` `DB_MODE=pg` 真库实测 DataOmni 全量 42 条 PostgreSQL 冒烟 UTF-8 库 42/42 全通含目录/执行计划/改结构/绑定参数/导入导出/`pg_dump` 备份；`object_catalog.rs` `postgres_hidden_schemas!()` 补齐 9 个 KingbaseES 内置系统 schema 过滤并由 `database_smoke.rs` 先红后绿钉住，前端新增 `KingbaseES` 快捷预设与 DBeaver 导入映射，同步更新 `README.md` / `README.en.md` 兼容性矩阵）
 
 ### Phase 3（可选单机运维补强）
 

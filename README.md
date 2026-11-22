@@ -48,7 +48,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 不是按协议兼容推断的。2026-10-16 全部重跑过一遍。用例里有几条按服务端版本跳过（比如服务端没有夹具要的类型），
 跳过的也计入通过。「中止的语句在服务端也停下」「事务中途被服务端断开后恢复」这两条，几个库并发跑时偶尔超时，
 单独跑都过。
-连接表单里 MariaDB、TiDB、CockroachDB 各有一个入口，填好各自的默认端口；存下来
+连接表单里 MariaDB、TiDB、CockroachDB、KingbaseES 各有一个入口，填好各自的默认端口；存下来
 的就是 MySQL / PostgreSQL 连接。
 
 | 服务端 | 版本 | 连接类型 | 结论 | 用例（通过 / 跳过 / 失败） |
@@ -61,7 +61,8 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 | TiDB | 8.5 | MySQL | ✅ 支持 | 40 / 0 / 2（挂的两条：夹具用了 TiDB 没有的 `HANDLER` 语句） |
 | OceanBase | 4.4.2（CE，MySQL 模式） | MySQL | ⚠️ 可用，有缺口 | 39 / 0 / 3（缺口由用例钉住；挂的三条是夹具：`HANDLER` 它收下却不返回行，两条；它不按 `wait_timeout` 断开连接，一条） |
 | CockroachDB | 25.2 | PostgreSQL | ⚠️ 可用，有缺口 | 39 / 0 / 0（缺口由用例钉住） |
-| openGauss | 5.0.3（lite，PG 兼容库） | PostgreSQL | ⚠️ 可用，有缺口 | 39 / 0 / 0 ＋ sha256 专用 1 / 0 / 0（缺口由用例钉住） |
+| openGauss | 5.0.3（lite，PG 兼容库） | PostgreSQL | ⚠️ 可用，有缺口 | 39 / 0 / 0 ＋ sha256 / SM3 专用 2 / 0 / 0（缺口由用例钉住） |
+| KingbaseES | V9（V009R001C，PG 模式） | PostgreSQL | ✅ 支持 | 42 / 0 / 0（UTF-8 库全量通过，含目录过滤、执行计划、改结构、导入导出与 `pg_dump` 备份） |
 | SQL Server | 2022 | SQL Server | ✅ 支持 | 33 / 0 / 0（独立用例，`sql_server_smoke.rs`，含改结构语料与绑定参数；几条共用测试表，要 `--test-threads=1`） |
 | Oracle | 23ai Free（23.26） | Oracle（ODPI-C + 随包的 Instant Client） | ✅ 支持 | 31 / 1 / 0（独立用例，`oracle_smoke.rs`，含改结构语料、绑定参数与约束索引区分；1 条 ignored 只计时、不做断言） |
 | DuckDB | 2.0.0（编进应用） | DuckDB（libduckdb） | ✅ 支持 | 19 / 0 / 0（独立用例，`duckdb_smoke.rs`，每次都跑，含改结构语料） |
@@ -92,9 +93,9 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   预览里看得见，动这种列前先核对。备份用 `mysqldump` 或 `mariadb-dump` 都行；恢复要用 MariaDB 的
   `mariadb` 客户端——mysql 命令行客户端（Homebrew 的 26.7）对它的每一条非查询语句都报 `Malformed packet`。
 - **openGauss**（GaussDB 同源）：建库时要 `DBCOMPATIBILITY 'PG'`（默认的 `'A'` 是 Oracle 语义，没测过）。
-  只存 sha256 口令的用户（`password_encryption_type = 2`，openGauss 的默认）也连得上：标准 PostgreSQL 驱动不认
-  它的 sha256 认证，应用在本机开一个只给这条连接用的转发口代为登录，TLS 照连接里的设置。序列的属性页查序列关系本身（它没有 `pg_sequences`，也就没有数据类型那一项）。
+  只存 sha256（`password_encryption_type = 2`，openGauss 默认）或国密 SM3（`password_encryption_type = 3`）口令的用户都连得上：标准 PostgreSQL 驱动不认这两类认证，应用在本机开一个只给这条连接用的转发口代为登录，TLS 照连接里的设置。序列的属性页查序列关系本身（它没有 `pg_sequences`，也就没有数据类型那一项）。
   缺口：违反约束时不给约束名与表名（服务端不填那两个字段）。
+- **KingbaseES**（人大金仓 V9）：初始化时选 PostgreSQL 兼容模式（`DB_MODE=pg`，建库建议使用 UTF-8 编码，默认端口 54321，连接表单提供 KingbaseES 快捷入口）。内置的 `sys_catalog`、`sysmac`、`sysaudit`、`sys_hm`、`anon`、`src_restrict`、`perf`、`xlog_record_read` 与 `pg_bitmapindex` 系统 schema 会自动从对象树、补全目录、ER 图与结构比对中过滤。
 - **CockroachDB 的缺口**：错误里没有出错位置和表名。结构页的触发器它的目录表里查不到，
   改用 `SHOW TRIGGERS` / `SHOW CREATE TRIGGER` 读（24.3 之前的版本没有触发器，那一段说「列不出」）。执行计划
   解析的是它的 `EXPLAIN (VERBOSE)` 文本树，「真的执行一遍」走 `EXPLAIN ANALYZE`。
