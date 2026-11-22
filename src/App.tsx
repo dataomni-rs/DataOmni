@@ -81,6 +81,8 @@ import { CommandPalette, type PaletteCommand } from './components/CommandPalette
 import { ConnectionImportDialog } from './components/ConnectionImportDialog';
 import { QueryHistoryDialog } from './components/QueryHistoryDialog';
 import { QueryTemplatesDialog } from './components/QueryTemplatesDialog';
+import { ActiveSessionsDialog } from './components/ActiveSessionsDialog';
+import { supportsActiveSessions } from './utils/activeSessions';
 import { useTemplateStore } from './stores/templateStore';
 import { filterQueryTemplates, templateParameterNames } from './utils/queryTemplates';
 import { commitConnectionImport, pickConnectionImportFile } from './utils/connectionTransfer';
@@ -154,7 +156,8 @@ function App() {
     retainClosedTab: state.retainClosedTab,
     reopenLastClosedTab: state.reopenLastClosedTab
   })));
-  const { openDocument, closeDocument, setActiveDocument, setSqlInput } = useQueryStore(useShallow((state) => ({
+  const { database, openDocument, closeDocument, setActiveDocument, setSqlInput } = useQueryStore(useShallow((state) => ({
+    database: state.database,
     openDocument: state.openDocument,
     closeDocument: state.closeDocument,
     setActiveDocument: state.setActiveDocument,
@@ -183,6 +186,7 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showActiveSessions, setShowActiveSessions] = useState(false);
   const queryTemplates = useTemplateStore((state) => state.templates);
   const [pendingImport, setPendingImport] = useState<ParsedConnectionImport | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -845,6 +849,15 @@ function App() {
         group: t('palette.group.action'),
         run: () => openErDiagramTab()
       },
+      ...(activeConnection && database && supportsActiveSessions(activeConnection.config.db_type)
+        ? [{
+          id: 'action:active-sessions',
+          title: t('sessions.open'),
+          keywords: 'sessions locks processlist pg_stat_activity kill',
+          group: t('palette.group.action'),
+          run: () => setShowActiveSessions(true)
+        }]
+        : []),
       ...(activeConnection && backupSupported(activeConnection.config)
         ? [{
           id: 'action:backup',
@@ -978,6 +991,7 @@ function App() {
           connection={activeConnection.config}
           onDisconnect={() => sessionManager.disconnect()}
           onReconnect={() => sessionManager.manualReconnect(activeConnection.config)}
+          onOpenActiveSessions={() => setShowActiveSessions(true)}
           selectedTable={selectedTable || undefined}
           documentTitle={tabTitle(activeTab, t)}
         />
@@ -1231,6 +1245,14 @@ function App() {
             ? (template) => openSqlTab(template.sql, template.title)
             : undefined}
           onClose={() => setShowTemplates(false)}
+        />
+      )}
+
+      {showActiveSessions && activeConnection && database && supportsActiveSessions(activeConnection.config.db_type) && (
+        <ActiveSessionsDialog
+          connection={activeConnection.config}
+          database={database}
+          onClose={() => setShowActiveSessions(false)}
         />
       )}
 

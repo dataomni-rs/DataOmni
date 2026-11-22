@@ -7386,3 +7386,65 @@ async fn mysql_binds_editor_parameters_by_their_kind() {
 
   run_with_params(connection, "DROP TABLE bp_smoke", vec![]).await.expect("drop");
 }
+
+#[tokio::test]
+async fn postgres_active_sessions_lists_current_and_terminates_peer() {
+  use dataomni_lib::models::DatabaseType;
+  use dataomni_lib::services::{
+    active_sessions_query, execute_session_action, PoolRef, SessionAction,
+  };
+
+  let Some(url) = network_database_url(POSTGRES_URL_ENV) else {
+    return;
+  };
+  let pool =
+    PgPoolOptions::new().max_connections(3).connect(&url).await.expect("connect to Postgres");
+  let query = active_sessions_query(&DatabaseType::PostgreSQL).expect("Postgres sessions query");
+
+  let rows = match sqlx::query(query.sql).fetch_all(&pool).await {
+    Ok(rows) => rows,
+    Err(primary_err) => {
+      let fallback = query
+        .fallback_sql
+        .unwrap_or_else(|| panic!("primary query failed without fallback: {primary_err}"));
+      sqlx::query(fallback).fetch_all(&pool).await.expect("fallback Postgres sessions query")
+    }
+  };
+  assert!(!rows.is_empty(), "应至少返回当前会话");
+  let has_current = rows.iter().any(|row| row.get::<bool, _>("is_current"));
+  assert!(has_current, "活跃会话列表应标出当前连接 (is_current = true)");
+
+  // 另建一条独立连接作为目标，验证非事务终止命令真正生效
+  let victim_pool =
+    PgPoolOptions::new().max_connections(1).connect(&url).await.expect("connect victim");
+  let victim_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    .fetch_one(&victim_pool)
+    .await
+    .expect("read victim pid");
+  let db_pool = DbPool::Postgres(pool);
+  let result = execute_session_action(
+    PoolRef::from(&db_pool),
+    SessionAction::Terminate,
+    &victim_pid.to_string(),
+  )
+  .await
+  .expect("terminate victim backend");
+  assert!(result.applied, "pg_terminate_backend 应返回 true: {result:?}");
+}
+
+#[tokio::test]
+async fn mysql_active_sessions_lists_current_connection() {
+  use dataomni_lib::models::DatabaseType;
+  use dataomni_lib::services::active_sessions_query;
+
+  let Some(url) = network_database_url(MYSQL_URL_ENV) else {
+    return;
+  };
+  let pool =
+    MySqlPoolOptions::new().max_connections(2).connect(&url).await.expect("connect to MySQL");
+  let query = active_sessions_query(&DatabaseType::MySQL).expect("MySQL sessions query");
+  let rows = sqlx::query(query.sql).fetch_all(&pool).await.expect("run MySQL sessions query");
+  assert!(!rows.is_empty(), "应至少返回当前 MySQL 会话");
+  let has_current = rows.iter().any(|row| row.get::<i64, _>("is_current") != 0);
+  assert!(has_current, "MySQL 活跃会话列表应标出当前连接");
+}

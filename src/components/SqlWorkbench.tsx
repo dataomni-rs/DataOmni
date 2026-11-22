@@ -3,6 +3,7 @@ import { firstRowsQuery } from '../utils/tablePagination';
 import React, { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { 
+  Activity,
   Database, 
   Wifi, 
   WifiOff, 
@@ -29,11 +30,13 @@ import {
 import { serverLabel } from '../utils/serverPresets';
 import { isFileDatabase } from '../utils/databaseFiles';
 import { serverAddress } from '../utils/mongoConnection';
+import { supportsActiveSessions } from '../utils/activeSessions';
 
 interface SqlWorkbenchProps {
   connection: ConnectionConfig;
   onDisconnect: () => Promise<void>;
   onReconnect: () => Promise<void>;
+  onOpenActiveSessions?: () => void;
   selectedTable?: { name: string; schema?: string };
   /** 当前标签的标题，透传给编辑器用来给另存出去的 `.sql` 猜文件名 */
   documentTitle?: string;
@@ -79,6 +82,7 @@ export const SqlWorkbench: React.FC<SqlWorkbenchProps> = ({
   connection, 
   onDisconnect,
   onReconnect,
+  onOpenActiveSessions,
   selectedTable,
   documentTitle
 }) => {
@@ -256,6 +260,19 @@ export const SqlWorkbench: React.FC<SqlWorkbenchProps> = ({
 
         <div className="flex shrink-0 items-center gap-2">
           <TransactionBar />
+
+          {/* 活跃会话与锁等待诊断按钮（仅服务端关系库且已连接时显示） */}
+          {onOpenActiveSessions && supportsActiveSessions(connection.db_type) && health === 'connected' && (
+            <button
+              type="button"
+              onClick={onOpenActiveSessions}
+              className="flex items-center space-x-1 px-3 py-1.5 text-sm text-fg-muted border border-line-strong rounded-control hover:bg-surface-hover transition-colors"
+              title={t('sessions.open')}
+            >
+              <Activity size={14} />
+              <span>{t('sessions.button')}</span>
+            </button>
+          )}
 
           {/* 连接信息按钮 */}
           <button

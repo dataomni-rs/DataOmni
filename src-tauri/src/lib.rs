@@ -175,6 +175,8 @@ pub fn run() {
       get_er_diagram_queries,
       get_completion_catalog_query,
       get_session_target_query,
+      get_active_sessions_query,
+      terminate_database_session,
       backup_database,
       // AI 设计（没编进 `ai` feature 时命令照样在，一律回答「这个构建没有 AI」）
       ai_available,
