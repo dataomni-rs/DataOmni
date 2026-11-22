@@ -48,7 +48,7 @@ jobs:
 
           for file in "${files[@]}"; do
             case "$file" in
-              site/*|images/*|docs/*|rfcs/*|packaging/*|scripts/winget-manifest.sh|scripts/homebrew-cask.sh|TODOs.md|AGENTS.md|README.en.md|LICENSE|.github/workflows/site.yml|.github/workflows/nightly-databases.yml|.github/workflows/windows-install.yml|.github/workflows/homebrew-tap.yml|.github/ISSUE_TEMPLATE/*)
+              site/*|images/*|docs/*|rfcs/*|packaging/*|scripts/winget-manifest.sh|scripts/homebrew-cask.sh|glama.json|TODOs.md|AGENTS.md|README.en.md|LICENSE|.github/workflows/site.yml|.github/workflows/nightly-databases.yml|.github/workflows/windows-install.yml|.github/workflows/homebrew-tap.yml|.github/ISSUE_TEMPLATE/*)
                 ;;
               *)
                 app_changed=true
