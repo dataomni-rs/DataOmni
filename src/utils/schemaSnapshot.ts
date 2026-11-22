@@ -1,11 +1,12 @@
 import type { DatabaseObject } from '../contracts/databaseMetadata';
 import type { TranslationKey, TranslationParams } from '../i18n/translate';
-import { catalogQueryParams, type SchemaMetadataQueries } from './catalogQueries';
+import { catalogQueryParams, ddlRequest, type SchemaMetadataQueries } from './catalogQueries';
 import { toErTables, type ErTable } from './erLayout';
 import type { TableCatalog } from './reconstructTableDdl';
 import type { SchemaDiff, SchemaDiffDialect, SchemaSnapshot } from './schemaDiff';
 import { mapWithConcurrency, readTableDdls } from './schemaExport';
-import { groupForeignKeyRows, groupIndexRows, toCheckConstraints } from './schemaObjects';
+import { extractDdlStatements, groupForeignKeyRows, groupIndexRows, joinDdlStatements, toCheckConstraints } from './schemaObjects';
+import { enrichOceanBaseExpressionDefaults, isOceanBaseServer } from './tableDdl';
 import { toColumnInfo } from './tableMetadata';
 
 /**
@@ -44,10 +45,13 @@ export async function loadSchemaSnapshot(options: {
   tables: readonly ErTable[];
   /** 只比这一个 schema；null = 全部 */
   schema: string | null;
+  /** 可选服务端版本：OceanBase MySQL 模式下按需读取 SHOW CREATE TABLE 补标表达式默认值（DC4） */
+  serverVersion?: string | null;
 }): Promise<SchemaSnapshot> {
   const { select, metadata } = options;
   const wanted = options.tables.filter((table) => options.schema == null || table.schema === options.schema);
   const rows = (value: unknown) => (Array.isArray(value) ? value as Array<Record<string, unknown>> : []);
+  const oceanBase = isOceanBaseServer(options.dialect, options.serverVersion ?? null);
   const tables = await mapWithConcurrency(wanted, CONCURRENCY, async (table): Promise<TableCatalog> => {
     const params = catalogQueryParams(metadata.parameter_count, table.name, table.schema);
     const [columns, indexes, foreignKeys, checks] = await Promise.all([
@@ -56,10 +60,21 @@ export async function loadSchemaSnapshot(options: {
       select(metadata.foreign_keys, params),
       metadata.check_constraints ? select(metadata.check_constraints, params) : Promise.resolve([])
     ]);
+    let parsedColumns = toColumnInfo(columns);
+    if (
+      oceanBase
+      && metadata.ddl
+      && parsedColumns.some((col) => col.default_value != null && !(col.column_extra ?? '').includes('DEFAULT_GENERATED'))
+    ) {
+      const request = ddlRequest(metadata.ddl, metadata.parameter_count, table.name, table.schema, options.dialect);
+      const ddlRows = await select(request.sql, request.params).catch(() => null);
+      const ddlText = ddlRows ? joinDdlStatements(extractDdlStatements(rows(ddlRows))) : null;
+      parsedColumns = enrichOceanBaseExpressionDefaults(parsedColumns, ddlText, options.dialect, options.serverVersion ?? null);
+    }
     return {
       schema: table.schema,
       name: table.name,
-      columns: toColumnInfo(columns),
+      columns: parsedColumns,
       indexes: groupIndexRows(rows(indexes)),
       foreignKeys: groupForeignKeyRows(rows(foreignKeys)),
       checks: toCheckConstraints(rows(checks))

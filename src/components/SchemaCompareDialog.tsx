@@ -39,6 +39,7 @@ interface Side {
   release: () => Promise<void>;
   tables: ErTable[];
   metadata: SchemaMetadataQueries;
+  serverVersion: string | null;
 }
 
 interface Result {
@@ -117,7 +118,12 @@ export function SchemaCompareDialog({ current, currentHandle, onOpenSql, onClose
     ]);
     const select = (sql: string, params: unknown[]) => handle.select(sql, params);
     const tables = await listTables(select, er, profile.database ?? null);
-    return { profile, dialect, handle, release, tables, metadata };
+    let serverVersion: string | null = null;
+    if (dialect === 'mysql' || dialect === 'postgresql') {
+      const rows = await handle.select<Array<Record<string, unknown>>>('SELECT VERSION() AS version').catch(() => []);
+      serverVersion = Array.isArray(rows) && rows[0] ? String(rows[0].version ?? '') : null;
+    }
+    return { profile, dialect, handle, release, tables, metadata, serverVersion };
   };
 
   const run = async () => {
@@ -142,7 +148,8 @@ export function SchemaCompareDialog({ current, currentHandle, onOpenSql, onClose
         metadata: side.metadata,
         dialect: side.dialect,
         tables: side.tables,
-        schema: schemasOf(side.tables).includes(schema ?? '') ? schema : null
+        schema: schemasOf(side.tables).includes(schema ?? '') ? schema : null,
+        serverVersion: side.serverVersion
       });
       const [currentSnapshot, otherSnapshot] = await Promise.all([load(both.current, schemas.current), load(both.other, schemas.other)]);
       const [source, target] = intoCurrent ? [both.other, both.current] : [both.current, both.other];
@@ -157,11 +164,7 @@ export function SchemaCompareDialog({ current, currentHandle, onOpenSql, onClose
           diff,
           t
         });
-        // MySQL 系认 TiDB / OceanBase、旧版本，PostgreSQL 系认 CockroachDB：改列的写法跟着变（同结构编辑）
-        if (target.dialect === 'mysql' || target.dialect === 'postgresql') {
-          const rows = await target.handle.select<Array<Record<string, unknown>>>('SELECT VERSION() AS version').catch(() => []);
-          serverVersion = Array.isArray(rows) && rows[0] ? String(rows[0].version ?? '') : null;
-        }
+        serverVersion = target.serverVersion;
       }
       setResult({ diff, source, target, targetIsCurrent: target === both.current, serverVersion, nativeDdl });
       setSelected(defaultSelection(diff));
