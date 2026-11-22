@@ -71,6 +71,7 @@ describe.skipIf(process.platform === 'win32')('CI 变更范围过滤与工作流
         'packaging/homebrew/README.md',
         'scripts/homebrew-cask.sh',
         'scripts/winget-manifest.sh',
+        'glama.json',
         '.github/workflows/homebrew-tap.yml',
         '.github/workflows/windows-install.yml',
         'README.en.md',
@@ -260,6 +261,22 @@ describe.skipIf(process.platform === 'win32')('CI 变更范围过滤与工作流
       ).toThrow();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('glama.json 符合 Glama MCP 目录认领格式且不含占位符', () => {
+    const parsed = JSON.parse(readFileSync('glama.json', 'utf8')) as {
+      $schema?: string;
+      maintainers?: unknown;
+    };
+    expect(parsed.$schema).toBe('https://glama.ai/mcp/schemas/server.json');
+    expect(Array.isArray(parsed.maintainers)).toBe(true);
+    const maintainers = parsed.maintainers as unknown[];
+    expect(maintainers.length).toBeGreaterThan(0);
+    for (const handle of maintainers) {
+      expect(typeof handle).toBe('string');
+      expect((handle as string).trim().length).toBeGreaterThan(0);
+      expect(handle).not.toMatch(/[<>]/);
     }
   });
 });

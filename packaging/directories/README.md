@@ -6,11 +6,11 @@ Canonical English metadata, audited upstream submission rules (2026-11), hard el
 
 ## 0. Pre-Submission Checklist (Before Opening Directory PRs)
 
-1. **Glama Organization Ownership File (`glama.json`)**: Because the repository lives under the `dataomni-rs` GitHub organization rather than a personal account, add a root `glama.json` listing the maintainer's personal GitHub username (`{"$schema": "https://glama.ai/mcp/schemas/server.json", "maintainers": ["<github-username>"]}`) and exempt `glama.json` in `.github/workflows/ci.yml` before claiming the server on Glama.
+1. **Glama Organization Ownership File (`glama.json`)**: Root `glama.json` is committed with maintainer ownership (`yuxuetr`) and exempted in `.github/workflows/ci.yml`, ready for claiming the `dataomni-rs/DataOmni` server on Glama.
 2. **Submission Sequence & Star Gates**:
    - **Zero-star channels (ready anytime)**: Search Console / IndexNow -> Glama.ai -> `punkpeye/awesome-mcp-servers` -> Official MCP Registry (`registry.modelcontextprotocol.io`) / Smithery -> `chrysler-stone/awesome-tauri-apps` & Tauri Discord `#showcase`.
    - **Gated channels (wait until threshold is met to avoid automated closure)**:
-     - `microsoft/winget-pkgs`: Wait until initial package PR `#481999` merges before opening a `1.2.2+` update PR via `scripts/winget-manifest.sh`.
+     - `microsoft/winget-pkgs`: Wait until initial package PR `#481999` merges before opening a `1.3.0+` update PR via `scripts/winget-manifest.sh`.
      - `rust-unofficial/awesome-rust`: Requires **`> 50` GitHub stars** (or `> 2,000` crates.io downloads).
      - `Homebrew/homebrew-cask`: Requires `dataomni.dev` domain age **`>= 30` days** AND GitHub stars **`>= 75`** (`>= 225` when self-submitted by a maintainer).
 
@@ -44,15 +44,17 @@ DataOmni is an MIT-licensed native desktop database client (Tauri 2 + Rust) with
 3. **Two-barrier read-only execution**: Every SQL call accepts at most one read statement (`SELECT`, `WITH` without nested writes, `SHOW`, `DESCRIBE`, `EXPLAIN` without `ANALYZE`, `VALUES`, `TABLE`) AND runs inside a database-level read-only transaction (`BEGIN READ ONLY`, `START TRANSACTION READ ONLY`, `SET TRANSACTION READ ONLY`, `readonly=1`, or read-only file handle with DuckDB external file access locked off) that always ends in `ROLLBACK`.
 4. **Zero host filesystem tools**: File-reading and file-writing CLI commands (`export`, `backup`, `csv-preview`) are excluded from `tools/list` so non-shell MCP clients cannot read or write host files.
 
-### Exposed Tools (11, all `readOnlyHint: true`)
+### Exposed Tools (13, all `readOnlyHint: true`)
 
 | Tool | Purpose |
 | --- | --- |
 | `connections` | List non-production connections explicitly opened to agents |
-| `dictionary` | Export a whole-database Markdown data dictionary (tables, columns, types, PKs, FKs) |
-| `schema` | List tables/views or inspect columns, indexes, and foreign keys of a table |
+| `dictionary` | Export a whole-database Markdown data dictionary (tables, columns, types, PKs, FKs, and optional local business semantics) |
+| `schema` | List tables/views or inspect columns, indexes, foreign keys, and table semantics |
 | `ddl` | Return the database engine's canonical `CREATE` definition |
-| `query` | Run one read-only SQL statement (default 200 rows, max 10,000) |
+| `query` | Run one read-only SQL statement with optional `:name` bind parameters (default 200 rows, max 10,000) |
+| `profile` | Profile a read-only SQL result set in an isolated in-memory DuckDB sandbox (null rates, distinct counts, numeric percentiles, top values) |
+| `diff` | Compare schemas between two agent-enabled non-production connections and return a read-only diff report without executing DDL |
 | `explain` | Return estimated execution plan without running `ANALYZE` |
 | `test` | Test connectivity and report DNS / TCP port diagnosis on failure |
 | `mongo` | Read-only MongoDB (`collections`, `find`, `count`, `aggregate` blocking `$out`/`$merge`, `explain`, `structure`) |
