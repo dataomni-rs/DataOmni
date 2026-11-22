@@ -308,6 +308,8 @@ const ENGINE_BADGES: &[EngineBadge] = &[
   EngineBadge { name: "OceanBase", tag: "SQL", kind: ServerKind::Relational },
   EngineBadge { name: "CockroachDB", tag: "SQL", kind: ServerKind::Relational },
   EngineBadge { name: "openGauss", tag: "PG", kind: ServerKind::Relational },
+  EngineBadge { name: "KingbaseES", tag: "PG", kind: ServerKind::Relational },
+  EngineBadge { name: "Dameng DM8", tag: "ODBC", kind: ServerKind::Relational },
   EngineBadge { name: "MongoDB", tag: "Doc", kind: ServerKind::Workspace },
   EngineBadge { name: "Redis", tag: "KV", kind: ServerKind::Workspace },
   EngineBadge { name: "Neo4j", tag: "Graph", kind: ServerKind::Workspace },
@@ -479,7 +481,7 @@ const EN_NATIVE_SPECS: &[SpecItem] = &[
   SpecItem {
     term: "Auth & network",
     tag: "SSH · TLS",
-    detail: "Built-in SSH jump-host tunnel, TLS/X.509 verification, and openGauss sha256 relay",
+    detail: "Built-in SSH jump-host tunnel, TLS/X.509 verification, and openGauss sha256/SM3 relay",
   },
   SpecItem {
     term: "OS Keychain",
@@ -508,7 +510,8 @@ const ZH_NATIVE_SPECS: &[SpecItem] = &[
   SpecItem {
     term: "隧道与特殊认证",
     tag: "SSH · TLS",
-    detail: "内置 SSH 跳板机隧道、TLS / X.509 双向校验，以及 openGauss 默认 sha256 口令本地转发口",
+    detail:
+      "内置 SSH 跳板机隧道、TLS / X.509 双向校验，以及 openGauss sha256 / 国密 SM3 本地转发口",
   },
   SpecItem {
     term: "凭据零明文",
@@ -561,13 +564,14 @@ const EN_COMPARE_ROWS: &[CompareRow] = &[
   },
   CompareRow {
     dimension: "SQL + NoSQL in one app",
-    dataomni: "7 SQL drivers + 5 compatible DBs + MongoDB, Redis, Neo4j & Elasticsearch workspaces",
+    dataomni:
+      "7 SQL drivers (+ opt-in Dameng ODBC) + 6 compatible DBs + MongoDB, Redis, Neo4j & ES",
     jvm_clients: "CE covers SQL; MongoDB, Redis & graph workspaces require PRO",
     commercial_native: "Varies by product edition or paid add-on tier",
   },
   CompareRow {
     dimension: "Oracle & openGauss setup",
-    dataomni: "Oracle Instant Client bundled in installer; built-in openGauss sha256 relay",
+    dataomni: "Oracle Instant Client bundled in installer; built-in openGauss sha256/SM3 relay",
     jvm_clients: "Downloads Maven JDBC jars on first connection",
     commercial_native: "Bundled or manual local OCI path configuration",
   },
@@ -612,7 +616,8 @@ const ZH_COMPARE_ROWS: &[CompareRow] = &[
   },
   CompareRow {
     dimension: "Oracle 与国产库免配",
-    dataomni: "安装包内置 Oracle Instant Client；内置 openGauss sha256 认证转发口",
+    dataomni:
+      "安装包内置 Oracle Instant Client；内置 openGauss sha256 / SM3 认证转发口与人大金仓预设",
     jvm_clients: "首次连接需联网从 Maven 下载对应 JDBC 驱动包",
     commercial_native: "随包内置或需手动指定本机 OCI 客户端库目录",
   },
@@ -649,6 +654,8 @@ const EN_SQL_ENGINES: &[&str] = &[
   "OceanBase",
   "CockroachDB",
   "openGauss",
+  "KingbaseES V9",
+  "Dameng DM8 (opt-in ODBC)",
 ];
 
 const EN_WORKSPACE_ENGINES: &[&str] = &[
@@ -672,6 +679,8 @@ const ZH_SQL_ENGINES: &[&str] = &[
   "OceanBase",
   "CockroachDB",
   "openGauss",
+  "KingbaseES V9",
+  "Dameng DM8（可选 ODBC）",
 ];
 
 const ZH_WORKSPACE_ENGINES: &[&str] = &[
@@ -686,7 +695,7 @@ const EN_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
   EcosystemCard {
     kind: ServerKind::Relational,
     title: "Relational & Analytical SQL",
-    count_badge: "13 tested servers",
+    count_badge: "15 tested servers",
     summary: "One full-featured SQL workbench across OLTP databases, embedded analytics, and distributed SQL compatible servers.",
     engines: EN_SQL_ENGINES,
     capabilities: &[
@@ -715,7 +724,7 @@ const ZH_ECOSYSTEM_CARDS: &[EcosystemCard] = &[
   EcosystemCard {
     kind: ServerKind::Relational,
     title: "关系型与分析型 SQL 工作台",
-    count_badge: "13 种实测服务端",
+    count_badge: "15 种实测服务端",
     summary: "一套完整的 SQL 工作台，覆盖主流事务库、本地嵌入式分析库，以及国内外分布式协议兼容数据库。",
     engines: ZH_SQL_ENGINES,
     capabilities: &[
@@ -829,7 +838,7 @@ const EN_SERVERS: &[ServerRow] = &[
     kind: ServerKind::Relational,
     level: SupportLevel::UsableWithGaps,
     smoke_counts: "39 / 0 / 3*",
-    notes: "Parses OceanBase CHILD_n JSON plans; inspect SQL preview before altering columns that use expression defaults.",
+    notes: "Parses OceanBase CHILD_n JSON plans; disambiguates expression defaults via SHOW CREATE TABLE during structure editing and diff.",
   },
   ServerRow {
     server: "CockroachDB",
@@ -846,8 +855,26 @@ const EN_SERVERS: &[ServerRow] = &[
     connection_type: "PostgreSQL",
     kind: ServerKind::Relational,
     level: SupportLevel::UsableWithGaps,
-    smoke_counts: "40 / 0 / 0",
-    notes: "Local protocol relay authenticates default sha256-password users seamlessly over configured TLS.",
+    smoke_counts: "41 / 0 / 0",
+    notes: "Dedicated local protocol relay authenticates sha256 and SM3 (GB/T 32905-2016) users seamlessly over configured TLS.",
+  },
+  ServerRow {
+    server: "KingbaseES",
+    tested_version: "V9 (PG mode)",
+    connection_type: "PostgreSQL",
+    kind: ServerKind::Relational,
+    level: SupportLevel::Supported,
+    smoke_counts: "42 / 0 / 0",
+    notes: "Dedicated PG-mode preset (port 54321); auto-filters 9 KingbaseES internal schemas across catalog, ER, completion & diff.",
+  },
+  ServerRow {
+    server: "Dameng DM8",
+    tested_version: "V8 (0x7000c)",
+    connection_type: "Dameng (opt-in ODBC)",
+    kind: ServerKind::Relational,
+    level: SupportLevel::UsableWithGaps,
+    smoke_counts: "12 / 0 / 0*",
+    notes: "Opt-in --features odbc + BYO official driver (Linux/Win x64); UTF-8 dm_svc.conf & wide-text CLOB; no EXPLAIN or visual DDL.",
   },
   ServerRow {
     server: "ClickHouse",
@@ -874,7 +901,7 @@ const EN_SERVERS: &[ServerRow] = &[
     kind: ServerKind::Workspace,
     level: SupportLevel::Supported,
     smoke_counts: "14 / 0 / 0",
-    notes: "Standalone, Sentinel, and Cluster; SCAN browsing, 6 data type editors, JSON & pickle decoding, redis-cli console.",
+    notes: "Standalone, multi-node Sentinel failover (with READONLY rediscovery), and Cluster; SCAN browsing, 6 type editors, redis-cli console.",
   },
   ServerRow {
     server: "Neo4j",
@@ -994,7 +1021,7 @@ const ZH_SERVERS: &[ServerRow] = &[
     kind: ServerKind::Relational,
     level: SupportLevel::UsableWithGaps,
     smoke_counts: "39 / 0 / 3*",
-    notes: "支持用户@租户连接与 CHILD_n 执行计划树；含表达式默认值的列在改结构前请先核对预览语句。",
+    notes: "支持用户@租户连接与 CHILD_n 执行计划树；改结构与跨库比对自动扫描 SHOW CREATE TABLE 消歧表达式默认值。",
   },
   ServerRow {
     server: "CockroachDB",
@@ -1011,8 +1038,26 @@ const ZH_SERVERS: &[ServerRow] = &[
     connection_type: "PostgreSQL",
     kind: ServerKind::Relational,
     level: SupportLevel::UsableWithGaps,
-    smoke_counts: "40 / 0 / 0",
-    notes: "内置本地协议转发口，默认只存 sha256 口令的用户可直接按原 TLS 配置登录。",
+    smoke_counts: "41 / 0 / 0",
+    notes: "内置独立运行时协议转发口，自动完成默认 sha256 与国密 SM3（GB/T 32905-2016）登录并保留原 TLS 配置。",
+  },
+  ServerRow {
+    server: "KingbaseES",
+    tested_version: "V9（PG 模式）",
+    connection_type: "PostgreSQL",
+    kind: ServerKind::Relational,
+    level: SupportLevel::Supported,
+    smoke_counts: "42 / 0 / 0",
+    notes: "连接表单内置人大金仓预设（默认端口 54321），自动过滤 9 个内置系统 schema，UTF-8 真库 42 条冒烟全通。",
+  },
+  ServerRow {
+    server: "Dameng DM8",
+    tested_version: "V8（0x7000c）",
+    connection_type: "Dameng（可选 ODBC）",
+    kind: ServerKind::Relational,
+    level: SupportLevel::UsableWithGaps,
+    smoke_counts: "12 / 0 / 0*",
+    notes: "可选 --features odbc 对接本机官方驱动（Linux / Win x64，零闭源随包）；自动 UTF-8 与宽字符 CLOB，暂缺执行计划与可视化改结构。",
   },
   ServerRow {
     server: "ClickHouse",
@@ -1039,7 +1084,7 @@ const ZH_SERVERS: &[ServerRow] = &[
     kind: ServerKind::Workspace,
     level: SupportLevel::Supported,
     smoke_counts: "14 / 0 / 0",
-    notes: "支持单机、Sentinel 与集群；跨主节点 SCAN 翻键、六种类型编辑、JSON 与 pickle 解码高亮、命令行。",
+    notes: "支持单机、多哨兵故障转移（遇 READONLY 自动切主重试）与集群；SCAN 翻键、六种类型编辑、JSON/pickle 解码高亮与命令行。",
   },
   ServerRow {
     server: "Neo4j",
@@ -1149,7 +1194,7 @@ pub static EN_COPY: PageCopy = PageCopy {
   trust_facts: EN_TRUST_FACTS,
   workbench_aria_label: "DataOmni live workspace views",
   tabs: EN_TABS,
-  ecosystem_strip_label: "17 engines verified against real database instances:",
+  ecosystem_strip_label: "19 engines verified against real database instances:",
   engine_badges: ENGINE_BADGES,
   workflows_heading: "Built around how engineers actually debug, edit, and ship data",
   workflows_intro: "Every workflow in DataOmni answers a concrete failure mode of traditional database GUIs — heavy runtimes, silent cell overwrites, opaque errors, and unsafe credential sharing.",
@@ -1158,7 +1203,7 @@ pub static EN_COPY: PageCopy = PageCopy {
     lead: "Stop juggling separate tools for Postgres, Oracle, MongoDB, and Redis — or spending half an afternoon configuring Instant Client paths and SSH tunnels.",
     bullets: &[
       "Single native Tauri 2 binary backed by Rust drivers; streams large DuckDB Parquet files and paginated results without hogging memory.",
-      "Oracle Instant Client (Basic Light) is bundled right inside the installer, alongside a built-in local relay for openGauss default sha256 accounts.",
+      "Oracle Instant Client (Basic Light) is bundled right inside the installer, alongside a built-in local relay for openGauss sha256 and SM3 accounts.",
       "Connection failures tell you exactly which layer broke: DNS lookup, refused TCP port, TLS handshake, SSH known_hosts fingerprint, or credentials.",
     ],
   },
@@ -1210,13 +1255,13 @@ pub static EN_COPY: PageCopy = PageCopy {
   compare_col_commercial: "Commercial Native (e.g. TablePlus / Navicat)",
   compare_rows: EN_COMPARE_ROWS,
   compare_footnote: "Where others still win: if your workflow depends on DB2, Teradata, Snowflake, or dozens of legacy JDBC drivers, DBeaver or long-standing commercial suites offer broader long-tail coverage. If your daily stack is PostgreSQL, MySQL, Oracle, SQL Server, SQLite, DuckDB, ClickHouse, and MongoDB / Redis / Neo4j / Elasticsearch — and you want native speed, explicit SQL guardrails, MIT licensing, and safe local MCP — DataOmni is purpose-built for you.",
-  compatibility_heading: "One client across 18 real-server-tested databases",
+  compatibility_heading: "One client across 20 real-server-tested databases",
   compatibility_intro: "Every supported database is verified by automated smoke suites against real server instances (src-tauri/tests/*_smoke.rs), never assumed from wire-protocol similarity.",
   ecosystem_cards: EN_ECOSYSTEM_CARDS,
-  ledger_drawer_summary: "Inspect full 18-server smoke-test compatibility ledger (versions, test counts & known gaps)",
+  ledger_drawer_summary: "Inspect full 20-server smoke-test compatibility ledger (versions, test counts & known gaps)",
   ledger_drawer_hint: "Counts show passed / skipped / fixture-unsupported",
-  filter_all: "All 18 servers",
-  filter_relational: "Relational & SQL (13)",
+  filter_all: "All 20 servers",
+  filter_relational: "Relational & SQL (15)",
   filter_workspaces: "Document, KV, Graph & Search (5)",
   col_server: "Server",
   col_version: "Tested",
@@ -1272,7 +1317,7 @@ pub static ZH_COPY: PageCopy = PageCopy {
   trust_facts: ZH_TRUST_FACTS,
   workbench_aria_label: "DataOmni 真实工作台界面切换预览",
   tabs: ZH_TABS,
-  ecosystem_strip_label: "全部经真实数据库实例自动化冒烟验证的 17 种引擎：",
+  ecosystem_strip_label: "全部经真实数据库实例自动化冒烟验证的 19 种引擎：",
   engine_badges: ENGINE_BADGES,
   workflows_heading: "针对数据库客户端最痛的四个瞬间重新设计",
   workflows_intro: "不堆砌用不上的花哨噱头。DataOmni 的每一处设计，都对应日常查库、改数据、对表结构与配合 AI 排障时的真实痛点。",
@@ -1281,7 +1326,7 @@ pub static ZH_COPY: PageCopy = PageCopy {
     lead: "不必再为了查 Postgres、Oracle、MongoDB 和 Redis 同时开四五个客户端，也不用花半天配 Instant Client 环境变量。",
     bullets: &[
       "Tauri 2 + Rust 原生构建，直接复用操作系统 WebView；DuckDB 流式直查大体积 Parquet / JSON 文件，不把整份数据塞进内存。",
-      "安装包随包内置 Oracle Instant Client（Basic Light），并内置 openGauss 默认 sha256 口令的本地协议转发口，开箱即连。",
+      "安装包随包内置 Oracle Instant Client（Basic Light），并内置 openGauss sha256 与国密 SM3 口令的本地协议转发口，开箱即连。",
       "连不上时绝不只报一句笼统的超时：精准区分域名不存在、端口拒绝、TLS 握手中断、SSH known_hosts 指纹变更或凭据错误。",
     ],
   },
@@ -1333,13 +1378,13 @@ pub static ZH_COPY: PageCopy = PageCopy {
   compare_col_commercial: "商业原生客户端（如 TablePlus / Navicat）",
   compare_rows: ZH_COMPARE_ROWS,
   compare_footnote: "坦诚说明边界：如果你的业务重度依赖 DB2、Teradata、Snowflake 或数十种冷门遗留 JDBC 数据源，DBeaver 或老牌商业套件的插件覆盖面依然更广；如果你的主力栈是 PostgreSQL、MySQL、Oracle、SQL Server、SQLite、DuckDB、ClickHouse 以及 MongoDB / Redis / Neo4j / ES，且看重原生轻量、MIT 免费商用、改表防覆盖与安全的本地 AI MCP，DataOmni 就是专门为你打磨的。",
-  compatibility_heading: "18 种服务端全部经真库实测验收",
+  compatibility_heading: "20 种服务端全部经真库实测验收",
   compatibility_intro: "不靠「协议兼容」做纸面宣传。每一种列出的服务端，都连上真实数据库跑完自动化冒烟套件（src-tauri/tests/*_smoke.rs），并如实记录已知边界。",
   ecosystem_cards: ZH_ECOSYSTEM_CARDS,
-  ledger_drawer_summary: "展开全部 18 种服务端真库实测兼容明细（实测版本、冒烟用例数与已知边界）",
+  ledger_drawer_summary: "展开全部 20 种服务端真库实测兼容明细（实测版本、冒烟用例数与已知边界）",
   ledger_drawer_hint: "计数依次为：通过 / 跳过 / 夹具不支持",
-  filter_all: "全部 18 种服务端",
-  filter_relational: "关系型与 SQL（13）",
+  filter_all: "全部 20 种服务端",
+  filter_relational: "关系型与 SQL（15）",
   filter_workspaces: "文档 / 键值 / 图 / 搜索（5）",
   col_server: "服务端",
   col_version: "实测版本",
