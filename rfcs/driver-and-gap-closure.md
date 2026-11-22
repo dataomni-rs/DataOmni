@@ -64,6 +64,22 @@
 2. **分发与合规成本**：`dameng` 纯 Rust crate 是否有协议缺陷或维护停滞；`odbc-api` 方案是否能做到「默认静态编译/零闭源库打包，用户自行安装系统 unixODBC + 厂商驱动即可连 DM8/GBase/神通等」。
 3. **决策标准**：若纯 Rust `dameng` 能稳定跑通全部核心查询/元数据/导入导出用例且许可证清晰，优先作为独立 Cargo feature `dameng` 落地；若存在协议硬伤，则以 `odbc` feature 承接 DM8 及长尾国产专有库。
 
+> **实测结论（2026-11-22 已完成，真库环境：`cu` 上 `dataomni-dm8` / `DM Database Server 64 V8` `0x7000c`）**：
+> 在隔离 scratch 工程对 crates.io 现有候选纯 Rust 驱动与官方 ODBC 驱动做同库实测：
+> 1. **`tokio-dameng 0.1.0`（`rarnu/rust-dameng`，MIT，154 次下载）——淘汰**：
+>    - 能建连并查 `V$VERSION`，但首次 `CREATE TABLE` 即报 `-6506: 试图在只读事务中修改数据`（登录包事务标志位缺陷），且引入 `native-tls`（Linux 侧拖入 `openssl-sys`），0.1.0 以来停更。
+> 2. **`dm-pure 1.2.4`（`zhangtao103239/dm8_pure_rs`，MIT，248 次下载，0 `unsafe`，0 C 依赖）——存在 4 项实测协议硬伤，不满足数据安全门禁**：
+>    - **跑通项**：macOS ARM64 / Linux / Windows 零驱动直连、`V$VERSION`/`ALL_USERS`/`ALL_TABLES`/`ALL_TAB_COLUMNS`/`V$SESSIONS`、500 行分批 `CMD_FETCH`、`DECIMAL` 精确字符串、中文 UTF-8/Emoji、`DATE`/`TIMESTAMP(6)`、行内 LOB、`LIMIT/OFFSET`、事务回滚、非 LOB 参数化查询（6/6 列）与错误密码拒连（`-2501`）。
+>    - **实测硬伤**：
+>      1. **非行内 `CLOB` 静默解码为空串 `""`**：实测 `LENGTH(C) = 12000` 读出 `0` 字符，连 `DBMS_METADATA.GET_DDL(...)` 也返回 `Str("")`（核心问题：`read_offrow_lob` 硬编码旧版 43 字节定位符且不匹配时静默 `Ok(Vec::new())`）——在带网格编辑与导出能力的客户端里属于高危静默丢数据缺陷；
+>      2. **带 LOB 列的参数化 `SELECT` 静默截断后续列**：`SELECT ID, C, B, TAIL FROM ... WHERE ID = ?` 仅返回 2 列 `["ID", "C"]`，`B` 与 `TAIL` 静默丢失（`parse_cols_robust` 靠步进 2 字节启发式猜测列描述偏移）；
+>      3. **`EXPLAIN SELECT ...` 阻塞至读超时**：报 `-6852: Resource temporarily unavailable (os error 35)`；
+>      4. **不支持 TLS**（仅明文 TCP + 协议层 DH/DES/AES 加密），无法接入强制 TLS 的生产 DM8。
+> 3. **可选 `odbc` Cargo feature（`odbc-api 30.1.0`，MIT，189 万次下载，2026-11 活跃维护，BYO 厂商官方驱动）——当前版本架构推荐**：
+>    - 实测确认达梦容器 `/opt/dmdbms/bin/` 自带官方 `libdodbc.so`（与 Windows `dodbc.dll` 同属官方维护驱动），彻底避开逆向协议导致的大字段丢数据、截断列、`EXPLAIN` 挂死与 TLS/国密缺口；
+>    - 一次落地 `odbc` feature（默认关或按需开，纳入 `M1` `compiled_drivers`，绝不随包分发任何闭源动态库），除 DM8 外还可统一承接 GBase 8s/8a、神通 Oscar、DB2、SAP HANA 等所有带官方 ODBC 驱动的专有库；
+>    - **已知平台权衡（需诚实告知用户）**：Linux x64 与 Windows x64 有官方 DM8 ODBC 驱动可开箱对接；macOS ARM64 达梦官方暂未发布原生 `libdodbc.dylib`，因此 macOS ARM64 暂无法经 ODBC 直连 DM8（除非达梦发布 macOS ARM64 ODBC 驱动，或上游纯 Rust 驱动修复上述 4 项硬伤后重估）。
+
 ---
 
 ## 3. Phase 1 详细设计（`DC1–DC4`，零外部阻塞）

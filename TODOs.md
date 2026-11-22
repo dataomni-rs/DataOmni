@@ -185,7 +185,7 @@
 ### 前置实验（DC0）
 
 - [x] DC0-E1 openGauss SM3（`AUTH_REQ_SM3 = 13`）协议报文、算法向量与 `sqlx-postgres` 拒连文案实测核验（`369c7ab`，实测数据已写回 [`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md) §2.1）
-- [ ] DC0-E2 达梦 DM8 接入路线实验：纯 Rust `dameng` crate vs 可选 `odbc` Cargo feature（依赖 DM8 单机实例/镜像与 ODBC 驱动）
+- [x] DC0-E2 达梦 DM8 接入路线实验（已于 `cu` 真库 `DM Database Server 64 V8` 实测完毕，实测结论写回 [`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md) §2.2：`tokio-dameng 0.1.0` 写入报 `-6506` 只读事务淘汰；`dm-pure 1.2.4` 暴露非行内 CLOB/GET_DDL 静默为空、含 LOB 参数查询丢尾列、`EXPLAIN` 超时与无 TLS 4 项硬伤；推荐以可选 `odbc` Cargo feature 走官方 `libdodbc`/`dodbc` 路线，待确认路线与 unixODBC 实测后推进 `DC5`）
 
 ### Phase 1（P0，零外部阻塞，目标 `v1.3.1`）
 
@@ -196,8 +196,8 @@
 
 ### Phase 2（P1，依赖外部实验环境，承接 `M2` / `B1b`）
 
-- [!] DC5 达梦 DM8 完整接入（按 `DC0-E2` 结论基于 `M1` Cargo feature 隔离落地；当前等待 DM8 实验镜像/实例）
-- [!] DC6 人大金仓 KingbaseES（PG 模式）完整接入（连接、目录、执行计划、分页、导出与真库冒烟；当前等待 KingbaseES 试用镜像/实例）
+- [!] DC5 达梦 DM8 完整接入（`DC0-E2` 实测推荐走 `M1` 可选 `odbc` Cargo feature + BYO 官方驱动路线，待确认是否拍板该路线并做 `odbc-api` + `libdodbc.so` 实测后进入实现）
+- [!] DC6 人大金仓 KingbaseES（PG 模式）完整接入（`cu` 上实测公开社区镜像 `xuxuclassmate/kingbase` 内置 2020 `license.dat` 已过期 `FATAL: XX000: License file expired.`；待提供官网新申请的 90 天开发试用 `license.dat` 或 V8R6/V9 试用包上传至 `cu` 后即可立刻启动实测）
 
 ### Phase 3（可选单机运维补强）
 
