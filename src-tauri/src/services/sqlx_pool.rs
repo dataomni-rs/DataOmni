@@ -146,8 +146,8 @@ pub async fn open(connection_string: &str) -> Result<DbPool, String> {
     .await;
     let pool = match opened {
       Ok(pool) => pool,
-      // openGauss 只存 sha256 口令的用户：经本机的转发口再连一次（`opengauss_relay`）
-      Err(error) if opengauss_relay::is_sha256_rejection(&error.to_string()) => {
+      // openGauss 只存 sha256 或 SM3 口令的用户：经本机的转发口再连一次（`opengauss_relay`）
+      Err(error) if opengauss_relay::is_opengauss_auth_rejection(&error.to_string()) => {
         let upstream = opengauss_relay::Upstream {
           host: options.get_host().to_string(),
           port: options.get_port(),

@@ -50,8 +50,12 @@
 3. **SM3 派生与签名算法**：确认 `PBKDF2` 的底层 PRF 是 `HMAC-SM3` 还是 `HMAC-SHA1`，以及 `ClientKey = HMAC-SM3(K, "Client Key")`、`StoredKey = SM3(ClientKey)`、`ClientSignature = HMAC-SM3(StoredKey, token)`、`ClientProof = hex(ClientSignature XOR ClientKey)` 的每一环字节输出，使用独立参考实现交叉核对测试向量。
 4. **Rust 依赖审计**：确认 RustCrypto `sm3` crate 与现有 `hmac` / `pbkdf2` / `digest` 版本兼容、零 `unsafe` 风险且通过 `cargo audit`。
 
-> **实测结论（待 `DC0-E1` 完成后回填）**：
-> - （待填）
+> **实测结论（2026-11-22 已完成）**：
+> 1. **一手源码核对**（`opengauss-mirror/openGauss-server` `src/common/backend/libpq/sha2.cpp` `GsSm3Encrypt`、`fe-auth.cpp`、`fe-connect.cpp` 及 `openGauss-tools-chameleon/pg_chameleon/lib/sm3_auth.py`）：
+>    - 认证请求码为独立码 **`AUTH_REQ_SM3 = 13`**（不是码 10），协议 `3.51` 下报文体与 SHA256 同构：`[password_stored_method: u32 = 3][salt_hex: 64B][token_hex: 8B][iterations: u32]`。
+>    - **关键纠偏**：openGauss SM3 **并非** `PBKDF2-HMAC-SM3` 或 `HMAC-SM3`——`K = PBKDF2-HMAC-SHA1(password, salt, iterations, 32)`、`ClientKey = HMAC-SHA256(K, "Client Key")`、`ClientSignature = HMAC-SHA256(StoredKey, token)` 均沿用 SHA1/HMAC-SHA256，**仅 `StoredKey = SM3(ClientKey)` 这一步替换为 GB/T 32905-2016 SM3**。
+> 2. **真实 `sqlx 0.8.6` 报错实测**：向 `sqlx::PgConnection::connect_with` 返回码 13 时，确切报错包含 `"unknown authentication method: 13"`；已由端到端 mock 测试 `sqlx_pool_open_completes_sm3_handshake_via_relay` 钉住。
+> 3. **零新外部依赖拍板**：因只需对 32 字节 `ClientKey` 计算一次标准 SM3 摘要，在 `opengauss_relay.rs` 内实现约 60 行纯安全整数位运算 `sm3_digest`（无 `unsafe`、零新增 crates.io 依赖），并通过 GB/T 32905-2016 两条官方测试向量 + OpenSSL 3（Python `hashlib.new("sm3")`）独立交叉验证（同输入向量 `7fecc63e76dc024dc765342834035c72aca17d20a75c1ec26393fd2116c24f6e`）。
 
 ### 2.2 `DC0-E2`：达梦 DM8 接入路线实验（`dameng` crate vs 可选 `odbc` feature）
 

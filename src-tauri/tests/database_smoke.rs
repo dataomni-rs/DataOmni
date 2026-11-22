@@ -198,17 +198,9 @@ async fn mysql_57_renames_columns_by_restating_them() {
   }
 }
 
-/// openGauss 只存 sha256 口令的用户（`password_encryption_type = 2`）：普通连接 sqlx 不认那种认证，
-/// 应用经本机的转发口登录（`opengauss_relay`）。连接串照常写，`sslmode` 也照常——转发口到服务端那一段
-/// 照它加密与校验。只在设了 `DATAOMNI_OPENGAUSS_SHA256_TEST_URL`（这样一个用户的连接串）时跑
-#[tokio::test]
-async fn opengauss_sha256_user_logs_in_through_the_relay() {
-  let Some(url) = optional_database_url("DATAOMNI_OPENGAUSS_SHA256_TEST_URL") else {
-    return;
-  };
-  let parsed = url::Url::parse(&url).expect("parse test url");
-  let pool = match dataomni_lib::services::sqlx_pool::open(&url).await.expect("open through relay")
-  {
+async fn verify_opengauss_relay_login(url: &str) {
+  let parsed = url::Url::parse(url).expect("parse test url");
+  let pool = match dataomni_lib::services::sqlx_pool::open(url).await.expect("open through relay") {
     DbPool::Postgres(pool) => pool,
     _ => panic!("expected a PostgreSQL pool"),
   };
@@ -236,6 +228,28 @@ async fn opengauss_sha256_user_logs_in_through_the_relay() {
     .await
     .expect_err("wrong password must fail");
   assert!(error.contains("28P01") || error.contains("Invalid username/password"), "{error}");
+}
+
+/// openGauss 只存 sha256 口令的用户（`password_encryption_type = 2`）：普通连接 sqlx 不认那种认证，
+/// 应用经本机的转发口登录（`opengauss_relay`）。连接串照常写，`sslmode` 也照常——转发口到服务端那一段
+/// 照它加密与校验。只在设了 `DATAOMNI_OPENGAUSS_SHA256_TEST_URL`（这样一个用户的连接串）时跑
+#[tokio::test]
+async fn opengauss_sha256_user_logs_in_through_the_relay() {
+  let Some(url) = optional_database_url("DATAOMNI_OPENGAUSS_SHA256_TEST_URL") else {
+    return;
+  };
+  verify_opengauss_relay_login(&url).await;
+}
+
+/// openGauss 只存 SM3 口令的用户（`password_encryption_type = 3`，信创国密配置，DC1）：
+/// 服务端发出 `AUTH_REQ_SM3 (13)`，`sqlx` 拒连后由本机 `opengauss_relay` 接管 SM3 认证握手。
+/// 只在设了 `DATAOMNI_OPENGAUSS_SM3_TEST_URL` 时跑
+#[tokio::test]
+async fn opengauss_sm3_user_logs_in_through_the_relay() {
+  let Some(url) = optional_database_url("DATAOMNI_OPENGAUSS_SM3_TEST_URL") else {
+    return;
+  };
+  verify_opengauss_relay_login(&url).await;
 }
 
 #[tokio::test]
