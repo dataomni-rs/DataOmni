@@ -302,6 +302,7 @@ pub enum PoolRef<'a> {
   Sqlx(&'a DbPool),
   SqlServer(&'a std::sync::Arc<crate::services::sql_server::SqlServerPool>),
   Oracle(&'a std::sync::Arc<crate::services::oracle::OraclePool>),
+  Dameng(&'a std::sync::Arc<crate::services::dameng::DamengPool>),
   DuckDb(&'a std::sync::Arc<crate::services::duckdb::DuckDbPool>),
   ClickHouse(&'a std::sync::Arc<crate::services::clickhouse::ClickHousePool>),
 }
@@ -319,6 +320,7 @@ pub enum SessionConnection {
   /// 装箱：tiberius 的客户端比 sqlx 的池连接大得多，不装箱的话每个变体都按它付内存
   SqlServer(Box<crate::services::sql_server::SqlServerConnection>),
   Oracle(Box<crate::services::oracle::OracleConnection>),
+  Dameng(Box<crate::services::dameng::DamengConnection>),
   DuckDb(crate::services::duckdb::DuckDbConnection),
   ClickHouse(crate::services::clickhouse::ClickHouseConnection),
 }
@@ -341,6 +343,9 @@ impl SessionConnection {
       }
       PoolRef::Oracle(pool) => {
         pool.acquire_for_session().await.map(|connection| Self::Oracle(Box::new(connection)))
+      }
+      PoolRef::Dameng(pool) => {
+        pool.acquire_for_session().await.map(|connection| Self::Dameng(Box::new(connection)))
       }
       PoolRef::DuckDb(pool) => pool.acquire_for_session().map(Self::DuckDb),
       PoolRef::ClickHouse(pool) => Ok(Self::ClickHouse(pool.acquire_for_session())),
@@ -371,6 +376,20 @@ impl SessionConnection {
         summary_with_rows(summary, rows)
       }
       Self::Oracle(connection) => {
+        let mut rows = Vec::new();
+        let summary = connection
+          .execute_streaming(
+            sql,
+            StreamOptions::limited(row_limit, DEFAULT_QUERY_BYTE_LIMIT, row_limit.max(1)),
+            &mut |batch| {
+              rows.extend(batch.rows);
+              Ok(())
+            },
+          )
+          .await?;
+        summary_with_rows(summary, rows)
+      }
+      Self::Dameng(connection) => {
         let mut rows = Vec::new();
         let summary = connection
           .execute_streaming(
@@ -456,6 +475,7 @@ impl SessionConnection {
       }
       Self::SqlServer(connection) => connection.describe_columns(sql).await,
       Self::Oracle(connection) => connection.describe_columns(sql).await,
+      Self::Dameng(connection) => connection.describe_columns(sql).await,
       Self::DuckDb(connection) => connection.describe_columns(sql).await,
       Self::ClickHouse(connection) => connection.describe_columns(sql).await,
     }
@@ -496,6 +516,7 @@ impl SessionConnection {
       Self::SqlServer(connection) => connection.execute_with_params(sql, params).await,
       // 数组 DML：`sql` 是单行的语句，`params` 是一行接一行的值
       Self::Oracle(connection) => connection.execute_with_params(sql, params).await,
+      Self::Dameng(connection) => connection.execute_with_params(sql, params).await,
       Self::DuckDb(connection) => connection.execute_with_params(sql, params).await,
       // 没有事务：导入做不到「中途失败什么都不留」，界面上本来就没有这个入口
       Self::ClickHouse(_) => {
@@ -523,6 +544,7 @@ impl SessionConnection {
       }
       Self::SqlServer(connection) => connection.execute_batch(sql).await,
       Self::Oracle(connection) => connection.execute_batch(sql).await,
+      Self::Dameng(connection) => connection.execute_batch(sql).await,
       Self::DuckDb(connection) => connection.execute_batch(sql).await,
       Self::ClickHouse(connection) => connection.execute_batch(sql).await,
     }
@@ -559,6 +581,7 @@ impl SessionConnection {
       Self::Postgres(connection) => timeout(limit, connection.ping()).await,
       Self::SqlServer(connection) => return connection.ping(limit).await,
       Self::Oracle(connection) => return connection.ping(limit).await,
+      Self::Dameng(connection) => return connection.ping(limit).await,
       // 本机的库，没有会被网络悄悄丢掉的连接。ClickHouse 走 HTTP，每次请求自己连
       Self::Sqlite(_) | Self::DuckDb(_) | Self::ClickHouse(_) => return true,
     };
@@ -572,28 +595,33 @@ impl SessionConnection {
       Self::MySql(connection) => drop(connection.detach()),
       Self::Postgres(connection) => drop(connection.detach()),
       Self::Sqlite(connection) => drop(connection.detach()),
-      Self::SqlServer(_) | Self::Oracle(_) | Self::DuckDb(_) | Self::ClickHouse(_) => {}
+      Self::SqlServer(_)
+      | Self::Oracle(_)
+      | Self::Dameng(_)
+      | Self::DuckDb(_)
+      | Self::ClickHouse(_) => {}
     }
   }
 
   /// 关掉自动提交时补的那一句。T-SQL 里单独一个 `BEGIN` 是语句块的开头，
   /// 不开事务
   ///
-  /// Oracle 没有这一句：事务随第一条 DML 开始，自动提交由连接自己按开关决定
+  /// Oracle 与达梦 ODBC 没有这一句：事务随第一条 DML 开始，自动提交由连接自己按开关决定
   pub fn begin_statement(&self) -> Option<&'static str> {
     match self {
       Self::SqlServer(_) => Some("BEGIN TRANSACTION"),
       // ClickHouse 没有通用事务，自动提交的开关在界面上不出现
-      Self::Oracle(_) | Self::ClickHouse(_) => None,
+      Self::Oracle(_) | Self::Dameng(_) | Self::ClickHouse(_) => None,
       _ => Some("BEGIN"),
     }
   }
 
-  /// 把这一次执行的自动提交开关交给连接。只有 Oracle 要：另外几家的自动提交在
-  /// 服务端，靠补一句 `BEGIN` 关掉
+  /// 把这一次执行的自动提交开关交给连接。Oracle 与达梦 ODBC 在连接层控制自动提交
   pub fn set_autocommit(&mut self, autocommit: bool) {
-    if let Self::Oracle(connection) = self {
-      connection.set_autocommit(autocommit);
+    match self {
+      Self::Oracle(connection) => connection.set_autocommit(autocommit),
+      Self::Dameng(connection) => connection.set_autocommit(autocommit),
+      _ => {}
     }
   }
 
@@ -603,6 +631,7 @@ impl SessionConnection {
     match self {
       Self::SqlServer(_) => crate::services::sql_server::controls_transaction(sql),
       Self::Oracle(_) => crate::services::oracle::controls_transaction(sql),
+      Self::Dameng(_) => crate::services::dameng::controls_transaction(sql),
       _ => transaction_effect(sql) != TransactionEffect::None,
     }
   }
@@ -615,6 +644,7 @@ impl SessionConnection {
     match self {
       Self::SqlServer(connection) => Some(connection.transaction()),
       Self::Oracle(connection) => Some(connection.transaction()),
+      Self::Dameng(connection) => Some(connection.transaction()),
       _ => None,
     }
   }
@@ -650,6 +680,9 @@ impl SessionConnection {
         connection.execute_streaming_with_params(sql, params, options, sink).await
       }
       Self::Oracle(connection) => {
+        connection.execute_streaming_with_params(sql, params, options, sink).await
+      }
+      Self::Dameng(connection) => {
         connection.execute_streaming_with_params(sql, params, options, sink).await
       }
       Self::DuckDb(connection) => {

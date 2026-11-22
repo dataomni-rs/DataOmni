@@ -127,6 +127,17 @@ pub fn schema_metadata_queries(db_type: &DatabaseType) -> Option<SchemaMetadataQ
       triggers_by_show: None,
       parameter_count: 2,
     }),
+    // 达梦 DM8 同样由 `DBMS_METADATA.GET_DDL` 返回权威建表/视图 DDL，绑定参数走 `?`
+    DatabaseType::Dameng => Some(SchemaMetadataQueries {
+      columns: DAMENG_COLUMNS,
+      indexes: DAMENG_INDEXES,
+      foreign_keys: DAMENG_FOREIGN_KEYS,
+      check_constraints: Some(DAMENG_CHECK_CONSTRAINTS),
+      ddl: Some(DdlQuery::Bound { sql: DAMENG_DDL }),
+      triggers: DAMENG_TRIGGERS,
+      triggers_by_show: None,
+      parameter_count: 2,
+    }),
     // DuckDB 的建表语句是库自己存的原文（`duckdb_tables().sql`），表和视图都给
     DatabaseType::DuckDB => Some(SchemaMetadataQueries {
       columns: DUCKDB_COLUMNS,
@@ -948,6 +959,125 @@ WHERE t.table_name = :1
 ORDER BY t.trigger_name
 "#
 );
+
+// ---------------------------------------------------------------------------
+// 达梦 DM8（ODBC `?` 参数占位符，双引号保留小写别名）
+// ---------------------------------------------------------------------------
+
+const DAMENG_COLUMNS: &str = r#"
+SELECT
+  c.column_name AS "column_name",
+  CASE
+    WHEN c.data_type IN ('VARCHAR', 'VARCHAR2', 'CHAR', 'CHARACTER', 'NVARCHAR', 'NVARCHAR2', 'NCHAR')
+      AND c.data_length IS NOT NULL
+      THEN c.data_type || '(' || TO_CHAR(c.data_length) || ')'
+    WHEN c.data_type IN ('DECIMAL', 'DEC', 'NUMERIC', 'NUMBER')
+      AND c.data_precision IS NOT NULL
+      THEN CASE WHEN COALESCE(c.data_scale, 0) > 0
+        THEN c.data_type || '(' || TO_CHAR(c.data_precision) || ',' || TO_CHAR(c.data_scale) || ')'
+        ELSE c.data_type || '(' || TO_CHAR(c.data_precision) || ')'
+      END
+    ELSE c.data_type
+  END AS "data_type",
+  CAST(CASE WHEN c.nullable = 'Y' THEN 1 ELSE 0 END AS INTEGER) AS "is_nullable",
+  c.data_default AS "column_default",
+  CAST(CASE WHEN pk.position IS NULL THEN 0 ELSE 1 END AS INTEGER) AS "is_primary_key",
+  CAST(pk.position AS INTEGER) AS "primary_key_ordinal",
+  CAST(0 AS INTEGER) AS "is_generated",
+  CAST(NULL AS VARCHAR(1)) AS "identity_generation",
+  CAST(NULL AS VARCHAR(1)) AS "collation",
+  cm.comments AS "comment",
+  CAST(NULL AS VARCHAR(1)) AS "column_extra"
+FROM all_tab_columns c
+LEFT JOIN (
+  SELECT cc.owner, cc.table_name, cc.column_name, cc.position
+  FROM all_constraints k
+  JOIN all_cons_columns cc ON cc.owner = k.owner AND cc.constraint_name = k.constraint_name
+  WHERE k.constraint_type = 'P'
+) pk ON pk.owner = c.owner AND pk.table_name = c.table_name AND pk.column_name = c.column_name
+LEFT JOIN all_col_comments cm
+  ON cm.owner = c.owner AND cm.table_name = c.table_name AND cm.column_name = c.column_name
+WHERE c.table_name = ?
+  AND c.owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+ORDER BY c.column_id
+"#;
+
+const DAMENG_INDEXES: &str = r#"
+SELECT
+  i.index_name AS "index_name",
+  ic.column_name AS "column_name",
+  CAST(ic.column_position AS INTEGER) AS "ordinal",
+  CAST(CASE WHEN i.uniqueness = 'UNIQUE' THEN 1 ELSE 0 END AS INTEGER) AS "is_unique",
+  CAST(CASE WHEN k.constraint_name IS NULL THEN 0 ELSE 1 END AS INTEGER) AS "is_primary",
+  CAST(0 AS INTEGER) AS "is_partial",
+  CAST(CASE WHEN i.status IN ('VALID', 'N/A') THEN 1 ELSE 0 END AS INTEGER) AS "is_valid",
+  LOWER(COALESCE(i.index_type, 'btree')) AS "method",
+  CAST(CASE WHEN EXISTS (
+    SELECT 1 FROM all_constraints u
+    WHERE u.owner = i.table_owner AND u.index_name = i.index_name AND u.constraint_type IN ('P', 'U')
+  ) THEN 1 ELSE 0 END AS INTEGER) AS "is_constraint"
+FROM all_indexes i
+JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name
+LEFT JOIN all_constraints k
+  ON k.owner = i.table_owner AND k.index_name = i.index_name AND k.constraint_type = 'P'
+WHERE i.table_name = ?
+  AND i.table_owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+ORDER BY i.index_name, ic.column_position
+"#;
+
+const DAMENG_FOREIGN_KEYS: &str = r#"
+SELECT
+  c.constraint_name AS "constraint_name",
+  CAST(cc.position AS INTEGER) AS "ordinal",
+  cc.column_name AS "column_name",
+  rc.owner AS "referenced_schema",
+  rc.table_name AS "referenced_table",
+  rcc.column_name AS "referenced_column",
+  'NO ACTION' AS "on_update",
+  COALESCE(c.delete_rule, 'NO ACTION') AS "on_delete"
+FROM all_constraints c
+JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+JOIN all_constraints rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name
+JOIN all_cons_columns rcc
+  ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name
+ AND rcc.position = cc.position
+WHERE c.constraint_type = 'R'
+  AND c.table_name = ?
+  AND c.owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+ORDER BY c.constraint_name, cc.position
+"#;
+
+const DAMENG_CHECK_CONSTRAINTS: &str = r#"
+SELECT
+  c.constraint_name AS "constraint_name",
+  c.search_condition AS "expression"
+FROM all_constraints c
+WHERE c.constraint_type = 'C'
+  AND c.table_name = ?
+  AND c.owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+  AND c.search_condition IS NOT NULL
+ORDER BY c.constraint_name
+"#;
+
+const DAMENG_DDL: &str = r#"
+SELECT DBMS_METADATA.GET_DDL(o.object_type, o.object_name, o.owner) AS "sql"
+FROM all_objects o
+WHERE o.object_name = ?
+  AND o.owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+  AND o.object_type IN ('TABLE', 'VIEW')
+"#;
+
+const DAMENG_TRIGGERS: &str = r#"
+SELECT
+  t.trigger_name AS "trigger_name",
+  t.triggering_type AS "timing",
+  t.triggering_event AS "event",
+  DBMS_METADATA.GET_DDL('TRIGGER', t.trigger_name, t.owner) AS "definition"
+FROM all_triggers t
+WHERE t.table_name = ?
+  AND t.table_owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+ORDER BY t.trigger_name
+"#;
 
 // DuckDB。目录来自 `duckdb_*()` 表函数（1.5.5 上逐段核对过），几处和别家不同：
 // - 只看当前库（`current_database()`）：`ATTACH` 进来的别的库也在这些表函数里。

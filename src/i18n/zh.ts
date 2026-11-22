@@ -2459,7 +2459,16 @@ export const zh = {
   'sessions.result.applied': '已执行：{statement}',
   'sessions.result.notApplied': '服务端返回未生效（会话 #{id} 可能已结束或当前账号无权操作）',
   'sessions.empty': '当前没有可显示的数据库会话',
-  'sessions.emptyFiltered': '没有符合筛选条件的会话'
+  'sessions.emptyFiltered': '没有符合筛选条件的会话',
+
+  // 达梦 DM8 ODBC 连接（DC5）
+  'form.db.dameng.desc': '国产关系型数据库（经本机官方 ODBC 驱动）',
+  'form.damengOdbcDriver': 'ODBC 驱动名称或路径（可选）',
+  'form.damengOdbcDriverPlaceholder': 'DM8 ODBC DRIVER 或 /opt/dmdbms/bin/libdodbc.so',
+  'form.damengOdbcDriverHint': '不随包分发闭源驱动；留空默认使用 DM8 ODBC DRIVER 或环境变量 DATAOMNI_DM8_ODBC_DRIVER',
+  'error.backend.damengDriverMissing': '找不到达梦官方 ODBC 驱动或系统未安装 unixODBC：{detail}',
+  'error.backend.damengConnectFailed': '达梦 DM8 连接失败：{detail}',
+  'error.backend.damengTlsUnsupported': '达梦 DM8 开启 TLS 时请指定包含客户端证书的 SSL 目录路径'
 } as const;
 
 export type TranslationKey = keyof typeof zh;

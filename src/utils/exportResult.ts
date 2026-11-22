@@ -188,7 +188,7 @@ export function sqlLiteral(value: SerializedResultValue, dialect: SqlDialect): s
   }
   if (typeof value === 'boolean') {
     // SQL Server 没有 TRUE；Oracle 23 之前也没有，布尔多半存成 NUMBER(1)
-    if (dialect === 'sqlserver' || dialect === 'oracle') {
+    if (dialect === 'sqlserver' || dialect === 'oracle' || dialect === 'dameng') {
       return value ? '1' : '0';
     }
     return value ? 'TRUE' : 'FALSE';
@@ -211,9 +211,13 @@ export function sqlLiteral(value: SerializedResultValue, dialect: SqlDialect): s
     case 'binary':
       return binaryLiteral(value.value, dialect);
     case 'date':
-      return dialect === 'oracle' ? `DATE '${value.value}'` : quoteSqlStringLiteral(value.value, dialect);
+      return dialect === 'oracle' || dialect === 'dameng'
+        ? `DATE '${value.value}'`
+        : quoteSqlStringLiteral(value.value, dialect);
     case 'datetime':
-      return dialect === 'oracle' ? `TIMESTAMP '${value.value}'` : quoteSqlStringLiteral(value.value, dialect);
+      return dialect === 'oracle' || dialect === 'dameng'
+        ? `TIMESTAMP '${value.value}'`
+        : quoteSqlStringLiteral(value.value, dialect);
     default:
       return textLiteral(value.value, dialect);
   }
@@ -230,7 +234,7 @@ const utf8 = new TextEncoder();
 
 /** 与 Rust 那侧的 `text_literal` 一致 */
 function textLiteral(text: string, dialect: SqlDialect): string {
-  if (dialect !== 'oracle' || utf8.encode(text).length <= ORACLE_LITERAL_BYTES) {
+  if ((dialect !== 'oracle' && dialect !== 'dameng') || utf8.encode(text).length <= ORACLE_LITERAL_BYTES) {
     return quoteSqlStringLiteral(text, dialect);
   }
   const pieces: string[] = [];

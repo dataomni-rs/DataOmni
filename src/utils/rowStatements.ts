@@ -80,6 +80,7 @@ function createPlaceholderAllocator(dialect: SqlIdentifierDialect): PlaceholderA
       case 'mysql':
       case 'sqlite':
       case 'duckdb':
+      case 'dameng':
         return '?';
       default:
         return unhandledDialect(dialect);
@@ -482,6 +483,7 @@ function displayPlaceholderPattern(dialect: SqlIdentifierDialect): string {
     case 'mysql':
     case 'sqlite':
     case 'duckdb':
+    case 'dameng':
       return '\\$\\d+|@P\\d+|\\?';
     default:
       return unhandledDialect(dialect);

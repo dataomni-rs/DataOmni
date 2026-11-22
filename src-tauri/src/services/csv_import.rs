@@ -418,6 +418,7 @@ enum Dialect {
   Postgres,
   SqlServer,
   Oracle,
+  Dameng,
   DuckDb,
 }
 
@@ -430,6 +431,7 @@ impl Dialect {
       SessionConnection::Postgres(_) => Self::Postgres,
       SessionConnection::SqlServer(_) => Self::SqlServer,
       SessionConnection::Oracle(_) => Self::Oracle,
+      SessionConnection::Dameng(_) => Self::Dameng,
       SessionConnection::DuckDb(_) => Self::DuckDb,
       SessionConnection::ClickHouse(_) => {
         return Err(QueryError::message(crate::services::clickhouse::CLICKHOUSE_WRITE_UNSUPPORTED))
@@ -451,7 +453,7 @@ impl Dialect {
   fn begin(&self) -> &'static str {
     match self {
       Self::SqlServer => "BEGIN TRANSACTION",
-      Self::Oracle => "SET TRANSACTION READ WRITE",
+      Self::Oracle | Self::Dameng => "SET TRANSACTION READ WRITE",
       _ => "BEGIN",
     }
   }
@@ -477,9 +479,10 @@ impl Dialect {
     *self != Self::DuckDb
   }
 
-  /// SQL Server 与 Oracle 没有释放保存点这回事，保存点随事务结束
+  /// SQL Server、Oracle 与达梦没有释放保存点这回事，保存点随事务结束
   fn release(&self, name: &str) -> Option<String> {
-    (!matches!(self, Self::SqlServer | Self::Oracle)).then(|| format!("RELEASE SAVEPOINT {name}"))
+    (!matches!(self, Self::SqlServer | Self::Oracle | Self::Dameng))
+      .then(|| format!("RELEASE SAVEPOINT {name}"))
   }
 
   /// 把绑进来的一串十六进制转成字节的表达式；Oracle 不用转，见 [`binary_param`]
@@ -491,6 +494,7 @@ impl Dialect {
       Self::DuckDb => format!("from_hex({placeholder})"),
       Self::SqlServer => format!("CONVERT(varbinary(max), {placeholder}, 2)"),
       Self::Oracle => placeholder.to_string(),
+      Self::Dameng => format!("HEXTORAW({placeholder})"),
     }
   }
 

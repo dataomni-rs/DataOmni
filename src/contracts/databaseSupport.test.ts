@@ -97,6 +97,11 @@ describe('数据库类型支持范围', () => {
     invokeMock.mockResolvedValueOnce(null);
     const fallback = await loadCompiledDrivers();
     expect(fallback.has(DatabaseType.Oracle)).toBe(true);
+
+    // 达梦 DM8 ODBC 驱动作为可选 feature 独立隔离，默认不开启以免强制链接系统 unixODBC
+    expect(CARGO_TOML).toMatch(/^odbc-api\s*=\s*\{[^}]*optional\s*=\s*true/m);
+    expect(CARGO_TOML).toMatch(/^odbc\s*=\s*\["dep:odbc-api"\]/m);
+    expect(CARGO_TOML).not.toMatch(/^default\s*=\s*\[[^\]]*"odbc"/m);
   });
 });
 

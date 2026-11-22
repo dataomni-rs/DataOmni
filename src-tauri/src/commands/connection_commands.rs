@@ -1,4 +1,5 @@
 use crate::models::{ConnectionProfile, DatabaseType};
+use crate::services::dameng::DamengRegistry;
 use crate::services::duckdb::DuckDbRegistry;
 use crate::services::mongodb::{MongoRegistry, MongoTarget};
 use crate::services::oracle::OracleRegistry;
@@ -184,6 +185,7 @@ pub async fn test_connection(
   tunnels: State<'_, TunnelRegistry>,
   sql_server_registry: State<'_, SqlServerRegistry>,
   oracle_registry: State<'_, OracleRegistry>,
+  dameng_registry: State<'_, DamengRegistry>,
   mongo_registry: State<'_, MongoRegistry>,
   redis_registry: State<'_, crate::services::redis::RedisRegistry>,
   neo4j_registry: State<'_, crate::services::neo4j::Neo4jRegistry>,
@@ -250,6 +252,26 @@ pub async fn test_connection(
       unreachable!(
         "resolve_for_connection already rejected Oracle when oracle feature is disabled"
       );
+    }
+  } else if resolved.db_type == DatabaseType::Dameng {
+    #[cfg(feature = "odbc")]
+    {
+      let reachable = match local_port {
+        Some(port) => resolved.redirected_to("127.0.0.1", port),
+        None => resolved,
+      };
+      let target = crate::services::dameng::DamengTarget::from_profile(&reachable)?;
+      let connection =
+        crate::services::dameng::connect(&target).await.map_err(|error| error.message)?;
+      dameng_registry.insert(
+        connection_string.clone(),
+        crate::services::dameng::DamengPool::new(target, connection),
+      );
+    }
+    #[cfg(not(feature = "odbc"))]
+    {
+      let _ = &dameng_registry;
+      unreachable!("resolve_for_connection already rejected Dameng when odbc feature is disabled");
     }
   } else if resolved.db_type == DatabaseType::MongoDB {
     let reachable = match local_port {
@@ -388,6 +410,27 @@ pub async fn oracle_select(
 #[tauri::command]
 pub fn close_oracle(connection_string: String, oracle_registry: State<'_, OracleRegistry>) -> bool {
   oracle_registry.remove(&connection_string)
+}
+
+/// 达梦 DM8 连接上的目录查询。与 `oracle_select` 同一个角色、同一种返回形状
+#[tauri::command]
+pub async fn dameng_select(
+  connection_string: String,
+  sql: String,
+  params: Vec<serde_json::Value>,
+  dameng_registry: State<'_, DamengRegistry>,
+) -> Result<Vec<crate::services::QueryRow>, crate::services::QueryError> {
+  let pool = dameng_registry.get(&connection_string).ok_or_else(|| {
+    crate::services::QueryError::message(
+      crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
+    )
+  })?;
+  pool.select(&sql, &params).await
+}
+
+#[tauri::command]
+pub fn close_dameng(connection_string: String, dameng_registry: State<'_, DamengRegistry>) -> bool {
+  dameng_registry.remove(&connection_string)
 }
 
 /// 相对路径落在应用的配置目录下，和插件对 SQLite 的处理一样——同一格表单，两种库

@@ -176,7 +176,9 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
             ? DatabaseType.SqlServer
             : dialect === 'oracle'
               ? DatabaseType.Oracle
-              : dialect === 'duckdb'
+              : dialect === 'dameng'
+                ? DatabaseType.Dameng
+                : dialect === 'duckdb'
                 ? DatabaseType.DuckDB
                 : dialect === 'clickhouse'
                   ? DatabaseType.ClickHouse

@@ -197,6 +197,7 @@ pub(super) fn dialect(profile: &ConnectionProfile) -> &'static str {
     (DatabaseType::SQLite, _) => "SQLite",
     (DatabaseType::SqlServer, _) => "SQL Server",
     (DatabaseType::Oracle, _) => "Oracle",
+    (DatabaseType::Dameng, _) => "Dameng DM8",
     (DatabaseType::MongoDB, _) => "MongoDB",
     (DatabaseType::Redis, _) => "Redis",
     (DatabaseType::Neo4j, _) => "Neo4j",

@@ -218,6 +218,7 @@ export function pageClause(
     case 'sqlite':
     case 'duckdb':
     case 'clickhouse':
+    case 'dameng':
       return `${orderClause} LIMIT ${limit} OFFSET ${offset}`;
     default:
       return unhandledDialect(dialect);
@@ -396,6 +397,7 @@ export function firstRowsQuery(
     case 'sqlite':
     case 'duckdb':
     case 'clickhouse':
+    case 'dameng':
       return `SELECT * FROM ${name} LIMIT ${count};`;
     default:
       return unhandledDialect(dialect);

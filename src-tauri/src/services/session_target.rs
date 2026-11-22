@@ -25,6 +25,7 @@ pub fn session_target_query(db_type: &DatabaseType) -> Option<SessionTargetQuery
     DatabaseType::SQLite => Some(SessionTargetQuery { sql: SQLITE_TARGET }),
     DatabaseType::SqlServer => Some(SessionTargetQuery { sql: SQL_SERVER_TARGET }),
     DatabaseType::Oracle => Some(SessionTargetQuery { sql: ORACLE_TARGET }),
+    DatabaseType::Dameng => Some(SessionTargetQuery { sql: DAMENG_TARGET }),
     DatabaseType::DuckDB => Some(SessionTargetQuery { sql: DUCKDB_TARGET }),
     DatabaseType::ClickHouse => Some(SessionTargetQuery { sql: CLICKHOUSE_TARGET }),
     _ => None,
@@ -83,6 +84,15 @@ SELECT
   SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS "schema_name",
   CAST(CASE WHEN SYS_CONTEXT('USERENV', 'DATABASE_ROLE') LIKE '%STANDBY%' THEN 1 ELSE 0 END
     AS NUMBER(1)) AS "read_only"
+FROM dual
+"#;
+
+/// 达梦 DM8：数据库实例名与当前模式名，均加双引号保留小写别名
+const DAMENG_TARGET: &str = r#"
+SELECT
+  SYS_CONTEXT('USERENV', 'DB_NAME') AS "database_name",
+  SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS "schema_name",
+  CAST(0 AS INTEGER) AS "read_only"
 FROM dual
 "#;
 

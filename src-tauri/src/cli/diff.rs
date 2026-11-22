@@ -139,6 +139,7 @@ pub(super) fn supports_diff(db_type: &DatabaseType) -> bool {
         | DatabaseType::SQLite
         | DatabaseType::DuckDB
         | DatabaseType::Oracle
+        | DatabaseType::Dameng
     )
 }
 

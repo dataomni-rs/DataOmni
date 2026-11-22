@@ -9,6 +9,7 @@
 //! 函数与存储过程不在这里：对象目录（`object_catalog`）已经把它们拉下来缓存了，
 //! 再查一次只是多一次往返。
 
+use crate::dameng_user_schemas;
 use crate::models::DatabaseType;
 use crate::services::oracle::{oracle_type_name, oracle_user_schemas};
 use crate::services::sql_server::sql_server_type_name;
@@ -40,6 +41,9 @@ pub fn completion_catalog_query(db_type: &DatabaseType) -> Option<CompletionCata
     }
     DatabaseType::Oracle => {
       Some(CompletionCatalogQuery { relations: ORACLE_RELATIONS, parameter_count: 0 })
+    }
+    DatabaseType::Dameng => {
+      Some(CompletionCatalogQuery { relations: DAMENG_RELATIONS, parameter_count: 0 })
     }
     DatabaseType::DuckDB => {
       Some(CompletionCatalogQuery { relations: DUCKDB_RELATIONS, parameter_count: 0 })
@@ -151,6 +155,26 @@ WHERE "#,
   oracle_user_schemas!(),
   r#"
   AND c.table_name NOT LIKE 'BIN$%'
+ORDER BY c.owner, c.table_name, c.column_id
+"#
+);
+
+const DAMENG_RELATIONS: &str = concat!(
+  r#"
+SELECT
+  c.owner AS "relation_schema",
+  c.table_name AS "relation_name",
+  CASE WHEN o.object_type = 'VIEW' THEN 'view' ELSE 'table' END AS "relation_kind",
+  c.column_name AS "column_name",
+  c.data_type AS "data_type"
+FROM all_tab_columns c
+JOIN all_objects o ON o.owner = c.owner AND o.object_name = c.table_name
+  AND o.object_type IN ('TABLE', 'VIEW')
+WHERE "#,
+  dameng_user_schemas!("c.owner"),
+  r#"
+  AND c.table_name NOT LIKE 'SYS_%'
+  AND c.table_name NOT LIKE '##%'
 ORDER BY c.owner, c.table_name, c.column_id
 "#
 );

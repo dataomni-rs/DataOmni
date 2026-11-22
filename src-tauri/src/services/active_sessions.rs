@@ -81,6 +81,12 @@ pub fn active_sessions_query(db_type: &DatabaseType) -> Option<ActiveSessionsQue
       supports_cancel: false,
       supports_terminate: true,
     }),
+    DatabaseType::Dameng => Some(ActiveSessionsQuery {
+      sql: DAMENG_SESSIONS,
+      fallback_sql: None,
+      supports_cancel: false,
+      supports_terminate: true,
+    }),
     DatabaseType::ClickHouse => Some(ActiveSessionsQuery {
       sql: CLICKHOUSE_SESSIONS,
       fallback_sql: Some(CLICKHOUSE_SESSIONS_FALLBACK),
@@ -232,6 +238,26 @@ SELECT * FROM (
 WHERE ROWNUM <= 200
 "#;
 
+/// 达梦 DM8：`V$SESSIONS`，使用 `SP_CLOSE_SESSION(sess_id)` 终止会话。
+const DAMENG_SESSIONS: &str = r#"
+SELECT
+  TO_CHAR(s.SESS_ID) AS "session_id",
+  NVL(s.USER_NAME, '') AS "username",
+  NVL(s.CURR_SCH, '') AS "database_name",
+  NVL(s.CLNT_IP, '') AS "client_addr",
+  NVL(s.STATE, '') AS "state",
+  GREATEST(0, CAST(DATEDIFF(SECOND, NVL(s.LAST_RECV_TIME, SYSDATE), SYSDATE) AS BIGINT)) AS "duration_seconds",
+  CAST(NULL AS VARCHAR(1)) AS "wait_event",
+  CAST(NULL AS VARCHAR(1)) AS "blocking_pid",
+  SUBSTR(NVL(s.SQL_TEXT, ''), 1, 2000) AS "sql_text",
+  CASE WHEN s.SESS_ID = SESSID() THEN 1 ELSE 0 END AS "is_current"
+FROM V$SESSIONS s
+ORDER BY
+  CASE WHEN s.STATE = 'ACTIVE' THEN 0 ELSE 1 END,
+  "duration_seconds" DESC
+LIMIT 200
+"#;
+
 /// ClickHouse：`system.processes`（按 `query_id` 标识正在执行的查询）。
 const CLICKHOUSE_SESSIONS: &str = r#"
 SELECT
@@ -366,6 +392,16 @@ pub async fn execute_session_action<'a>(
       let statement = format!("ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE");
       let mut conn = pool.acquire_for_session().await?;
       conn.execute_with_params(&statement, &[]).await?;
+      Ok(TerminateSessionResult { applied: true, statement })
+    }
+    PoolRef::Dameng(pool) => {
+      if action != SessionAction::Terminate {
+        return Err(QueryError::message(format!("{SESSION_ACTION_UNSUPPORTED}: Dameng")));
+      }
+      let sess_id = parse_positive_u64(session_id)?;
+      let statement = format!("CALL SP_CLOSE_SESSION({sess_id})");
+      let mut conn = pool.acquire_for_session().await?;
+      conn.execute_batch(&statement).await?;
       Ok(TerminateSessionResult { applied: true, statement })
     }
     PoolRef::ClickHouse(pool) => {

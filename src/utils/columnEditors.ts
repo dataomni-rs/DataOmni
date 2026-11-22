@@ -90,7 +90,7 @@ export function binaryLiteral(hex: string, dialect: SqlIdentifierDialect): strin
     return `0x${normalized}`;
   }
   // Oracle 没有二进制字面量
-  if (dialect === 'oracle') {
+  if (dialect === 'oracle' || dialect === 'dameng') {
     return `HEXTORAW('${normalized}')`;
   }
   if (dialect === 'duckdb') {

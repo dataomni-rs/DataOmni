@@ -130,6 +130,7 @@ pub async fn execute_write_batch<'a>(
     PoolRef::Sqlx(pool) => pool,
     PoolRef::SqlServer(pool) => return pool.write_batch(statements).await,
     PoolRef::Oracle(pool) => return pool.write_batch(statements).await,
+    PoolRef::Dameng(pool) => return pool.write_batch(statements).await,
     PoolRef::DuckDb(pool) => return pool.write_batch(statements).await,
     // 没有事务：一项改动是「数一遍 → 执行 → 核对」三条，照顺序跑、逐条核对
     PoolRef::ClickHouse(pool) => return pool.write_batch(statements).await,

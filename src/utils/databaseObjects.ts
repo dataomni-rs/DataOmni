@@ -92,6 +92,7 @@ export function showsSchemaLevel(dbType: DatabaseType): boolean {
     || dbType === DatabaseType.ClickHouse
     || dbType === DatabaseType.SqlServer
     || dbType === DatabaseType.Oracle
+    || dbType === DatabaseType.Dameng
     || dbType === DatabaseType.DuckDB
     || dbType === DatabaseType.MongoDB
     || dbType === DatabaseType.Neo4j;

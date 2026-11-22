@@ -128,6 +128,13 @@ export const createDefaultConfig = (
         database: ORACLE_DEFAULT_SERVICE,
         username: 'system',
       };
+    case DatabaseType.Dameng:
+      return {
+        ...baseConfig,
+        port: 5236,
+        database: 'SYSDBA',
+        username: 'SYSDBA',
+      };
     case DatabaseType.MongoDB:
       return {
         ...baseConfig,
@@ -188,6 +195,8 @@ export const getDefaultPort = (type: DatabaseType): number => {
       return 1433;
     case DatabaseType.Oracle:
       return 1521;
+    case DatabaseType.Dameng:
+      return 5236;
     case DatabaseType.MongoDB:
       return 27017;
     case DatabaseType.Redis:

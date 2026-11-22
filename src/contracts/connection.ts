@@ -4,6 +4,7 @@ export enum DatabaseType {
   SQLite = 'sqlite',
   SqlServer = 'sqlserver',
   Oracle = 'oracle',
+  Dameng = 'dameng',
   MongoDB = 'mongodb',
   Redis = 'redis',
   Neo4j = 'neo4j',

@@ -124,6 +124,9 @@ pub enum DatabaseType {
   /// 同样由后端持有：驱动是 ODPI-C，运行时要 Instant Client。见 `services/oracle.rs`
   #[serde(rename = "oracle")]
   Oracle,
+  /// 经可选 `odbc` feature 对接用户本机达梦官方 ODBC 驱动（BYO）。见 `services/dameng.rs`
+  #[serde(rename = "dameng")]
+  Dameng,
 
   // 非关系型数据库
   #[serde(rename = "mongodb")]
@@ -143,12 +146,13 @@ pub enum DatabaseType {
 }
 
 impl DatabaseType {
-  pub const ALL: [DatabaseType; 11] = [
+  pub const ALL: [DatabaseType; 12] = [
     DatabaseType::SQLite,
     DatabaseType::MySQL,
     DatabaseType::PostgreSQL,
     DatabaseType::SqlServer,
     DatabaseType::Oracle,
+    DatabaseType::Dameng,
     DatabaseType::DuckDB,
     DatabaseType::ClickHouse,
     DatabaseType::MongoDB,
@@ -175,6 +179,7 @@ impl DatabaseType {
   pub fn has_driver(&self) -> bool {
     match self {
       DatabaseType::Oracle => cfg!(feature = "oracle"),
+      DatabaseType::Dameng => cfg!(feature = "odbc"),
       _ => {
         self.speaks_sql()
           || matches!(
@@ -201,6 +206,7 @@ impl DatabaseType {
         | DatabaseType::SQLite
         | DatabaseType::SqlServer
         | DatabaseType::Oracle
+        | DatabaseType::Dameng
         | DatabaseType::DuckDB
         | DatabaseType::ClickHouse
     )
@@ -213,6 +219,7 @@ impl DatabaseType {
       DatabaseType::SQLite => 0, // SQLite 不需要端口
       DatabaseType::SqlServer => 1433,
       DatabaseType::Oracle => 1521,
+      DatabaseType::Dameng => 5236,
       DatabaseType::MongoDB => 27017,
       DatabaseType::Redis => 6379,
       DatabaseType::Neo4j => 7687, // Neo4j Bolt 端口
@@ -322,6 +329,15 @@ impl DatabaseType {
         config.port,
         encode(config.database.as_deref().unwrap_or("")),
         if config.oracle_sid() { "?sid" } else { "" }
+      ),
+      // 达梦 ODBC 连接由后端 DamengRegistry 管理，连接串仅作池键，不带口令
+      DatabaseType::Dameng => format!(
+        "{}{}@{}:{}/{}",
+        crate::services::dameng::DAMENG_SCHEME,
+        encode(&config.username),
+        config.host,
+        config.port,
+        encode(config.database.as_deref().unwrap_or(""))
       ),
       // 和 SQL Server 同一个理由：是 `MongoRegistry` 里的键，不带口令。最后一段是认证库。
       // SRV 没有端口：服务端地址在 DNS 里
@@ -443,6 +459,14 @@ impl ConnectionProfile {
   pub fn oracle_sid(&self) -> bool {
     self.db_type == DatabaseType::Oracle
       && self.options.get(ORACLE_CONNECT_BY_OPTION).is_some_and(|value| value == ORACLE_SID)
+  }
+
+  /// 达梦 DM8 ODBC 驱动名称或绝对路径（BYO 官方 libdodbc.so / dodbc.dll），未填则返回 None
+  pub fn dameng_odbc_driver(&self) -> Option<&str> {
+    if self.db_type != DatabaseType::Dameng {
+      return None;
+    }
+    self.options.get("odbcDriver").map(|value| value.trim()).filter(|v| !v.is_empty())
   }
 
   /// 经 Sentinel 连时的主节点名（去掉两头空白，可能是空的——由调用方拒）；不经 Sentinel 是 `None`

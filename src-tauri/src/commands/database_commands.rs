@@ -15,6 +15,7 @@ use tokio::time::Duration;
 pub const QUERY_CANCELLED_CODE: &str = "QUERY_CANCELLED";
 
 use crate::services::clickhouse::{ClickHouseRegistry, CLICKHOUSE_SCHEME};
+use crate::services::dameng::{DamengRegistry, DAMENG_SCHEME};
 use crate::services::duckdb::{DuckDbRegistry, DUCKDB_SCHEME};
 use crate::services::oracle::{OracleRegistry, ORACLE_SCHEME};
 use crate::services::query_executor::PoolRef;
@@ -54,16 +55,19 @@ enum ResolvedPool {
   Sqlx(Option<DbPool>),
   SqlServer(std::sync::Arc<crate::services::SqlServerPool>),
   Oracle(std::sync::Arc<crate::services::oracle::OraclePool>),
+  Dameng(std::sync::Arc<crate::services::dameng::DamengPool>),
   DuckDb(std::sync::Arc<crate::services::duckdb::DuckDbPool>),
   ClickHouse(std::sync::Arc<crate::services::clickhouse::ClickHousePool>),
 }
 
 impl ResolvedPool {
+  #[allow(clippy::too_many_arguments)]
   async fn resolve(
     connection_string: String,
     database_instances: &SqlxRegistry,
     sql_server: &SqlServerRegistry,
     oracle: &OracleRegistry,
+    dameng: &DamengRegistry,
     duckdb: &DuckDbRegistry,
     clickhouse: &ClickHouseRegistry,
   ) -> Result<ResolvedPool, QueryError> {
@@ -77,6 +81,12 @@ impl ResolvedPool {
       return duckdb
         .get(&connection_string)
         .map(ResolvedPool::DuckDb)
+        .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
+    }
+    if connection_string.starts_with(DAMENG_SCHEME) {
+      return dameng
+        .get(&connection_string)
+        .map(ResolvedPool::Dameng)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
     if connection_string.starts_with(ORACLE_SCHEME) {
@@ -105,6 +115,7 @@ impl ResolvedPool {
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED)),
       Self::SqlServer(pool) => Ok(PoolRef::SqlServer(pool)),
       Self::Oracle(pool) => Ok(PoolRef::Oracle(pool)),
+      Self::Dameng(pool) => Ok(PoolRef::Dameng(pool)),
       Self::DuckDb(pool) => Ok(PoolRef::DuckDb(pool)),
       Self::ClickHouse(pool) => Ok(PoolRef::ClickHouse(pool)),
     }
@@ -180,6 +191,7 @@ pub async fn execute_query(
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<QueryExecutionSummary, QueryError> {
@@ -211,6 +223,7 @@ pub async fn execute_query(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )
@@ -261,6 +274,7 @@ pub async fn execute_write_batch(
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<Vec<u64>, WriteBatchError> {
@@ -285,6 +299,7 @@ pub async fn execute_write_batch(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )
@@ -327,6 +342,7 @@ pub async fn export_query_to_file(
   cancellation_state: State<'_, QueryCancellationState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<ExportSummary, QueryError> {
@@ -348,6 +364,7 @@ pub async fn export_query_to_file(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )
@@ -393,6 +410,7 @@ pub async fn backup_database(
   database_instances: State<'_, SqlxRegistry>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::backup::BackupKind, QueryError> {
@@ -436,6 +454,7 @@ pub async fn backup_database(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )
@@ -538,6 +557,7 @@ pub async fn import_csv_file(
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<ImportSummary, QueryError> {
@@ -563,6 +583,7 @@ pub async fn import_csv_file(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )
@@ -684,6 +705,7 @@ pub async fn explain_query(
   query_session_state: State<'_, QuerySessionState>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::explain::QueryPlan, QueryError> {
@@ -712,6 +734,7 @@ pub async fn explain_query(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )
@@ -860,6 +883,7 @@ pub async fn terminate_database_session(
   database_instances: State<'_, SqlxRegistry>,
   sql_server: State<'_, SqlServerRegistry>,
   oracle: State<'_, OracleRegistry>,
+  dameng: State<'_, DamengRegistry>,
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::TerminateSessionResult, QueryError> {
@@ -880,6 +904,7 @@ pub async fn terminate_database_session(
     &database_instances,
     &sql_server,
     &oracle,
+    &dameng,
     &duckdb,
     &clickhouse,
   )

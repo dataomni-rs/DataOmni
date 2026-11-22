@@ -45,6 +45,7 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 | KingbaseES | V9 (PG mode) | PostgreSQL | ✅ Supported |
 | SQL Server | 2022 | SQL Server | ✅ Supported |
 | Oracle | 23ai Free | Oracle (Instant Client bundled) | ✅ Supported (service name or SID; TLS needs a wallet and is not supported, use an SSH tunnel) |
+| Dameng DM8 | V8 (`0x7000c`) | Dameng DM8 (opt-in `--features odbc` + BYO official ODBC driver) | ⚠️ Optional feature, BYO official driver (Linux/Windows x64; no EXPLAIN / visual structure editing; no official macOS ARM64 driver yet) |
 | DuckDB | 2.0.0, built in | DuckDB | ✅ Supported |
 | ClickHouse | 25.8 | ClickHouse (HTTP) | ⚠️ Edits one row at a time, no transactions |
 | MongoDB | 8.0 | MongoDB | ⚠️ Document-level, with gaps (no `db.coll.find()` JavaScript syntax) |
