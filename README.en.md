@@ -10,9 +10,10 @@ available in English and Chinese (the language switch is at the bottom of the si
 
 ## Why DataOmni
 
-- **One client for 14 kinds of servers.** MySQL, PostgreSQL, SQLite, SQL Server, Oracle, DuckDB and
-  ClickHouse, plus MariaDB, TiDB, OceanBase, CockroachDB and openGauss through the compatible
-  connection types. MongoDB, Redis, Neo4j and Elasticsearch each get their own workspace.
+- **One client for 16+ kinds of servers.** MySQL, PostgreSQL, SQLite, SQL Server, Oracle, DuckDB,
+  ClickHouse and opt-in Dameng DM8 (`--features odbc` + BYO official ODBC driver), plus MariaDB, TiDB,
+  OceanBase, CockroachDB, openGauss (sha256 & SM3) and KingbaseES (PG mode) through the compatible
+  connection types. MongoDB, Redis, Neo4j and Elasticsearch / OpenSearch each get their own workspace.
 - **Every statement it sends is guarded.** Edits are queued, previewed as the exact SQL that will
   run, committed in one transaction, and each affected row count is checked. Destructive statements
   ask first, and the threshold depends on the connection's environment (production is stricter).
@@ -60,7 +61,12 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
 
 - SQL editor with dialect-aware statement splitting (strings, comments and dollar-quoted bodies
   are handled), formatting, and completion from the live schema: tables, views and their columns,
-  aliases (`FROM orders o` then `o.`), and keywords filtered by dialect.
+  aliases (`FROM orders o` then `o.`), bare column completion directly after `FROM` / `JOIN` (with
+  source-table disambiguation across multi-table joins), and keywords filtered by dialect.
+- Active Sessions & Locks diagnostic panel for relational servers (MySQL, PostgreSQL, openGauss,
+  KingbaseES, SQL Server, Oracle, ClickHouse and Dameng DM8): manual on-demand refresh (zero
+  background polling), lock-wait visibility, and two-step confirmation with `PROD` warning before
+  terminating a session.
 - Timeouts and cancellation that stop the statement on the server, not just on the client.
 - Results are capped by a row limit and streamed in batches. Several result sets per statement
   (`EXEC`, `CALL`) are shown one by one.
@@ -133,7 +139,8 @@ not from protocol compatibility on paper. The last full run was on 2026-10-16. T
   X.509 authentication are supported.
 - **Redis**: databases with keys, `SCAN`-based key browsing by pattern and type, viewers and editors
   for string, hash, list, set, sorted set and stream values. Python pickle and JSON values are decoded
-  and highlighted. A console with redis-cli syntax and output. Sentinel and Cluster are supported.
+  and highlighted. A console with redis-cli syntax and output. Multi-node Sentinel failover (with
+  automatic `READONLY` master rediscovery and single retry) and Cluster are supported.
 - **Neo4j**: labels and relationship types, a Cypher editor, results drawn as a graph, and editing
   nodes and relationships (properties, labels, creating and deleting). `EXPLAIN` and `PROFILE` plans.
 - **Elasticsearch / OpenSearch**: indices, aliases and data streams, a console in Kibana Dev Tools

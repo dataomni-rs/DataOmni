@@ -89,9 +89,9 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   没有触发器与存储过程。按连上之后 `VERSION()` 分辨，从 MySQL 入口连的也一样。
 - **OceanBase**（MySQL 模式）：从 MySQL 入口连，端口 2881，用户名写 `用户@租户`（如 `root@test`）。
   执行计划解析的是它自己的 `FORMAT=JSON`（算子挂在 `CHILD_n` 下），没有「真的执行一遍」；改结构时
-  同时改列和改表名同样拆成两条（要重写表的改列与改表名同句它报 1235）。缺口：表达式默认值
-  （`DEFAULT (UUID())`）在目录里与同样文字的字符串默认值分不开，改结构时这一列会被重述成字符串默认值，
-  预览里看得见，动这种列前先核对。备份用 `mysqldump` 或 `mariadb-dump` 都行；恢复要用 MariaDB 的
+  同时改列和改表名同样拆成两条（要重写表的改列与改表名同句它报 1235）。表达式默认值
+  （`DEFAULT (UUID())`）在结构编辑与跨库结构比对时自动经 `SHOW CREATE TABLE` 词法扫描消歧并补标
+  `DEFAULT_GENERATED`，避免被误重述为字符串字面量。备份用 `mysqldump` 或 `mariadb-dump` 都行；恢复要用 MariaDB 的
   `mariadb` 客户端——mysql 命令行客户端（Homebrew 的 26.7）对它的每一条非查询语句都报 `Malformed packet`。
 - **openGauss**（GaussDB 同源）：建库时要 `DBCOMPATIBILITY 'PG'`（默认的 `'A'` 是 Oracle 语义，没测过）。
   只存 sha256（`password_encryption_type = 2`，openGauss 默认）或国密 SM3（`password_encryption_type = 3`）口令的用户都连得上：标准 PostgreSQL 驱动不认这两类认证，应用在本机开一个只给这条连接用的转发口代为登录，TLS 照连接里的设置。序列的属性页查序列关系本身（它没有 `pg_sequences`，也就没有数据类型那一项）。
@@ -188,7 +188,7 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
   写法同筛选框；删除类与无条件的批量写按「危险语句确认」先问，认不出的命令按写算，改连接登录
   状态的（`logout` 等）拒跑，`find` 只回第一批。还没有的：`db.coll.find()` 这种 JS 写法（要 JS 引擎）。
   详见 [用户手册](docs/user-manual.md#mongodb)。
-- **Redis**：连接（口令与 ACL 用户、库号、TLS 与 CA、SSH 隧道；经 Sentinel 连主节点，主从切换之后重新连接即可；集群，键浏览逐个主节点扫，只有 0 号库，Sentinel 与集群不能走隧道）、对象树列出有键的逻辑库、
+- **Redis**：连接（口令与 ACL 用户、库号、TLS 与 CA、SSH 隧道；经多哨兵节点列表连主节点，单哨兵不可达自动顺序降级，主从切换遇 `READONLY` 自动重新发现新主并单次重试；集群，键浏览逐个主节点扫，只有 0 号库，Sentinel 与集群不能走隧道）、对象树列出有键的逻辑库、
   键浏览页（按模式与类型用 `SCAN` 逐页翻，每个键带类型与剩余时间；string、hash、list、set、
   zset、stream 各一种表，大的值分页读，字符串只带前 512 KiB；不是 UTF-8 的键和值按 redis-cli
   的写法转义并标出）、命令行（写法与回答都同 redis-cli；会阻塞或改连接状态的命令拒跑，
@@ -233,8 +233,9 @@ MySQL 一组 42 条、PostgreSQL 一组 39 条；只在设了专门的环境变�
 - 查询超时与取消，区分「取消请求中」和「已取消」
 - 结果按行数上限截断并流式分批回传，超出内存预算时明确报错
 - 补全按当前连接的真实结构给：表、视图与它们的列（列带完整类型），
-  `FROM orders o` 之后 `o.` 补出 orders 的列；关键字按方言过滤
+  `FROM orders o` 之后 `o.` 补出 orders 的列，`FROM orders` 后直接输入也可补全无表别名裸列（多表 `JOIN` 自动消歧并回显来源表名）；关键字按方言过滤
   （`AUTO_INCREMENT` 只在 MySQL 出现，`RETURNING` 只在 PostgreSQL 出现）
+- 关系库活跃会话与锁诊断面板（MySQL / PostgreSQL / openGauss / KingbaseES / SQL Server / Oracle / ClickHouse / Dameng DM8）：按需手动刷新（零后台轮询），支持按条件筛选与查看锁等待关系，终止会话强制经二次确认（`PROD` 红色警示）
 - 格式化 SQL（⌘⇧F）：有选区只排选区；解析不了时只报错、正文不动
 - 编辑器快捷键：查找 ⌘F、下一个 ⌘G、上一个 ⇧⌘G、跳转到行 ⌘⌥G、
   注释 ⌘/、块注释 ⇧⌥A；查找与跳转面板跟随界面语言
@@ -595,6 +596,18 @@ bun install
 ### 未发布
 
 （暂无）
+
+### v1.3.1（2026-11-22）
+
+- 国产数据库适配与方言缺口收口（`rfcs/driver-and-gap-closure.md`，`DC0–DC7`）：
+  - **openGauss SM3 认证**：本地转发口新增国密 SM3（`AUTH_REQ_SM3 = 13`，GB/T 32905-2016）挑战应答支持，同时兼容 `password_encryption_type = 2`（SHA256）与 `3`（SM3），并将转发监听迁移至独立常驻 Tokio 运行时，修复多连接与短命运行时切换导致的监听失活；
+  - **KingbaseES（人大金仓 V9，PG 模式）**：通过 UTF-8 真库 42/42 全量冒烟验收（目录、执行计划、改结构、绑定参数、导入导出与 `pg_dump` 备份），自动过滤 `sys_catalog`、`sysmac`、`sysaudit` 等 9 个内置系统 schema，新增连接表单快捷预设与 DBeaver 导入映射；
+  - **Dameng DM8（达梦 V8）**：新增默认关闭的可选 `odbc` Cargo feature（`odbc-api` + 用户本机官方 `libdodbc`/`dodbc` 驱动，纳入 `M1` 动态驱动收窄、零闭源动态库随包分发），覆盖对象目录、元数据、补全、ER 图、流式参数化查询、事务批量写入、流式导出、活跃会话与只读 CLI / MCP，内置自动临时 `dm_svc.conf`（`PG_UTF8`）与超长 CLOB 宽字符防截断/防 panic 处理；
+  - **关系库活跃会话与锁诊断面板**：覆盖 MySQL、PostgreSQL、openGauss、KingbaseES、SQL Server、Oracle、ClickHouse 与 Dameng DM8，工具栏与命令面板按需手动刷新（零后台轮询），终止会话强制二次确认并遵循 `PROD` 红色警示；
+  - **SQL 编辑器无表别名裸列补全**：`FROM` / `JOIN` 引用表后无需前缀即可直接补全对应列名，多表同名列自动标注来源表并兼容引号标识符、子查询与语句边界；
+  - **Redis Sentinel 故障转移增强**：支持填写多哨兵节点列表自动顺序降级探主，写操作或普通命令遇切主 `READONLY` 时自动重新发现新主并执行单次重试（含防死循环保护）；
+  - **OceanBase 表达式默认值消歧**：MySQL 模式下改结构与跨库结构比对自动扫描 `SHOW CREATE TABLE` 补标 `DEFAULT_GENERATED`，避免 `DEFAULT (UUID())` 等表达式默认值被误重述为字符串字面量。
+- 前端构建依赖安全加固：`typescript-eslint` 升级至 `^8.73.0`（连带 `minimatch ^11.0.1`），摘除 `audit:frontend` 全部临时 `--ignore`，342 个前端包零已知漏洞。
 
 ### v1.3.0（2026-11-21）
 
