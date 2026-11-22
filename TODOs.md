@@ -27,7 +27,7 @@
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
-| v1.3.1+ 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [-] `DC0–DC4` + `DC6` 已随 PR `#69` 合入 `main`，`DC7` 已完成；下一步推进 `DC5`（达梦 DM8 `odbc` feature 路线） |
+| v1.3.1+ 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [x] `DC0–DC7` 全部完成（`DC0–DC4` + `DC6` PR `#69`、`DC7` PR `#70`、`DC5` 达梦 DM8 `odbc` feature 已在 `feat/dc5-dameng-odbc` 完成待合入） |
 | 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
@@ -79,9 +79,9 @@
 
 - [x] M1 数据库驱动按 Cargo feature 解耦（承接 `B4`）（`0f64974`）
   - 已将 `oracle`（ODPI-C 动态库驱动）拆为默认开启的 Cargo feature（`default = ["ai", "oracle"]`），关闭时不编译链接 `oracle` crate 且不注入 Linux `instantclient` `DT_RPATH`；`DatabaseType` 枚举保持完整以无损读写跨版本 `connections.json`，未编入时以零尺寸空枚举封闭池类型并在 `resolve_for_connection` 与 CLI/MCP 返回 `DATAOMNI_UNSUPPORTED_DATABASE`；新增 `compiled_drivers` 供 `ConnectionForm` 动态隐藏未编译驱动（编辑旧配置保留只读显示），CI 新增 `--no-default-features` 单测门禁（默认 455 条、无默认特性 443 条、前端 193 文件 2331 条全绿）。
-- [ ] M2 国产与更多数据库按安装包接入（承接 `E4` / `B1b`）
-  - [x] KingbaseES（人大金仓）：已随 `DC6` 完成 V9（`V009R001C`，PG 模式）全量 42/42 真库冒烟、系统 schema 过滤、连接表单快捷入口与文档更新。
-  - [ ] 达梦（DM8）：见下方 `DC0-E2` 实测结论与 `DC5`（待拍板可选 `odbc` Cargo feature 路线后落地）。
+- [x] M2 国产与更多数据库按安装包接入（承接 `E4` / `B1b`）
+  - [x] KingbaseES（人大金仓）：已随 `DC6`（PR `#69`）完成 V9（`V009R001C`，PG 模式）全量 42/42 真库冒烟、系统 schema 过滤、连接表单快捷入口与文档更新。
+  - [x] 达梦（DM8）：已随 `DC5`（`87ab19a`）经可选 `odbc` Cargo feature + BYO 官方驱动路线落地，纳入 `M1` `compiled_drivers` 动态收窄、零闭源库随包分发。
 - [ ] M3 Mac App Store（MAS）沙盒构建变体（可选上架渠道，前置 `U2` + `M1`）
   - 决定上架 MAS 时先写 `rfcs/mac-app-store.md`：基于关闭内置 `oracle` 的 feature 变体，补齐 `Entitlements.mas.plist` / `Entitlements.mas.inherit.plist`（`app-sandbox`、`network.client`、`network.server`、`files.user-selected.read-write`）与 `ITSAppUsesNonExemptEncryption = false`；为 SQLite（含同目录伴生文件权限）、DuckDB、SSH 私钥与 TLS 证书实现 macOS Security-Scoped Bookmarks 跨重启持久化，沙盒下将 `known_hosts` 迁入应用容器目录，并提供一键打开的内置示例 SQLite 库供审核体验。
 
@@ -196,7 +196,7 @@
 
 ### Phase 2（P1，依赖外部实验环境，承接 `M2` / `B1b`）
 
-- [-] DC5 达梦 DM8 完整接入（已确认走 `M1` 可选 `odbc` Cargo feature + BYO 官方驱动路线，即将于 `cu` 跑 `odbc-api` + `libdodbc.so` 实测并进入实现）
+- [x] DC5 达梦 DM8 完整接入（`87ab19a`，新增默认关闭的 `odbc = ["dep:odbc-api"]` Cargo feature 与 BYO 官方驱动支持，纳入 `M1` `compiled_drivers`；落地 `services/dameng.rs` 含自动临时 `DM_SVC_PATH` `PG_UTF8`、CLOB 宽字符防截断/防 panic、二进制解码、参数化流式查询、事务批量写入、流式导出、只读 CLI/MCP 及全套对象/元数据/补全/ER/活跃会话查询与 `tests/dameng_smoke.rs`；`cu` 真 DM8 12/12 目录与会话查询 + 60K CLOB/含 LOB 参数化/GET_DDL/事务回滚实测全通；前端 218 文件 2455 条单测、Rust 三特性 `clippy`、默认 518 条与 `--no-default-features` 502 条单测全绿）
 - [x] DC6 人大金仓 KingbaseES（PG 模式）完整接入（`cu` 上 `if010/kingbase:v009r001c001b0025` `DB_MODE=pg` 真库实测 DataOmni 全量 42 条 PostgreSQL 冒烟 UTF-8 库 42/42 全通含目录/执行计划/改结构/绑定参数/导入导出/`pg_dump` 备份；`object_catalog.rs` `postgres_hidden_schemas!()` 补齐 9 个 KingbaseES 内置系统 schema 过滤并由 `database_smoke.rs` 先红后绿钉住，前端新增 `KingbaseES` 快捷预设与 DBeaver 导入映射，同步更新 `README.md` / `README.en.md` 兼容性矩阵）
 
 ### Phase 3（可选单机运维补强）
