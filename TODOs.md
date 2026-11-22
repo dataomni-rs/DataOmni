@@ -27,7 +27,8 @@
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
-| 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；其余按上游审核、实机环境与外部触发条件持续推进 |
+| v1.3.1+ 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、达梦 DM8 与 KingbaseES（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [-] Phase 1（`DC0-E1` + `DC1–DC4`）已在 `feat/v1.3.1-gap-closure` 完成；`DC0-E2` / `DC5–DC6` 待实验环境到位后推进 |
+| 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
 
@@ -79,8 +80,8 @@
 - [x] M1 数据库驱动按 Cargo feature 解耦（承接 `B4`）（`0f64974`）
   - 已将 `oracle`（ODPI-C 动态库驱动）拆为默认开启的 Cargo feature（`default = ["ai", "oracle"]`），关闭时不编译链接 `oracle` crate 且不注入 Linux `instantclient` `DT_RPATH`；`DatabaseType` 枚举保持完整以无损读写跨版本 `connections.json`，未编入时以零尺寸空枚举封闭池类型并在 `resolve_for_connection` 与 CLI/MCP 返回 `DATAOMNI_UNSUPPORTED_DATABASE`；新增 `compiled_drivers` 供 `ConnectionForm` 动态隐藏未编译驱动（编辑旧配置保留只读显示），CI 新增 `--no-default-features` 单测门禁（默认 455 条、无默认特性 443 条、前端 193 文件 2331 条全绿）。
 - [ ] M2 国产与更多数据库按安装包接入（承接 `E4` / `B1b`）
-  - [!] KingbaseES（人大金仓）：当前阻塞于缺试用安装包/镜像；拿到镜像后补齐连接、目录元数据、分页、导入导出与真库冒烟门禁。
-  - [ ] 达梦（DM8）：有明确接入诉求时基于 `M1` feature 隔离落地。
+  - [x] KingbaseES（人大金仓）：已随 `DC6` 完成 V9（`V009R001C`，PG 模式）全量 42/42 真库冒烟、系统 schema 过滤、连接表单快捷入口与文档更新。
+  - [ ] 达梦（DM8）：见下方 `DC0-E2` 实测结论与 `DC5`（待拍板可选 `odbc` Cargo feature 路线后落地）。
 - [ ] M3 Mac App Store（MAS）沙盒构建变体（可选上架渠道，前置 `U2` + `M1`）
   - 决定上架 MAS 时先写 `rfcs/mac-app-store.md`：基于关闭内置 `oracle` 的 feature 变体，补齐 `Entitlements.mas.plist` / `Entitlements.mas.inherit.plist`（`app-sandbox`、`network.client`、`network.server`、`files.user-selected.read-write`）与 `ITSAppUsesNonExemptEncryption = false`；为 SQLite（含同目录伴生文件权限）、DuckDB、SSH 私钥与 TLS 证书实现 macOS Security-Scoped Bookmarks 跨重启持久化，沙盒下将 `known_hosts` 迁入应用容器目录，并提供一键打开的内置示例 SQLite 库供审核体验。
 
@@ -177,6 +178,33 @@
 
 ---
 
+## v1.3.1+ 个人版方言缺口收口与国产数据库适配（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)，2026-11-22 立项）
+
+原则：不从零重写专有二进制网络协议；先完成零外部阻塞的高频缺口收口（`DC0-E1` + `DC1–DC4`），再依托实库实验环境与 `M1` Cargo feature 隔离务实推进达梦 DM8（`DC5`）与 KingbaseES（`DC6`）。
+
+### 前置实验（DC0）
+
+- [x] DC0-E1 openGauss SM3（`AUTH_REQ_SM3 = 13`）协议报文、算法向量与 `sqlx-postgres` 拒连文案实测核验（`369c7ab`，实测数据已写回 [`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md) §2.1）
+- [x] DC0-E2 达梦 DM8 接入路线实验（已于 `cu` 真库 `DM Database Server 64 V8` 实测完毕，实测结论写回 [`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md) §2.2：`tokio-dameng 0.1.0` 写入报 `-6506` 只读事务淘汰；`dm-pure 1.2.4` 暴露非行内 CLOB/GET_DDL 静默为空、含 LOB 参数查询丢尾列、`EXPLAIN` 超时与无 TLS 4 项硬伤；推荐以可选 `odbc` Cargo feature 走官方 `libdodbc`/`dodbc` 路线，待确认路线与 unixODBC 实测后推进 `DC5`）
+
+### Phase 1（P0，零外部阻塞，目标 `v1.3.1`）
+
+- [x] DC1 openGauss SM3 认证支持（`369c7ab`，`opengauss_relay::tests` 6 条全通含 GB/T 32905-2016 向量、OpenSSL 3 交叉向量与真实 `sqlx` 经转发口端到端 SM3 握手、`clippy` 默认与 `--no-default-features` 零告警；已在 `cu` 上实测 `enmotech/opengauss-lite:5.0.3` `password_encryption_type = 3` 真库冒烟，SHA256 + SM3 并行与 `--test-threads=1` 串行均 2/2 全通，并顺带修复 `opengauss_relay::local_port` 跨短命 Tokio 运行时缓存监听器失活问题）
+- [x] DC2 SQL 编辑器无表别名裸列补全（`943212e`，`sqlCompletionSchema.test.ts` 37/37 含单表/多表/引号/语句隔离/`.` 与字符串注释退让及真 `EditorView` 协同补全、`eslint` + `tsc` 全绿）
+- [x] DC3 Redis Sentinel 多哨兵列表故障转移与 `READONLY` 单次自动切主重连（`92f8d4e`，Rust `services::redis::tests` 20/20 含多哨兵降级、`execute`/`change_key` `READONLY` 切主重试与防死循环反向门 + 前端 4 文件 48/48、`clippy` 双构建 + `eslint` + `tsc` 全绿）
+- [x] DC4 OceanBase MySQL 模式表达式默认值消歧（`bc8de01`，`tableDdl.test.ts` 53/53 含 `SHOW CREATE TABLE` 词法正反例与 `buildTableDdl` 串联门、`TableDataViewer`/`SchemaCompareDialog` 回归 + `eslint` + `tsc` 全绿）
+
+### Phase 2（P1，依赖外部实验环境，承接 `M2` / `B1b`）
+
+- [!] DC5 达梦 DM8 完整接入（`DC0-E2` 实测推荐走 `M1` 可选 `odbc` Cargo feature + BYO 官方驱动路线，待确认是否拍板该路线并做 `odbc-api` + `libdodbc.so` 实测后进入实现）
+- [x] DC6 人大金仓 KingbaseES（PG 模式）完整接入（`cu` 上 `if010/kingbase:v009r001c001b0025` `DB_MODE=pg` 真库实测 DataOmni 全量 42 条 PostgreSQL 冒烟 UTF-8 库 42/42 全通含目录/执行计划/改结构/绑定参数/导入导出/`pg_dump` 备份；`object_catalog.rs` `postgres_hidden_schemas!()` 补齐 9 个 KingbaseES 内置系统 schema 过滤并由 `database_smoke.rs` 先红后绿钉住，前端新增 `KingbaseES` 快捷预设与 DBeaver 导入映射，同步更新 `README.md` / `README.en.md` 兼容性矩阵）
+
+### Phase 3（可选单机运维补强）
+
+- [ ] DC7 关系库活跃会话与锁诊断面板（MySQL / PostgreSQL / SQL Server / Oracle / ClickHouse 按需刷新查看与二次确认终止）
+
+---
+
 ## 「当前版本不做」的保留项与可执行重估条件
 
 ### 架构与性能重估门
@@ -190,16 +218,13 @@
 
 ### 方言、工作区与编辑器长尾重估门（触发条件均为「收到真实用户反馈」）
 
-- **R7 无表别名时的裸列补全**：有人报「不写 `o.` 补不出列」时，按光标所在语句的 `FROM` 推 `defaultTable`。
 - **3.1 PostgreSQL 单表原生 `SHOW CREATE TABLE`**：批量重建导出已完成（`82e3e33`）；单表查看当前版本不做（可执行门：`services::schema_metadata::tests::postgres_has_no_ddl_query`）。
 - **G2 JOIN / 表达式里的 `_bin` 列类型名**：单表裸列已按目录声明类型修正，复杂查询仍显驱动类型（值显示与编辑不受影响）；有人因此误判时评估 `[patch]` `sqlx-mysql`。
-- **G3 openGauss SM3 口令**：`sha256` 已由本地 `opengauss_relay` 支持；`password_encryption_type = 3`（SM3）等有人遇到再做。
-- **G8 Redis Sentinel 多哨兵地址与自动切主重连**：有人切换后撞上 `READONLY` 或需填多个哨兵地址时重估。
 - **4.3 MongoDB 扩展项**：JS 语法多命令脚本、LDAP / Kerberos / AWS IAM 认证、导出聚合结果与 `--jsonArray` 导入导出、`collMod` 改索引——有人拿着这类部署或脚本来时重估。
 - **4.3 Redis 扩展项**：客户端证书、RESP3 推送与 Pub/Sub——有人拿着这种部署来时重估。
 - **5.1–5.3 界面与编辑器偏好保留项**：多结果集之间拖动分隔条、间距/字号/阴影 token 扩展、编辑器 Tab 宽度/自动换行/快捷键改键、Oracle 存储过程第二个隐式结果集——有人明确提出再做。
 - **A8a 第三批命令行写操作**：只读 CLI 与只读 MCP 已完成；写操作按 `rfcs/agent-cli.md` §6 等明确场景再做。
-- **其余长尾方言项**：Oracle 原生 JSON / VECTOR 直接解码（现有 `JSON_SERIALIZE` 绕法）、SQL Server 超 `9×10¹¹` 的 `money` 精度、Oracle Wallet TLS（现走 SSH 隧道）、OceanBase 表达式默认值解析、A2b 整库结构导出。
+- **其余长尾方言项**：Oracle 原生 JSON / VECTOR 直接解码（现有 `JSON_SERIALIZE` 绕法）、SQL Server 超 `9×10¹¹` 的 `money` 精度、Oracle Wallet TLS（现走 SSH 隧道）、A2b 整库结构导出。
 
 ## 明确不做 / 暂不优先
 

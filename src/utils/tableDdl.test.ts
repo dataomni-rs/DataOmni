@@ -5,7 +5,10 @@ import {
   buildTableDdl,
   defaultCreateSchema,
   columnDefaultSql,
+  enrichOceanBaseExpressionDefaults,
+  extractMysqlExpressionDefaultColumns,
   incompleteDraftColumns,
+  isOceanBaseServer,
   renamesApart,
   renamesByChange,
   typeChangesApart,
@@ -711,5 +714,78 @@ describe('renamesApart', () => {
     // 还没读到版本时按 MySQL 走：原子的那一条，TiDB 上被整条拒绝、什么都不改
     expect(renamesApart('mysql', null)).toBe(false);
     expect(renamesApart('postgresql', 'TiDB')).toBe(false);
+  });
+});
+
+describe('OceanBase MySQL 模式表达式默认值消歧（DC4）', () => {
+  const OB_VERSION = '5.7.25-OceanBase_CE-v4.4.2.1';
+  const OB_DDL = [
+    'CREATE TABLE `ob_demo` (',
+    "  `id` varchar(36) NOT NULL DEFAULT (uuid()),",
+    "  `label` varchar(64) DEFAULT '(uuid())',",
+    "  `note` varchar(64) DEFAULT 'UUID()' COMMENT 'DEFAULT (not_expr)',",
+    "  `calc` int(11) DEFAULT (1 + 2) COMMENT 'DEFAULT (also_ignored)',",
+    "  `my col` varchar(64) DEFAULT (concat('a)', 'b')) COMMENT 'quote '' ) inside',",
+    "  `weird``name` varchar(64) DEFAULT (upper('x')),",
+    '  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,',
+    '  `gen` int(11) GENERATED ALWAYS AS (`calc` * 2) VIRTUAL,',
+    '  PRIMARY KEY (`id`),',
+    '  CONSTRAINT `chk_calc` CHECK ((`calc` > 0))',
+    ') DEFAULT CHARSET = utf8mb4'
+  ].join('\n');
+
+  it('精确识别 SHOW CREATE TABLE 中的括号表达式默认值列，不误伤字符串与注释', () => {
+    expect([...extractMysqlExpressionDefaultColumns(OB_DDL)]).toEqual([
+      'id',
+      'calc',
+      'my col',
+      'weird`name'
+    ]);
+  });
+
+  it('仅在 OceanBase MySQL 模式下为命中的列幂等补标 DEFAULT_GENERATED，其他库完全透传', () => {
+    const raw: ColumnInfo[] = [
+      column({ name: 'id', data_type: 'varchar(36)', is_nullable: false, default_value: 'uuid()', column_extra: '' }),
+      column({ name: 'label', data_type: 'varchar(64)', default_value: '(uuid())', column_extra: '' }),
+      column({ name: 'note', data_type: 'varchar(64)', default_value: 'UUID()', column_extra: '' }),
+      column({ name: 'calc', data_type: 'int(11)', default_value: '(1 + 2)', column_extra: 'on update current_timestamp' })
+    ];
+
+    // MySQL 8.4 / TiDB / PG 原样透传
+    expect(enrichOceanBaseExpressionDefaults(raw, OB_DDL, 'mysql', '8.4.2')).toBe(raw);
+    expect(enrichOceanBaseExpressionDefaults(raw, OB_DDL, 'mysql', '8.0.11-TiDB-v8.5.3')).toBe(raw);
+    expect(enrichOceanBaseExpressionDefaults(raw, OB_DDL, 'postgresql', OB_VERSION)).toBe(raw);
+    expect(isOceanBaseServer('mysql', OB_VERSION)).toBe(true);
+
+    const enriched = enrichOceanBaseExpressionDefaults(raw, OB_DDL, 'mysql', OB_VERSION);
+    expect(enriched[0].column_extra).toBe('DEFAULT_GENERATED');
+    expect(enriched[1].column_extra).toBe('');
+    expect(enriched[2].column_extra).toBe('');
+    expect(enriched[3].column_extra).toBe('DEFAULT_GENERATED on update current_timestamp');
+
+    // 幂等：再跑一次不重复拼 DEFAULT_GENERATED
+    const twice = enrichOceanBaseExpressionDefaults(enriched, OB_DDL, 'mysql', OB_VERSION);
+    expect(twice).toBe(enriched);
+
+    // 下游 columnDefaultSql：表达式列保留原表达式，字符串列正确加引号
+    expect(columnDefaultSql(enriched[0], 'mysql')).toBe('uuid()');
+    expect(columnDefaultSql(enriched[1], 'mysql')).toBe("'(uuid())'");
+    expect(columnDefaultSql(enriched[2], 'mysql')).toBe("'UUID()'");
+  });
+
+  it('串联 buildTableDdl：修改其他属性时不会把表达式默认值误重述为字符串', () => {
+    const raw: ColumnInfo[] = [
+      column({ name: 'id', data_type: 'varchar(36)', is_nullable: false, default_value: 'uuid()', column_extra: '' })
+    ];
+    const enriched = enrichOceanBaseExpressionDefaults(raw, OB_DDL, 'mysql', OB_VERSION);
+    // 尝试改写带表达式默认值的列类型时，被 DEFAULT_GENERATED 规则拦下而不是静默写成 DEFAULT 'uuid()'
+    const plan = buildTableDdl(request(
+      'mysql',
+      [{ ...draftOf(enriched[0], 'mysql'), dataType: 'varchar(64)' }],
+      { table: 'ob_demo', newTableName: 'ob_demo' }
+    ));
+    expect(plan.statements).toEqual([]);
+    expect(plan.refusals).toHaveLength(1);
+    expect(plan.refusals[0].column).toBe('id');
   });
 });

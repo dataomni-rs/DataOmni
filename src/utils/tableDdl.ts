@@ -82,10 +82,240 @@ export function typeChangesApart(dialect: SqlIdentifierDialect, serverVersion: s
   return dialect === 'postgresql' && (serverVersion ?? '').includes('CockroachDB');
 }
 
+/** `VERSION()` 里带 `OceanBase` 的 MySQL 连接 */
+export function isOceanBaseServer(dialect: SqlIdentifierDialect, serverVersion: string | null): boolean {
+  return dialect === 'mysql' && (serverVersion ?? '').includes('OceanBase');
+}
+
 /** `VERSION()` 里带 `TiDB` 或 `OceanBase` 的 MySQL 连接要把改表名拆出来 */
 export function renamesApart(dialect: SqlIdentifierDialect, serverVersion: string | null): boolean {
   const version = serverVersion ?? '';
   return dialect === 'mysql' && (version.includes('TiDB') || version.includes('OceanBase'));
+}
+
+const TABLE_CONSTRAINT_PREFIXES = new Set([
+  'PRIMARY', 'UNIQUE', 'KEY', 'INDEX', 'FULLTEXT', 'SPATIAL', 'CONSTRAINT', 'FOREIGN', 'CHECK', 'PARTITION'
+]);
+
+/**
+ * 从 MySQL / OceanBase 的 `SHOW CREATE TABLE` 原文中词法提取使用括号表达式默认值
+ * （`DEFAULT (<expr>)`）的列名集合（DC4）。
+ *
+ * OceanBase 在 `INFORMATION_SCHEMA.COLUMNS` 里不给表达式默认值写 `DEFAULT_GENERATED`，
+ * `DEFAULT (uuid())` 与字符串 `DEFAULT 'uuid()'` 在目录里完全一样；而 `SHOW CREATE TABLE`
+ * 对表达式带外层括号、对字符串带单引号，且不需要高权限内部表 `oceanbase.__all_column`。
+ */
+export function extractMysqlExpressionDefaultColumns(createTableDdl: string): Set<string> {
+  const result = new Set<string>();
+  const len = createTableDdl.length;
+
+  const skipQuoted = (pos: number, quote: string): number => {
+    let i = pos + 1;
+    while (i < len) {
+      if (quote !== '`' && createTableDdl[i] === '\\' && i + 1 < len) {
+        i += 2;
+        continue;
+      }
+      if (createTableDdl[i] === quote) {
+        if (i + 1 < len && createTableDdl[i + 1] === quote) {
+          i += 2;
+          continue;
+        }
+        return i + 1;
+      }
+      i++;
+    }
+    return len;
+  };
+
+  // 找到建表定义体最外层的 `(`
+  let bodyStart = -1;
+  for (let i = 0; i < len; i++) {
+    const ch = createTableDdl[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = skipQuoted(i, ch) - 1;
+      continue;
+    }
+    if (ch === '-' && createTableDdl[i + 1] === '-') {
+      while (i < len && createTableDdl[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && createTableDdl[i + 1] === '*') {
+      i += 2;
+      while (i + 1 < len && !(createTableDdl[i] === '*' && createTableDdl[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    if (ch === '(') {
+      bodyStart = i + 1;
+      break;
+    }
+  }
+  if (bodyStart < 0) return result;
+
+  // 按顶层逗号切出每条列/约束定义，直到与最外层 `(` 配对的 `)`
+  const items: string[] = [];
+  let depth = 0;
+  let itemStart = bodyStart;
+  for (let i = bodyStart; i < len; i++) {
+    const ch = createTableDdl[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = skipQuoted(i, ch) - 1;
+      continue;
+    }
+    if (ch === '-' && createTableDdl[i + 1] === '-') {
+      while (i < len && createTableDdl[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && createTableDdl[i + 1] === '*') {
+      i += 2;
+      while (i + 1 < len && !(createTableDdl[i] === '*' && createTableDdl[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      if (depth === 0) {
+        items.push(createTableDdl.slice(itemStart, i));
+        break;
+      }
+      depth--;
+    } else if (ch === ',' && depth === 0) {
+      items.push(createTableDdl.slice(itemStart, i));
+      itemStart = i + 1;
+    }
+  }
+
+  for (const rawItem of items) {
+    const item = rawItem.trim();
+    if (!item) continue;
+
+    // 1. 读取首 token 作为列名（排除表级约束关键字）
+    let pos = 0;
+    let columnName: string | null = null;
+    if (item[0] === '`' || item[0] === '"') {
+      const quote = item[0];
+      pos = 1;
+      let name = '';
+      while (pos < item.length) {
+        if (item[pos] === quote) {
+          if (item[pos + 1] === quote) {
+            name += quote;
+            pos += 2;
+            continue;
+          }
+          pos++;
+          break;
+        }
+        name += item[pos];
+        pos++;
+      }
+      columnName = name;
+    } else {
+      const match = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(item);
+      if (!match) continue;
+      if (TABLE_CONSTRAINT_PREFIXES.has(match[0].toUpperCase())) continue;
+      columnName = match[0];
+      pos = match[0].length;
+    }
+    if (!columnName) continue;
+
+    // 2. 在该列定义的括号深度 0 处查找 `DEFAULT (`
+    let itemDepth = 0;
+    while (pos < item.length) {
+      const ch = item[pos];
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+        pos++;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') {
+        const quote = ch;
+        pos++;
+        while (pos < item.length) {
+          if (quote !== '`' && item[pos] === '\\' && pos + 1 < item.length) {
+            pos += 2;
+            continue;
+          }
+          if (item[pos] === quote) {
+            if (item[pos + 1] === quote) {
+              pos += 2;
+              continue;
+            }
+            pos++;
+            break;
+          }
+          pos++;
+        }
+        continue;
+      }
+      if (ch === '(') {
+        itemDepth++;
+        pos++;
+        continue;
+      }
+      if (ch === ')') {
+        itemDepth = Math.max(0, itemDepth - 1);
+        pos++;
+        continue;
+      }
+      if (itemDepth === 0 && /[A-Za-z_]/.test(ch)) {
+        const start = pos;
+        while (pos < item.length && /[A-Za-z0-9_$]/.test(item[pos])) pos++;
+        const word = item.slice(start, pos).toUpperCase();
+        if (word === 'DEFAULT') {
+          let look = pos;
+          while (look < item.length && /\s/.test(item[look])) look++;
+          if (item[look] === '(') {
+            result.add(columnName);
+            break;
+          }
+        }
+        continue;
+      }
+      pos++;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 仅在 OceanBase（MySQL 模式）且已拿到 `SHOW CREATE TABLE` 原文时，为括号表达式默认值列
+ * 补标 `DEFAULT_GENERATED`，避免改结构或比对同步时将其误当成字符串字面量重述（DC4）。
+ * 其他方言与非 OceanBase 服务端直接原样返回，不做任何修改。
+ */
+export function enrichOceanBaseExpressionDefaults(
+  columns: readonly ColumnInfo[],
+  createTableDdl: string | null | undefined,
+  dialect: SqlIdentifierDialect,
+  serverVersion: string | null
+): ColumnInfo[] {
+  if (!createTableDdl || !isOceanBaseServer(dialect, serverVersion) || columns.length === 0) {
+    return columns as ColumnInfo[];
+  }
+  const expressionColumns = extractMysqlExpressionDefaultColumns(createTableDdl);
+  if (expressionColumns.size === 0) {
+    return columns as ColumnInfo[];
+  }
+
+  let changed = false;
+  const next = columns.map((column) => {
+    if (
+      column.default_value == null
+      || !expressionColumns.has(column.name)
+      || (column.column_extra ?? '').includes('DEFAULT_GENERATED')
+    ) {
+      return column;
+    }
+    changed = true;
+    const extra = column.column_extra?.trim();
+    return {
+      ...column,
+      column_extra: extra ? `DEFAULT_GENERATED ${extra}` : 'DEFAULT_GENERATED'
+    };
+  });
+  return changed ? next : (columns as ColumnInfo[]);
 }
 
 /**

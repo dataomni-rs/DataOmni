@@ -88,6 +88,7 @@ import {
 } from '../utils/schemaObjects';
 import { SchemaObjectSections, type SchemaObjects } from './SchemaObjectSections';
 import { TableStructureEditor } from './TableStructureEditor';
+import { enrichOceanBaseExpressionDefaults } from '../utils/tableDdl';
 import { CreateIndexDialog } from './CreateIndexDialog';
 import { DdlPreviewDialog } from './DdlPreviewDialog';
 import { dropIndexSql } from '../utils/objectDdl';
@@ -309,6 +310,18 @@ export default function TableDataViewer({
       })
       .catch(() => setServerVersion(''));
   }, [activeTab, dialect, serverVersion, database]);
+
+  // OceanBase MySQL 模式在 INFORMATION_SCHEMA 里不标 DEFAULT_GENERATED，借助已拉取的
+  // SHOW CREATE TABLE 补标表达式默认值列，避免改结构时误当成字符串重述（DC4）
+  const structureColumns = useMemo(
+    () => enrichOceanBaseExpressionDefaults(
+      tableSchema?.columns ?? [],
+      schemaObjects?.ddl ?? null,
+      dialect,
+      serverVersion
+    ),
+    [tableSchema?.columns, schemaObjects?.ddl, dialect, serverVersion]
+  );
 
   // COUNT(*) 在大表上是全表扫描（InnoDB 与 PostgreSQL 都没有常数级行数），
   // 按数据集身份缓存，使翻页和调整页大小不再重复付这笔代价。
@@ -1487,7 +1500,7 @@ export default function TableDataViewer({
                 environment={connection.environment}
                 schema={schema ?? null}
                 table={tableName}
-                columns={tableSchema.columns}
+                columns={structureColumns}
                 dialect={dialect}
                 serverVersion={serverVersion}
                 readOnly={objectKind !== 'table'}

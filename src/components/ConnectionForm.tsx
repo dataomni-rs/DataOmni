@@ -53,9 +53,11 @@ import { ORACLE_DEFAULT_SERVICE, isOracleSid, withOracleSid } from '../utils/ora
 import { isNeo4jRouting, withNeo4jRouting } from '../utils/neo4jConnection';
 import {
   REDIS_SENTINEL_MASTER_OPTION,
+  REDIS_SENTINEL_NODES_OPTION,
   redisMode,
   withRedisMode,
   withRedisSentinelMaster,
+  withRedisSentinelNodes,
   type RedisMode
 } from '../utils/redisConnection';
 import { clsx } from 'clsx';
@@ -1004,6 +1006,24 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({
                           }}
                           className="w-full px-3 py-2 border border-line-strong rounded-control focus:outline-none focus:ring-2 focus:ring-accent"
                           placeholder="mymaster"
+                        />
+                        <label htmlFor="redis-sentinel-nodes" className="block text-sm font-medium text-fg mb-1 mt-3">
+                          {t('form.redisSentinelNodes')}
+                        </label>
+                        <input
+                          id="redis-sentinel-nodes"
+                          type="text"
+                          {...PLAIN_TEXT_INPUT}
+                          value={formData.options?.[REDIS_SENTINEL_NODES_OPTION] ?? ''}
+                          onChange={(event) => {
+                            const nodes = event.target.value;
+                            setFormData((previous) => ({
+                              ...previous,
+                              options: withRedisSentinelNodes(previous.options, nodes)
+                            }));
+                          }}
+                          className="w-full px-3 py-2 border border-line-strong rounded-control focus:outline-none focus:ring-2 focus:ring-accent"
+                          placeholder="sentinel2:26379, sentinel3:26379"
                         />
                         <p className="text-xs text-fg-muted mt-1">{t('form.redisSentinelHint')}</p>
                       </>

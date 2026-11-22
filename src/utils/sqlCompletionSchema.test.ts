@@ -22,6 +22,8 @@ import {
 import { DatabaseType } from '../contracts/connection';
 import {
   buildCompletionSchema,
+  createBareColumnCompletionSource,
+  extractReferencedRelations,
   normalizeCompletionRows,
   sqlDialectFor,
   type CompletionLabels,
@@ -483,5 +485,165 @@ describe('选中补全后插进编辑器的名字', () => {
     const pg = [relation('public', 'Orders', ['id'])];
     expect(await accepted('SELECT * FROM "Ord', DatabaseType.PostgreSQL, pg))
       .toBe('SELECT * FROM "Orders"');
+  });
+});
+
+describe('无表别名时的裸列补全（DC2 / R7）', () => {
+  const catalog: CompletionRelation[] = [
+    {
+      schema: 'public',
+      name: 'orders',
+      kind: 'table',
+      columns: [
+        { name: 'id', dataType: 'bigint' },
+        { name: 'total_amount', dataType: 'numeric(10,2)' },
+        { name: 'order', dataType: 'integer' }
+      ]
+    },
+    {
+      schema: 'public',
+      name: 'users',
+      kind: 'table',
+      columns: [
+        { name: 'id', dataType: 'bigint' },
+        { name: 'email', dataType: 'text' }
+      ]
+    },
+    {
+      schema: 'billing',
+      name: 'invoices',
+      kind: 'view',
+      columns: [
+        { name: 'invoice_no', dataType: 'text' },
+        { name: 'paid_at', dataType: 'timestamptz' }
+      ]
+    }
+  ];
+
+  const completeBare = (
+    docWithCursor: string,
+    dbType: DatabaseType = DatabaseType.PostgreSQL,
+    explicit = true,
+    relations = catalog
+  ) => {
+    const cursorPos = docWithCursor.indexOf('|');
+    if (cursorPos < 0) throw new Error('测试 SQL 必须包含光标标记 |');
+    const doc = docWithCursor.slice(0, cursorPos) + docWithCursor.slice(cursorPos + 1);
+    const { defaultSchema } = buildCompletionSchema(relations, dbType, LABELS);
+    const state = EditorState.create({ doc });
+    const source = createBareColumnCompletionSource(relations, dbType, defaultSchema);
+    const result = source(new CompletionContext(state, cursorPos, explicit));
+    if (!result || 'then' in result) return null;
+    return result.options.map(option => ({
+      label: option.label,
+      detail: option.detail,
+      apply: option.apply
+    }));
+  };
+
+  it('单表 SELECT / WHERE / UPDATE / INSERT 不写表别名也能补出裸列', () => {
+    expect(completeBare('SELECT | FROM orders')).toEqual([
+      { label: 'id', detail: 'bigint', apply: undefined },
+      { label: 'total_amount', detail: 'numeric(10,2)', apply: undefined },
+      { label: 'order', detail: 'integer', apply: '"order"' }
+    ]);
+    expect(completeBare('SELECT * FROM orders WHERE to|', DatabaseType.PostgreSQL, false)?.map(o => o.label))
+      .toEqual(['id', 'total_amount', 'order']);
+    expect(completeBare('UPDATE orders SET |')?.map(o => o.label))
+      .toEqual(['id', 'total_amount', 'order']);
+    expect(completeBare('INSERT INTO orders (|')?.map(o => o.label))
+      .toEqual(['id', 'total_amount', 'order']);
+  });
+
+  it('支持显式 schema.table 与 JOIN 多表（detail 带表名区分）', () => {
+    expect(completeBare('SELECT * FROM billing.invoices WHERE |')).toEqual([
+      { label: 'invoice_no', detail: 'text', apply: undefined },
+      { label: 'paid_at', detail: 'timestamptz', apply: undefined }
+    ]);
+
+    expect(completeBare('SELECT | FROM orders JOIN users ON orders.id = users.id')).toEqual([
+      { label: 'id', detail: 'orders · bigint', apply: undefined },
+      { label: 'total_amount', detail: 'orders · numeric(10,2)', apply: undefined },
+      { label: 'order', detail: 'orders · integer', apply: '"order"' },
+      { label: 'id', detail: 'users · bigint', apply: undefined },
+      { label: 'email', detail: 'users · text', apply: undefined }
+    ]);
+  });
+
+  it('按分号严格隔离语句，不串用前一条语句的表', () => {
+    expect(completeBare('SELECT * FROM orders; SELECT * FROM users WHERE |')?.map(o => o.label))
+      .toEqual(['id', 'email']);
+    expect(completeBare('SELECT * FROM orders; SELECT |')).toBeNull();
+  });
+
+  it('成员访问（.）、表名位置关键字、字符串与注释内严格退让返回 null', () => {
+    expect(completeBare('SELECT * FROM orders o WHERE o.|')).toBeNull();
+    expect(completeBare('SELECT * FROM orders o WHERE o.to|', DatabaseType.PostgreSQL, false)).toBeNull();
+    expect(completeBare('SELECT * FROM billing.|')).toBeNull();
+    expect(completeBare('SELECT * FROM |')).toBeNull();
+    expect(completeBare('SELECT * FROM ord|', DatabaseType.PostgreSQL, false)).toBeNull();
+    expect(completeBare("SELECT 'FROM orders' WHERE |")).toBeNull();
+    expect(completeBare("SELECT * FROM orders WHERE note = 'to|'")).toBeNull();
+    expect(completeBare('SELECT * FROM orders -- to|')).toBeNull();
+    expect(completeBare('SELECT * FROM orders /* to| */')).toBeNull();
+  });
+
+  it('支持带引号表名与 MySQL 反引号', () => {
+    const quotedCatalog: CompletionRelation[] = [
+      {
+        schema: null,
+        name: 'Order Items',
+        kind: 'table',
+        columns: [
+          { name: 'item_id', dataType: 'int' },
+          { name: 'key', dataType: 'varchar(32)' }
+        ]
+      }
+    ];
+    expect(
+      extractReferencedRelations(
+        'SELECT * FROM `Order Items` WHERE ',
+        34,
+        quotedCatalog,
+        DatabaseType.MySQL
+      ).map(rel => rel.name)
+    ).toEqual(['Order Items']);
+    expect(
+      completeBare('SELECT * FROM `Order Items` WHERE |', DatabaseType.MySQL, true, quotedCatalog)
+    ).toEqual([
+      { label: 'item_id', detail: 'int', apply: undefined },
+      { label: 'key', detail: 'varchar(32)', apply: '`key`' }
+    ]);
+  });
+
+  it('接入真实 EditorView 与 @codemirror/lang-sql 协同补全，按回车插入保留字引号', async () => {
+    const dialect = sqlDialectFor(DatabaseType.PostgreSQL);
+    const { schema, defaultSchema } = buildCompletionSchema(catalog, DatabaseType.PostgreSQL, LABELS);
+    const doc = 'SELECT * FROM orders WHERE tot';
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: doc.length },
+        extensions: [
+          autocompletion(),
+          sql({ dialect, schema, defaultSchema }),
+          dialect.language.data.of({
+            autocomplete: createBareColumnCompletionSource(catalog, DatabaseType.PostgreSQL, defaultSchema)
+          })
+        ]
+      })
+    });
+
+    startCompletion(view);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const labels = currentCompletions(view.state).map(option => option.label);
+    expect(labels).toContain('total_amount');
+    acceptCompletion(view);
+    expect(view.state.doc.toString()).toBe('SELECT * FROM orders WHERE total_amount');
+    view.destroy();
+    parent.remove();
   });
 });

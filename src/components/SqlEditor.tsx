@@ -78,6 +78,7 @@ import { useLanguageStore } from '../stores/languageStore';
 import { useCompletionCatalog } from '../hooks/useCompletionCatalog';
 import {
   buildCompletionSchema,
+  createBareColumnCompletionSource,
   sqlDialectFor
 } from '../utils/sqlCompletionSchema';
 import { HighlightedCode } from './HighlightedCode';
@@ -244,6 +245,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
    * 认前缀是做不对的。我们负责的是喂给它**真的**库结构。
    */
   const extensions = useMemo(() => {
+    const dialect = sqlDialectFor(connection.db_type);
     const { schema, defaultSchema } = buildCompletionSchema(relations, connection.db_type, {
       table: t('objectKind.table'),
       view: t('objectKind.view'),
@@ -253,11 +255,14 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ connection, documentTitle 
     return [
       runShortcutKeymap(runShortcuts),
       sql({
-        dialect: sqlDialectFor(connection.db_type),
+        dialect,
         schema,
         defaultSchema,
         // 关键字补成大写，和手写 SQL 的惯例一致
         upperCaseKeywords: true
+      }),
+      dialect.language.data.of({
+        autocomplete: createBareColumnCompletionSource(relations, connection.db_type, defaultSchema)
       }),
       // 查找 / 替换 / 跳转面板的文字，跟着界面语言走
       EditorState.phrases.of(editorPhrases(t)),

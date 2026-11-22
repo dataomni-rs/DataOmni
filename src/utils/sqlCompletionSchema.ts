@@ -1,4 +1,4 @@
-import type { Completion } from '@codemirror/autocomplete';
+import type { Completion, CompletionContext, CompletionResult, CompletionSource } from '@codemirror/autocomplete';
 import {
   MSSQL,
   PLSQL,
@@ -217,4 +217,374 @@ function completionName(
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : value == null ? '' : String(value);
+}
+
+interface SqlToken {
+  kind: 'word' | 'quoted' | 'punct';
+  /** 词素原文；对 quoted 是去掉外层引号并还原双写转义后的标识符名 */
+  value: string;
+  start: number;
+  end: number;
+}
+
+const TABLE_CLAUSE_KEYWORDS = new Set(['FROM', 'JOIN', 'UPDATE', 'INTO']);
+const TABLE_POSITION_KEYWORDS = new Set(['FROM', 'JOIN', 'UPDATE', 'INTO', 'TABLE']);
+const FROM_LIST_STOP_KEYWORDS = new Set([
+  'WHERE', 'GROUP', 'ORDER', 'LIMIT', 'OFFSET', 'FETCH', 'HAVING', 'WINDOW',
+  'UNION', 'INTERSECT', 'EXCEPT', 'SET', 'VALUES', 'ON', 'USING', 'RETURNING',
+  'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS', 'NATURAL', 'STRAIGHT_JOIN', 'JOIN',
+  'FOR', 'LOCK', 'INTO', 'QUALIFY', 'SETTINGS', 'FORMAT'
+]);
+const BARE_WORD_PATTERN = /[\p{L}\p{N}_$]+$/u;
+const VALID_BARE_WORD = /^[\p{L}\p{N}_$]*$/u;
+
+/**
+ * 词法扫描光标所在的单条 SQL 语句（按顶层 `;` 隔离），同时判断光标是否位于字符串或注释内。
+ */
+function tokenizeCurrentStatement(
+  doc: string,
+  cursorPos: number,
+  hashLineComment: boolean
+): { tokens: SqlToken[]; cursorInStringOrComment: boolean } {
+  const len = doc.length;
+  let stmtTokens: SqlToken[] = [];
+  let cursorFound = false;
+  let cursorInStringOrComment = false;
+  let i = 0;
+
+  const isIdentStart = (ch: string) => /[\p{L}_$]/u.test(ch);
+  const isIdentPart = (ch: string) => /[\p{L}\p{N}_$]/u.test(ch);
+
+  while (i < len) {
+    const ch = doc[i];
+    const next = i + 1 < len ? doc[i + 1] : '';
+
+    // 空白
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      i++;
+      continue;
+    }
+
+    // 行注释：`--` 或 MySQL/ClickHouse 的 `#`
+    if ((ch === '-' && next === '-') || (hashLineComment && ch === '#')) {
+      const start = i;
+      i += ch === '-' ? 2 : 1;
+      while (i < len && doc[i] !== '\n') i++;
+      if (cursorPos > start && cursorPos <= i) {
+        cursorInStringOrComment = true;
+      }
+      continue;
+    }
+
+    // 块注释 `/* ... */`
+    if (ch === '/' && next === '*') {
+      const start = i;
+      i += 2;
+      while (i + 1 < len && !(doc[i] === '*' && doc[i + 1] === '/')) i++;
+      i = i + 1 < len ? i + 2 : len;
+      if (cursorPos > start && cursorPos < i) {
+        cursorInStringOrComment = true;
+      }
+      continue;
+    }
+
+    // 单引号字符串 `'...'`（支持 `''` 与 `\'`）
+    if (ch === "'") {
+      const start = i;
+      i++;
+      while (i < len) {
+        if (doc[i] === '\\' && i + 1 < len) {
+          i += 2;
+          continue;
+        }
+        if (doc[i] === "'") {
+          if (i + 1 < len && doc[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        i++;
+      }
+      if (cursorPos > start && cursorPos < i) {
+        cursorInStringOrComment = true;
+      }
+      continue;
+    }
+
+    // 引用标识符：`"..."`、`` `...` ``、`[...]`
+    if (ch === '"' || ch === '`' || ch === '[') {
+      const start = i;
+      const close = ch === '[' ? ']' : ch;
+      i++;
+      let value = '';
+      while (i < len) {
+        if (doc[i] === close) {
+          if (i + 1 < len && doc[i + 1] === close) {
+            value += close;
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        value += doc[i];
+        i++;
+      }
+      stmtTokens.push({ kind: 'quoted', value, start, end: i });
+      continue;
+    }
+
+    // 语句分隔符 `;`
+    if (ch === ';') {
+      if (cursorPos <= i) {
+        cursorFound = true;
+        break;
+      }
+      stmtTokens = [];
+      i++;
+      continue;
+    }
+
+    // 普通标识符 / 关键字
+    if (isIdentStart(ch)) {
+      const start = i;
+      i++;
+      while (i < len && isIdentPart(doc[i])) i++;
+      stmtTokens.push({ kind: 'word', value: doc.slice(start, i), start, end: i });
+      continue;
+    }
+
+    // 标点符号
+    stmtTokens.push({ kind: 'punct', value: ch, start: i, end: i + 1 });
+    i++;
+  }
+
+  if (!cursorFound && cursorPos > len) {
+    return { tokens: stmtTokens, cursorInStringOrComment };
+  }
+  return { tokens: stmtTokens, cursorInStringOrComment };
+}
+
+function isIdentifierToken(token: SqlToken | undefined): token is SqlToken {
+  return token !== undefined && (token.kind === 'word' || token.kind === 'quoted');
+}
+
+function resolveRelation(
+  relations: readonly CompletionRelation[],
+  schemaName: string | null,
+  tableName: string,
+  hasSchemaLevel: boolean,
+  defaultSchema?: string
+): CompletionRelation | null {
+  const targetTable = tableName.toLowerCase();
+  const targetSchema = schemaName?.toLowerCase() ?? null;
+
+  if (targetSchema !== null) {
+    const exact = relations.find(
+      rel => rel.name === tableName && (rel.schema ?? '') === schemaName
+    );
+    if (exact) return exact;
+    return relations.find(
+      rel => rel.name.toLowerCase() === targetTable && (rel.schema ?? '').toLowerCase() === targetSchema
+    ) ?? null;
+  }
+
+  if (!hasSchemaLevel) {
+    return (
+      relations.find(rel => rel.name === tableName)
+      ?? relations.find(rel => rel.name.toLowerCase() === targetTable)
+      ?? null
+    );
+  }
+
+  const sameName = relations.filter(rel => rel.name.toLowerCase() === targetTable);
+  if (sameName.length === 0) return null;
+  if (defaultSchema) {
+    const inDefault = sameName.find(
+      rel => (rel.schema ?? '').toLowerCase() === defaultSchema.toLowerCase()
+    );
+    if (inDefault) return inDefault;
+  }
+  return sameName.length === 1 ? sameName[0] : null;
+}
+
+function extractReferencedRelationsFromTokens(
+  tokens: readonly SqlToken[],
+  relations: readonly CompletionRelation[],
+  dbType: DatabaseType,
+  defaultSchema?: string
+): CompletionRelation[] {
+  const hasSchemaLevel = showsSchemaLevel(dbType);
+  const matched: CompletionRelation[] = [];
+  const seen = new Set<string>();
+
+  const record = (schemaName: string | null, tableName: string) => {
+    const found = resolveRelation(relations, schemaName, tableName, hasSchemaLevel, defaultSchema);
+    if (!found) return;
+    const key = `${found.schema ?? ''}\u0000${found.name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    matched.push(found);
+  };
+
+  const parseTableRef = (startIndex: number): number => {
+    const first = tokens[startIndex];
+    if (!isIdentifierToken(first)) return startIndex;
+    // 跳过 `FROM ONLY table` 等修饰符（非关键字则视为表名）
+    if (first.kind === 'word' && first.value.toUpperCase() === 'ONLY') {
+      return parseTableRef(startIndex + 1);
+    }
+    let idx = startIndex + 1;
+    let schemaName: string | null = null;
+    let tableName = first.value;
+
+    // 支持 `schema.table` 与 `catalog.schema.table`
+    while (
+      tokens[idx]?.kind === 'punct'
+      && tokens[idx].value === '.'
+      && isIdentifierToken(tokens[idx + 1])
+    ) {
+      schemaName = tableName;
+      tableName = tokens[idx + 1].value;
+      idx += 2;
+    }
+
+    record(schemaName, tableName);
+    return idx;
+  };
+
+  let i = 0;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (token.kind !== 'word') {
+      i++;
+      continue;
+    }
+    const upper = token.value.toUpperCase();
+    if (!TABLE_CLAUSE_KEYWORDS.has(upper)) {
+      i++;
+      continue;
+    }
+
+    i = parseTableRef(i + 1);
+
+    // `FROM a, b AS b1` 逗号连接表列表
+    if (upper === 'FROM') {
+      while (i < tokens.length) {
+        const current = tokens[i];
+        if (current.kind === 'word' && FROM_LIST_STOP_KEYWORDS.has(current.value.toUpperCase())) {
+          break;
+        }
+        if (current.kind === 'punct' && current.value === ',') {
+          i = parseTableRef(i + 1);
+          continue;
+        }
+        if (current.kind === 'punct' && (current.value === '(' || current.value === ')')) {
+          break;
+        }
+        i++;
+      }
+    }
+  }
+
+  return matched;
+}
+
+/**
+ * 从光标所在的单条 SQL 语句里提取 `FROM` / `JOIN` / `UPDATE` / `INTO` 引用的已知表或视图。
+ * 保持出现顺序并去重，供无表别名时的裸列补全（DC2 / R7）使用。
+ */
+export function extractReferencedRelations(
+  doc: string,
+  cursorPos: number,
+  relations: readonly CompletionRelation[],
+  dbType: DatabaseType,
+  defaultSchema?: string
+): CompletionRelation[] {
+  if (relations.length === 0) return [];
+  const hashComment = dbType === DatabaseType.MySQL || dbType === DatabaseType.ClickHouse;
+  const { tokens } = tokenizeCurrentStatement(doc, cursorPos, hashComment);
+  return extractReferencedRelationsFromTokens(tokens, relations, dbType, defaultSchema);
+}
+
+/**
+ * 构造无表别名时的裸列补全源（DC2 / R7）。
+ *
+ * 与 `@codemirror/lang-sql` 的 `schemaCompletionSource` 分工明确：
+ * - 光标紧跟 `.`（`o.` / `o.to` / `public.`）或位于字符串/注释内时立即返回 `null`，完全交由 lang-sql；
+ * - 光标刚敲完 `FROM` / `JOIN` / `UPDATE` / `INTO` / `TABLE` 时返回 `null`，避免把列名混进表名位置；
+ * - 其余位置按当前语句引用的已知表产出列候选，保留表内列序与方言引号，不把全库表列一股脑倒出来。
+ */
+export function createBareColumnCompletionSource(
+  relations: readonly CompletionRelation[],
+  dbType: DatabaseType,
+  defaultSchema?: string
+): CompletionSource {
+  const dialect = identifierDialectFor(dbType);
+  const hashComment = dbType === DatabaseType.MySQL || dbType === DatabaseType.ClickHouse;
+
+  return (context: CompletionContext): CompletionResult | null => {
+    if (relations.length === 0) return null;
+
+    const doc = context.state.doc.toString();
+    const pos = context.pos;
+    const { tokens, cursorInStringOrComment } = tokenizeCurrentStatement(doc, pos, hashComment);
+    if (cursorInStringOrComment) return null;
+
+    const wordMatch = context.matchBefore(BARE_WORD_PATTERN);
+    const from = wordMatch ? wordMatch.from : pos;
+    if (!wordMatch && !context.explicit) return null;
+
+    // 紧跟成员访问符 `.`（如 `o.`、`o.to`、`billing.inv`）时退让给 lang-sql
+    const prevNonSpace = doc.slice(0, from).trimEnd();
+    if (prevNonSpace.endsWith('.')) return null;
+
+    // 紧跟表名关键字（如 `FROM |`、`FROM ord|`、`JOIN |`）时不弹列名
+    let prevToken: SqlToken | undefined;
+    for (let idx = tokens.length - 1; idx >= 0; idx--) {
+      if (tokens[idx].end <= from) {
+        prevToken = tokens[idx];
+        break;
+      }
+    }
+    if (prevToken?.kind === 'word' && TABLE_POSITION_KEYWORDS.has(prevToken.value.toUpperCase())) {
+      return null;
+    }
+
+    const referenced = extractReferencedRelationsFromTokens(tokens, relations, dbType, defaultSchema);
+    if (referenced.length === 0) return null;
+
+    const multiTable = referenced.length > 1;
+    const options: Completion[] = [];
+    const seenColumns = new Set<string>();
+
+    for (const relation of referenced) {
+      relation.columns.forEach((column, index) => {
+        const dedupKey = multiTable ? `${relation.name}\u0000${column.name}` : column.name;
+        if (seenColumns.has(dedupKey)) return;
+        seenColumns.add(dedupKey);
+
+        const detail = multiTable
+          ? (column.dataType ? `${relation.name} · ${column.dataType}` : relation.name)
+          : column.dataType;
+
+        options.push(
+          completionName(column.name, dialect, {
+            type: 'property',
+            detail,
+            boost: columnBoost(index)
+          })
+        );
+      });
+    }
+
+    if (options.length === 0) return null;
+    return {
+      from,
+      options,
+      validFor: VALID_BARE_WORD
+    };
+  };
 }

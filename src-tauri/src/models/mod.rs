@@ -27,6 +27,8 @@ pub const REDIS_CLUSTER: &str = "cluster";
 pub const NEO4J_ROUTING_OPTION: &str = "neo4jRouting";
 /// Sentinel 里登记的主节点名（`sentinel monitor <name> …`）
 pub const REDIS_SENTINEL_MASTER_OPTION: &str = "sentinelMaster";
+/// 备用 Sentinel 节点列表（逗号、分号或换行分隔，每项 `host:port`、`[ipv6]:port` 或 `host`，默认端口 26379）
+pub const REDIS_SENTINEL_NODES_OPTION: &str = "sentinelNodes";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionProfile {
@@ -355,7 +357,10 @@ impl DatabaseType {
             .unwrap_or("0")
         ),
         match config.redis_sentinel_master() {
-          Some(name) => format!("?sentinel={}", encode(name)),
+          Some(name) => match config.redis_sentinel_nodes() {
+            Some(nodes) => format!("?sentinel={}&nodes={}", encode(name), encode(nodes)),
+            None => format!("?sentinel={}", encode(name)),
+          },
           None if config.redis_cluster() => "?cluster".to_string(),
           None => String::new(),
         }
@@ -445,6 +450,16 @@ impl ConnectionProfile {
     let sentinel = self.db_type == DatabaseType::Redis
       && self.options.get(REDIS_MODE_OPTION).is_some_and(|value| value == REDIS_SENTINEL);
     sentinel.then(|| self.options.get(REDIS_SENTINEL_MASTER_OPTION).map_or("", |name| name.trim()))
+  }
+
+  /// 经 Sentinel 连时的备用哨兵节点原文本（去空白后为空则为 `None`）
+  pub fn redis_sentinel_nodes(&self) -> Option<&str> {
+    self.redis_sentinel_master()?;
+    self
+      .options
+      .get(REDIS_SENTINEL_NODES_OPTION)
+      .map(|value| value.trim())
+      .filter(|v| !v.is_empty())
   }
 
   pub fn neo4j_routing(&self) -> bool {

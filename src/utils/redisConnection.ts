@@ -6,6 +6,8 @@ export const REDIS_SENTINEL = 'sentinel';
 export const REDIS_CLUSTER = 'cluster';
 /** 哨兵里登记的主节点名（`sentinel monitor <name> …`） */
 export const REDIS_SENTINEL_MASTER_OPTION = 'sentinelMaster';
+/** 备用哨兵节点地址列表（逗号、分号或换行分隔，支持 `host:port`、`[ipv6]:port` 或裸 `host`，默认端口 26379） */
+export const REDIS_SENTINEL_NODES_OPTION = 'sentinelNodes';
 
 export type RedisMode = 'standalone' | typeof REDIS_SENTINEL | typeof REDIS_CLUSTER;
 
@@ -44,4 +46,14 @@ export function withRedisSentinelMaster(
     Object.entries(options ?? {}).filter(([name]) => name !== REDIS_SENTINEL_MASTER_OPTION)
   );
   return master === '' ? rest : { ...rest, [REDIS_SENTINEL_MASTER_OPTION]: master };
+}
+
+export function withRedisSentinelNodes(
+  options: Record<string, string> | undefined,
+  nodes: string
+): Record<string, string> {
+  const rest = Object.fromEntries(
+    Object.entries(options ?? {}).filter(([name]) => name !== REDIS_SENTINEL_NODES_OPTION)
+  );
+  return nodes.trim() === '' ? rest : { ...rest, [REDIS_SENTINEL_NODES_OPTION]: nodes };
 }

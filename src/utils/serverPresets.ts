@@ -12,7 +12,7 @@ import { createDefaultConfig, DatabaseType } from '../stores/connectionStore';
  *
  * 选的是哪一个记在 `options.server` 里，只供表单与列表显示；后端不读它。
  */
-export type ServerPreset = 'mariadb' | 'tidb' | 'cockroachdb';
+export type ServerPreset = 'mariadb' | 'tidb' | 'cockroachdb' | 'kingbase';
 
 export const SERVER_PRESET_OPTION = 'server';
 
@@ -64,6 +64,15 @@ export const SERVER_PRESETS: Record<ServerPreset, ServerPresetSpec> = {
     username: 'root',
     tlsMode: 'preferred',
     gapsKey: 'form.db.gaps.cockroachdb'
+  },
+  kingbase: {
+    name: 'KingbaseES',
+    dbType: DatabaseType.PostgreSQL,
+    port: 54321,
+    database: 'kingbase',
+    username: 'system',
+    tlsMode: 'preferred',
+    gapsKey: null
   }
 };
 
@@ -93,7 +102,7 @@ export function serverPresetOf(
   profile: Partial<Pick<ConnectionProfile, 'db_type' | 'options'>>
 ): ServerPreset | null {
   const recorded = profile.options?.[SERVER_PRESET_OPTION];
-  if (recorded !== 'mariadb' && recorded !== 'tidb' && recorded !== 'cockroachdb') {
+  if (recorded !== 'mariadb' && recorded !== 'tidb' && recorded !== 'cockroachdb' && recorded !== 'kingbase') {
     return null;
   }
   return SERVER_PRESETS[recorded].dbType === profile.db_type ? recorded : null;

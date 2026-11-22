@@ -282,6 +282,9 @@ function mapDbeaverEngine(provider: string, driver: string): MappedEngine | null
   if (combined.includes('cockroach')) {
     return { dbType: DatabaseType.PostgreSQL, preset: 'cockroachdb' };
   }
+  if (combined.includes('kingbase')) {
+    return { dbType: DatabaseType.PostgreSQL, preset: 'kingbase' };
+  }
   if (combined.includes('tidb')) {
     return { dbType: DatabaseType.MySQL, preset: 'tidb' };
   }
