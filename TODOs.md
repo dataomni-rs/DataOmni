@@ -27,7 +27,7 @@
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
-| 持续运维与条件项 | `P4` 依赖补丁、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] 按上游审核、实机环境与外部触发条件持续推进，不阻塞 `v1.3.0` 发版 |
+| 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；其余按上游审核、实机环境与外部触发条件持续推进 |
 
 ---
 
@@ -45,8 +45,8 @@
   - 已将全部工作流（`ci.yml`、`release.yml`、`site.yml`、`nightly-databases.yml`、`windows-install.yml`）中的 `actions/checkout` 升至 `@v7`、`actions/cache` 升至 `@v6`、`actions/upload-artifact` 升至 `@v7`、`actions/download-artifact` 升至 `@v8`、`actions/upload-pages-artifact` 与 `actions/deploy-pages` 升至 `@v5`（全部 `using: node24`），并核实 `ubuntu-latest` 已平滑运行在 Ubuntu 26.04.1 LTS（`release.yml` Linux 发版包继续钉死 `ubuntu-22.04` 保 glibc 兼容）；`src/ciWorkflows.test.ts` 增加最低主版本门禁。
 - [x] P3 发版公开后自动同步 `dataomni-rs/homebrew-tap`（`5b701e5`，`macos-latest` 运行 `44336357193` 56 秒实测通过）
   - 已新增 `.github/workflows/homebrew-tap.yml`（监听 `release: [published]` 排除 `draft` / `prerelease`，并支持 `workflow_dispatch` 指定版本），在 `macos-latest` 上调用 `scripts/homebrew-cask.sh` 复核服务端 SHA-256、`xcrun stapler validate`、`spctl` 公证票据与 `brew style`；配置 `HOMEBREW_TAP_TOKEN` 时幂等更新 `dataomni-rs/homebrew-tap` 的 `Casks/dataomni.rb`，未配置时输出 `::notice::` 正常结束；同步更新 `packaging/homebrew/README.md`。
-- [ ] P4 跟进构建期 glob 依赖安全补丁（收口 `QS2 / QS3`）
-  - 重估触发条件：上游发布修复 `GHSA-g3hv-75wg-m249` / `GHSA-fc5q-39xc-vjpf` 的 `minimatch` 与 `picomatch` 版本后，执行 `bun update` 并摘除 `package.json` `audit:frontend` 中的临时 `--ignore`（2026-11-18 核查 npm：`picomatch` 最新仍为 `4.0.7`，`typescript-eslint` 依赖的 `minimatch` `10.x` 最新仍为 `10.2.6`，尚未发布补丁版）。
+- [x] P4 跟进构建期 glob 依赖安全补丁（收口 `QS2 / QS3`）（`1f1273a`，`bun run audit:frontend` 342 包 0 漏洞、`eslint` + `site/assets` + `tsc` 全绿）
+  - 2026-11-22 核查：`picomatch`（`GHSA-fc5q-39xc-vjpf`）已清零，`@typescript-eslint/typescript-estree@8.73.0` 已将 `minimatch` 升至 `^11.0.1`（修复 `GHSA-g3hv-75wg-m249`）。已升级 `typescript-eslint` 至 `^8.73.0` 并摘除 `package.json` `audit:frontend` 中的全部临时 `--ignore`，无忽略全绿通过。
 
 ### 第二阶段（V）：跨平台打包版实机闭环与 Nightly 真库稳态
 
@@ -70,8 +70,8 @@
   - [ ] WinGet（已提首单 PR：`microsoft/winget-pkgs#481999` 等待上游人工合入）：首单未合入前不重复开第二单；合入后运行 `scripts/winget-manifest.sh` 提交最新稳定版，分别在 `README.md` / `README.en.md` 与 `site/`（独立 PR）补上 `winget install DataOmni.DataOmni`，并在下次发版时对齐 `src-tauri/tauri.conf.json` 的 `bundle.publisher`。
   - [ ] 上游 `Homebrew/homebrew-cask`：待 `dataomni.dev` 域名注册满 30 天且主仓星标达标（他人提 ≥75 / 维护者自提 ≥225）后，将 `packaging/homebrew/Casks/dataomni.rb` 原样提交至官方核心库。
   - [ ] Windows 代码签名评估：结合 Windows 用户反馈评估接入 Azure Trusted Signing 云端签名消除 SmartScreen 首次运行提示。
-  - [ ] 生态目录按准入门槛分批投稿（规范与合规文案已归档 `packaging/directories/README.md`，暂缓对外提交）：
-    - 零星标渠道（准备投递前先补根目录 `glama.json` 认领 `dataomni-rs` 组织仓库）：`Glama.ai` → `punkpeye/awesome-mcp-servers`（替代已停收社区 README PR 的 `modelcontextprotocol/servers`）、官方 MCP Registry（`registry.modelcontextprotocol.io`）/ Smithery、`chrysler-stone/awesome-tauri-apps`（替代已移除应用区的 `tauri-apps/awesome-tauri`）；
+  - [ ] 生态目录按准入门槛分批投稿（规范与合规文案已归档 `packaging/directories/README.md`，`d907c08` 已补齐根目录 `glama.json`、CI 免编译豁免与 `v1.3.0` 13 项 MCP 工具元数据，待对外提交）：
+    - 零星标渠道（已就绪）：`Glama.ai` 认领 → `punkpeye/awesome-mcp-servers`（替代已停收社区 README PR 的 `modelcontextprotocol/servers`）、官方 MCP Registry（`registry.modelcontextprotocol.io`）/ Smithery、`chrysler-stone/awesome-tauri-apps`（替代已移除应用区的 `tauri-apps/awesome-tauri`）；
     - 星标门禁渠道：待主仓 `> 50 stars` 后按 `[dataomni-rs/DataOmni]` 规范提交 `rust-unofficial/awesome-rust`。
 
 ### 第四阶段（M）：可选驱动解耦、国产库扩展与商店沙盒变体（按条件触发）
