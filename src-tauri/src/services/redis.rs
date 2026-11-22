@@ -52,6 +52,12 @@ pub const REDIS_TLS_FILE_INVALID: &str = "DATAOMNI_REDIS_TLS_FILE_INVALID";
 pub const REDIS_SENTINEL_MASTER_MISSING: &str = "DATAOMNI_REDIS_SENTINEL_MASTER_MISSING";
 /// 哨兵不认这个主节点名（`SENTINEL get-master-addr-by-name` 回的是空）。冒号后面是那个名字
 pub const REDIS_SENTINEL_MASTER_UNKNOWN: &str = "DATAOMNI_REDIS_SENTINEL_MASTER_UNKNOWN";
+/// 备用哨兵节点地址格式无效。冒号后面是出错的那一项
+pub const REDIS_SENTINEL_NODES_INVALID: &str = "DATAOMNI_REDIS_SENTINEL_NODES_INVALID";
+/// 默认 Sentinel 端口
+const DEFAULT_SENTINEL_PORT: u16 = 26379;
+/// 多哨兵场景下每台哨兵的寻主超时，防止第一台黑洞耗光整次连接超时
+const PER_SENTINEL_TIMEOUT: Duration = Duration::from_secs(3);
 /// 经 SSH 隧道连 Sentinel 或集群：隧道只通到填的那一个地址，哨兵报回的主节点、集群报回的
 /// 其余节点都在隧道另一头，这边连不到
 pub const REDIS_DISCOVERY_VIA_TUNNEL: &str = "DATAOMNI_REDIS_DISCOVERY_VIA_TUNNEL";
@@ -137,10 +143,93 @@ pub struct RedisTarget {
   database: i64,
   tls: TlsMode,
   ca_certificate_path: Option<String>,
-  /// 经 Sentinel：`host` / `port` 是哨兵，主节点地址每次开连接时问它
+  /// 经 Sentinel：`sentinel_nodes` 按顺序保存主表单地址与备用哨兵地址，主节点地址每次开连接时问它们
   sentinel_master: Option<String>,
+  sentinel_nodes: Vec<(String, u16)>,
   /// 集群：`host` / `port` 是任意一个节点，驱动从它读出槽位分布
   cluster: bool,
+}
+
+/// 解析单个哨兵节点文本：`host:port`、`[ipv6]:port`、`[ipv6]` 或裸 `host`（默认端口 26379）
+fn parse_sentinel_endpoint(raw: &str) -> Result<(String, u16), String> {
+  let token = raw.trim();
+  if token.is_empty() {
+    return Err(format!("{REDIS_SENTINEL_NODES_INVALID}: {raw}"));
+  }
+  if let Some(rest) = token.strip_prefix('[') {
+    let Some(end) = rest.find(']') else {
+      return Err(format!("{REDIS_SENTINEL_NODES_INVALID}: {token}"));
+    };
+    let host = rest[..end].trim();
+    if host.is_empty() {
+      return Err(format!("{REDIS_SENTINEL_NODES_INVALID}: {token}"));
+    }
+    let after = &rest[end + 1..];
+    if after.is_empty() {
+      return Ok((host.to_string(), DEFAULT_SENTINEL_PORT));
+    }
+    let Some(port_text) = after.strip_prefix(':') else {
+      return Err(format!("{REDIS_SENTINEL_NODES_INVALID}: {token}"));
+    };
+    let port = port_text
+      .parse::<u16>()
+      .ok()
+      .filter(|port| *port > 0)
+      .ok_or_else(|| format!("{REDIS_SENTINEL_NODES_INVALID}: {token}"))?;
+    return Ok((host.to_string(), port));
+  }
+
+  // 未加方括号但含多个冒号（如裸 IPv6 `::1`）：按整串作为主机，使用默认哨兵端口
+  if token.matches(':').count() > 1 {
+    return Ok((token.to_string(), DEFAULT_SENTINEL_PORT));
+  }
+
+  if let Some((host, port_text)) = token.rsplit_once(':') {
+    let host = host.trim();
+    if host.is_empty() {
+      return Err(format!("{REDIS_SENTINEL_NODES_INVALID}: {token}"));
+    }
+    let port = port_text
+      .trim()
+      .parse::<u16>()
+      .ok()
+      .filter(|port| *port > 0)
+      .ok_or_else(|| format!("{REDIS_SENTINEL_NODES_INVALID}: {token}"))?;
+    return Ok((host.to_string(), port));
+  }
+
+  Ok((token.to_string(), DEFAULT_SENTINEL_PORT))
+}
+
+/// 合并表单主地址与 `sentinelNodes` 备用哨兵列表（逗号、分号或换行分隔），保序去重
+pub fn parse_sentinel_nodes(
+  primary_host: &str,
+  primary_port: u16,
+  extra: Option<&str>,
+) -> Result<Vec<(String, u16)>, String> {
+  let mut nodes = Vec::new();
+  let mut seen = HashSet::new();
+  let mut push = |host: String, port: u16| {
+    let key = (host.to_ascii_lowercase(), port);
+    if seen.insert(key) {
+      nodes.push((host, port));
+    }
+  };
+  let primary = primary_host.trim();
+  if !primary.is_empty() {
+    push(primary.to_string(), primary_port);
+  }
+  if let Some(extra) = extra {
+    for raw in extra.split([',', ';', '\n', '\r']) {
+      let trimmed = raw.trim();
+      if trimmed.is_empty() {
+        continue;
+      }
+      let (host, port) = parse_sentinel_endpoint(trimmed)?;
+      push(host, port);
+    }
+  }
+  Ok(nodes)
 }
 
 impl RedisTarget {
@@ -148,6 +237,11 @@ impl RedisTarget {
     let sentinel_master = match profile.redis_sentinel_master() {
       Some("") => return Err(REDIS_SENTINEL_MASTER_MISSING.to_string()),
       master => master.map(str::to_string),
+    };
+    let sentinel_nodes = if sentinel_master.is_some() {
+      parse_sentinel_nodes(&profile.host, profile.port, profile.redis_sentinel_nodes())?
+    } else {
+      Vec::new()
     };
     let cluster = profile.redis_cluster();
     if (sentinel_master.is_some() || cluster) && profile.ssh_tunnel.is_some() {
@@ -166,6 +260,7 @@ impl RedisTarget {
       tls: profile.effective_tls_mode(),
       ca_certificate_path: profile.ca_certificate_path.clone().filter(|path| !path.is_empty()),
       sentinel_master,
+      sentinel_nodes,
       cluster,
     })
   }
@@ -303,6 +398,39 @@ impl RedisPool {
   pub fn default_database(&self) -> i64 {
     self.target.database
   }
+
+  pub fn is_sentinel(&self) -> bool {
+    self.target.sentinel_master.is_some()
+  }
+
+  /// Sentinel 模式下主从切换后清空旧库连接缓存，重新向哨兵查询最新主节点并建连（DC3 / G8）
+  pub async fn refresh_sentinel_connection(
+    &self,
+    database: i64,
+  ) -> Result<RedisConnection, String> {
+    if !self.is_sentinel() {
+      return self.connection(database).await;
+    }
+    let mut connections = self.connections.lock().await;
+    connections.remove(&database);
+    let connection = open(&self.target, database).await?;
+    connections.insert(database, connection.clone());
+    Ok(connection)
+  }
+}
+
+/// 判定是否为 Redis 从库拒写错误（`READONLY You can't write against a read only replica.`）
+fn is_readonly_redis_error(error: &redis::RedisError) -> bool {
+  error.code().is_some_and(|code| code.eq_ignore_ascii_case("READONLY"))
+    || matches!(error.kind(), redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly))
+}
+
+fn is_readonly_value(value: &Value) -> bool {
+  matches!(value, Value::ServerError(error) if error.code().eq_ignore_ascii_case("READONLY"))
+}
+
+fn is_readonly_error_message(error: &str) -> bool {
+  error.starts_with(&format!("{REDIS_SERVER_ERROR}: READONLY:"))
 }
 
 /// 连上配置里的那个库并确认真的可用（`PING` 要认证，口令错在这一步报出来）
@@ -313,12 +441,17 @@ pub async fn connect(target: RedisTarget) -> Result<RedisPool, String> {
   Ok(RedisPool { target, connections: tokio::sync::Mutex::new(connections) })
 }
 
-/// 问哨兵这个主节点现在在哪。哨兵常常不设口令（数据节点设了）：带着口令去会被它拒
+/// 问单个哨兵主节点现在在哪。哨兵常常不设口令（数据节点设了）：带着口令去会被它拒
 /// （「AUTH … called without any password configured」），那就不带再问一次——不另设一格
 /// 哨兵口令。重估条件：有人的哨兵口令与数据节点不同
-async fn master_address(target: &RedisTarget, master: &str) -> Result<(String, u16), String> {
+async fn query_single_sentinel(
+  target: &RedisTarget,
+  host: &str,
+  port: u16,
+  master: &str,
+) -> Result<Option<(String, u16)>, String> {
   let ask = |credentials: bool| async move {
-    let client = target.client(&target.host, target.port, 0, credentials)?;
+    let client = target.client(host, port, 0, credentials)?;
     let mut connection =
       client.get_multiplexed_async_connection().await.map_err(describe_connect_error)?;
     redis::cmd("SENTINEL")
@@ -328,11 +461,46 @@ async fn master_address(target: &RedisTarget, master: &str) -> Result<(String, u
       .await
       .map_err(describe_error)
   };
-  let address = match ask(true).await {
-    Err(error) if error.contains("without any password configured") => ask(false).await?,
-    result => result?,
-  };
-  address.ok_or_else(|| format!("{REDIS_SENTINEL_MASTER_UNKNOWN}: {master}"))
+  match ask(true).await {
+    Err(error) if error.contains("without any password configured") => ask(false).await,
+    result => result,
+  }
+}
+
+/// 按顺序向候选哨兵列表查询主节点地址（DC3 / G8）：任一哨兵宕机、超时或不认该主节点名时
+/// 自动切换下一台；全部失败时优先保留明确的主节点名未知错误，否则报最后一次连接错误
+async fn master_address(target: &RedisTarget, master: &str) -> Result<(String, u16), String> {
+  let fallback = [(target.host.clone(), target.port)];
+  let candidates: &[(String, u16)] =
+    if target.sentinel_nodes.is_empty() { &fallback } else { &target.sentinel_nodes };
+  let per_node_timeout = if candidates.len() > 1 { PER_SENTINEL_TIMEOUT } else { CONNECT_TIMEOUT };
+
+  let mut last_error: Option<String> = None;
+  let mut saw_unknown_master = false;
+
+  for (host, port) in candidates {
+    let query = query_single_sentinel(target, host, *port, master);
+    match tokio::time::timeout(per_node_timeout, query).await {
+      Ok(Ok(Some(address))) => return Ok(address),
+      Ok(Ok(None)) => {
+        saw_unknown_master = true;
+      }
+      Ok(Err(error)) => {
+        log::warn!("redis sentinel {host}:{port} lookup failed: {error}");
+        last_error = Some(error);
+      }
+      Err(_) => {
+        let error = format!("{REDIS_UNREACHABLE}: {host}:{port} ({}s)", per_node_timeout.as_secs());
+        log::warn!("redis sentinel {host}:{port} lookup timed out");
+        last_error = Some(error);
+      }
+    }
+  }
+
+  if saw_unknown_master {
+    return Err(format!("{REDIS_SENTINEL_MASTER_UNKNOWN}: {master}"));
+  }
+  Err(last_error.unwrap_or_else(|| format!("{REDIS_SENTINEL_MASTER_UNKNOWN}: {master}")))
 }
 
 async fn open(target: &RedisTarget, database: i64) -> Result<RedisConnection, String> {
@@ -1272,6 +1440,65 @@ redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
 return 1
 ";
 
+async fn execute_change_key(
+  connection: &mut RedisConnection,
+  key: &[u8],
+  change: &KeyChange,
+) -> Result<(), String> {
+  let outcome: i64 = match change {
+    KeyChange::Delete => {
+      redis::cmd("UNLINK").arg(key).query_async(connection).await.map_err(describe_error)?
+    }
+    KeyChange::Rename { to } => {
+      let renamed =
+        redis::cmd("RENAMENX").arg(key).arg(to.as_slice()).query_async::<i64>(connection).await;
+      match renamed {
+        Ok(0) => return Err(format!("{REDIS_KEY_EXISTS}: {}", RedisBytes::new(to.clone()).text)),
+        Ok(_) => 1,
+        // 源键不在时服务端报 `ERR no such key`
+        Err(error) if error.detail().is_some_and(|detail| detail.contains("no such key")) => 0,
+        Err(error) => return Err(describe_error(error)),
+      }
+    }
+    KeyChange::Expire { ttl_ms: Some(ttl) } => redis::cmd("PEXPIRE")
+      .arg(key)
+      .arg(*ttl)
+      .query_async(connection)
+      .await
+      .map_err(describe_error)?,
+    KeyChange::Expire { ttl_ms: None } => {
+      // `PERSIST` 对「本来就不过期」也回 0，和「键不在」分不开，所以另问一次在不在
+      let (_, exists): (i64, i64) = redis::pipe()
+        .cmd("PERSIST")
+        .arg(key)
+        .cmd("EXISTS")
+        .arg(key)
+        .query_async(connection)
+        .await
+        .map_err(describe_error)?;
+      exists
+    }
+    KeyChange::SetString { expected, value } => {
+      let outcome: i64 = redis::Script::new(SET_STRING_IF_UNCHANGED)
+        .key(key)
+        .arg(expected.as_slice())
+        .arg(value.as_slice())
+        .invoke_async(connection)
+        .await
+        .map_err(describe_error)?;
+      match outcome {
+        -1 => return Err(REDIS_VALUE_CHANGED.to_string()),
+        -2 => 0,
+        _ => 1,
+      }
+    }
+  };
+  if outcome == 0 {
+    return Err(REDIS_KEY_GONE.to_string());
+  }
+  Ok(())
+}
+
 pub async fn change_key(
   pool: &RedisPool,
   database: i64,
@@ -1279,60 +1506,15 @@ pub async fn change_key(
   change: KeyChange,
   timeout: Duration,
 ) -> Result<(), String> {
-  let mut connection = pool.connection(database).await?;
   let work = async {
-    let outcome: i64 = match change {
-      KeyChange::Delete => {
-        redis::cmd("UNLINK").arg(&key).query_async(&mut connection).await.map_err(describe_error)?
+    let mut connection = pool.connection(database).await?;
+    match execute_change_key(&mut connection, &key, &change).await {
+      Err(error) if pool.is_sentinel() && is_readonly_error_message(&error) => {
+        let mut refreshed = pool.refresh_sentinel_connection(database).await?;
+        execute_change_key(&mut refreshed, &key, &change).await
       }
-      KeyChange::Rename { to } => {
-        let renamed =
-          redis::cmd("RENAMENX").arg(&key).arg(&to).query_async::<i64>(&mut connection).await;
-        match renamed {
-          Ok(0) => return Err(format!("{REDIS_KEY_EXISTS}: {}", RedisBytes::new(to).text)),
-          Ok(_) => 1,
-          // 源键不在时服务端报 `ERR no such key`
-          Err(error) if error.detail().is_some_and(|detail| detail.contains("no such key")) => 0,
-          Err(error) => return Err(describe_error(error)),
-        }
-      }
-      KeyChange::Expire { ttl_ms: Some(ttl) } => redis::cmd("PEXPIRE")
-        .arg(&key)
-        .arg(ttl)
-        .query_async(&mut connection)
-        .await
-        .map_err(describe_error)?,
-      KeyChange::Expire { ttl_ms: None } => {
-        // `PERSIST` 对「本来就不过期」也回 0，和「键不在」分不开，所以另问一次在不在
-        let (_, exists): (i64, i64) = redis::pipe()
-          .cmd("PERSIST")
-          .arg(&key)
-          .cmd("EXISTS")
-          .arg(&key)
-          .query_async(&mut connection)
-          .await
-          .map_err(describe_error)?;
-        exists
-      }
-      KeyChange::SetString { expected, value } => {
-        let outcome: i64 = redis::Script::new(SET_STRING_IF_UNCHANGED)
-          .key(&key)
-          .arg(expected)
-          .arg(value)
-          .invoke_async(&mut connection)
-          .await
-          .map_err(describe_error)?;
-        match outcome {
-          -1 => return Err(REDIS_VALUE_CHANGED.to_string()),
-          -2 => 0,
-          _ => 1,
-        }
-      }
-    };
-    if outcome == 0 {
-      return Err(REDIS_KEY_GONE.to_string());
+      result => result,
     }
-    Ok(())
   };
   with_deadline(timeout, work).await
 }
@@ -1461,6 +1643,40 @@ redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
 return 1
 ";
 
+async fn execute_list_push(
+  connection: &mut RedisConnection,
+  command: &str,
+  key: &[u8],
+  value: &[u8],
+) -> Result<(), String> {
+  let length: i64 = redis::cmd(command)
+    .arg(key)
+    .arg(value)
+    .query_async(connection)
+    .await
+    .map_err(describe_error)?;
+  if length == 0 {
+    return Err(REDIS_KEY_GONE.to_string());
+  }
+  Ok(())
+}
+
+async fn execute_element_script(
+  connection: &mut RedisConnection,
+  script: &str,
+  key: &[u8],
+  arguments: &[Vec<u8>],
+) -> Result<(), String> {
+  let script = redis::Script::new(script);
+  let mut invocation = script.prepare_invoke();
+  invocation.key(key);
+  for argument in arguments {
+    invocation.arg(argument.as_slice());
+  }
+  let outcome: i64 = invocation.invoke_async(connection).await.map_err(describe_error)?;
+  script_outcome(outcome)
+}
+
 pub async fn change_element(
   pool: &RedisPool,
   database: i64,
@@ -1488,16 +1704,13 @@ pub async fn change_element(
       // `*PUSHX` 只往已经在的列表里推，列表没了回 0
       let command = if head { "LPUSHX" } else { "RPUSHX" };
       let work = async {
-        let length: i64 = redis::cmd(command)
-          .arg(&key)
-          .arg(value)
-          .query_async(&mut connection)
-          .await
-          .map_err(describe_error)?;
-        if length == 0 {
-          return Err(REDIS_KEY_GONE.to_string());
+        match execute_list_push(&mut connection, command, &key, &value).await {
+          Err(error) if pool.is_sentinel() && is_readonly_error_message(&error) => {
+            let mut refreshed = pool.refresh_sentinel_connection(database).await?;
+            execute_list_push(&mut refreshed, command, &key, &value).await
+          }
+          result => result,
         }
-        Ok(())
       };
       return with_deadline(timeout, work).await;
     }
@@ -1516,14 +1729,13 @@ pub async fn change_element(
     ElementChange::StreamDelete { id } => (MEMBER_DELETE, vec![b"XDEL".to_vec(), id.into_bytes()]),
   };
   let work = async {
-    let script = redis::Script::new(script);
-    let mut invocation = script.prepare_invoke();
-    invocation.key(&key);
-    for argument in arguments {
-      invocation.arg(argument);
+    match execute_element_script(&mut connection, script, &key, &arguments).await {
+      Err(error) if pool.is_sentinel() && is_readonly_error_message(&error) => {
+        let mut refreshed = pool.refresh_sentinel_connection(database).await?;
+        execute_element_script(&mut refreshed, script, &key, &arguments).await
+      }
+      result => result,
     }
-    let outcome: i64 = invocation.invoke_async(&mut connection).await.map_err(describe_error)?;
-    script_outcome(outcome)
   };
   with_deadline(timeout, work).await
 }
@@ -1562,6 +1774,27 @@ if ARGV[4] ~= '' then redis.call('PEXPIRE', KEYS[1], ARGV[4]) end
 return 1
 ";
 
+async fn execute_create_key(
+  connection: &mut RedisConnection,
+  key: &[u8],
+  new_key: &NewKey,
+  ttl_text: &str,
+) -> Result<(), String> {
+  let outcome: i64 = redis::Script::new(CREATE_KEY)
+    .key(key)
+    .arg(new_key.kind.as_str())
+    .arg(new_key.first.as_slice())
+    .arg(new_key.second.as_slice())
+    .arg(ttl_text)
+    .invoke_async(connection)
+    .await
+    .map_err(describe_error)?;
+  if outcome == -3 {
+    return Err(format!("{REDIS_KEY_EXISTS}: {}", RedisBytes::new(key.to_vec()).text));
+  }
+  Ok(())
+}
+
 pub async fn create_key(
   pool: &RedisPool,
   database: i64,
@@ -1569,21 +1802,16 @@ pub async fn create_key(
   new_key: NewKey,
   timeout: Duration,
 ) -> Result<(), String> {
-  let mut connection = pool.connection(database).await?;
+  let ttl_text = new_key.ttl_ms.map(|ttl| ttl.to_string()).unwrap_or_default();
   let work = async {
-    let outcome: i64 = redis::Script::new(CREATE_KEY)
-      .key(&key)
-      .arg(new_key.kind)
-      .arg(new_key.first)
-      .arg(new_key.second)
-      .arg(new_key.ttl_ms.map(|ttl| ttl.to_string()).unwrap_or_default())
-      .invoke_async(&mut connection)
-      .await
-      .map_err(describe_error)?;
-    if outcome == -3 {
-      return Err(format!("{REDIS_KEY_EXISTS}: {}", RedisBytes::new(key.clone()).text));
+    let mut connection = pool.connection(database).await?;
+    match execute_create_key(&mut connection, &key, &new_key, &ttl_text).await {
+      Err(error) if pool.is_sentinel() && is_readonly_error_message(&error) => {
+        let mut refreshed = pool.refresh_sentinel_connection(database).await?;
+        execute_create_key(&mut refreshed, &key, &new_key, &ttl_text).await
+      }
+      result => result,
     }
-    Ok(())
   };
   with_deadline(timeout, work).await
 }
@@ -1738,14 +1966,25 @@ pub async fn execute(
   if let Some(reason) = refusal(&name, rest) {
     return Err(format!("{reason}: {name}"));
   }
-  let mut connection = pool.connection(database).await?;
   let mut command = redis::cmd(&name);
   for argument in rest {
     command.arg(argument);
   }
   let work = async {
     use redis::aio::ConnectionLike;
-    match connection.req_packed_command(&command).await {
+    let mut connection = pool.connection(database).await?;
+    let outcome = match connection.req_packed_command(&command).await {
+      Err(error) if pool.is_sentinel() && is_readonly_redis_error(&error) => {
+        let mut refreshed = pool.refresh_sentinel_connection(database).await?;
+        refreshed.req_packed_command(&command).await
+      }
+      Ok(ref value) if pool.is_sentinel() && is_readonly_value(value) => {
+        let mut refreshed = pool.refresh_sentinel_connection(database).await?;
+        refreshed.req_packed_command(&command).await
+      }
+      result => result,
+    };
+    match outcome {
       Ok(value) => Ok(RedisReply::from_value(value)),
       Err(error)
         if matches!(error.kind(), redis::ErrorKind::Server(_) | redis::ErrorKind::Extension) =>
@@ -1769,6 +2008,7 @@ mod tests {
   use super::*;
   use crate::models::{
     REDIS_CLUSTER, REDIS_MODE_OPTION, REDIS_SENTINEL, REDIS_SENTINEL_MASTER_OPTION,
+    REDIS_SENTINEL_NODES_OPTION,
   };
 
   fn cluster_profile(database: &str) -> ConnectionProfile {
@@ -2167,5 +2407,252 @@ e [::1]:37003@47003 master - 0 1 3 connected 10923-16383
 
       stop.store(true, Ordering::Relaxed);
     }
+  }
+
+  fn spawn_mock_sentinel(
+    target_master_port: Arc<std::sync::atomic::AtomicU16>,
+    expected_master_name: &'static str,
+  ) -> (u16, Arc<AtomicBool>) {
+    use std::io::{BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind sentinel");
+    let port = listener.local_addr().expect("sentinel addr").port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+      while !stop_flag.load(Ordering::Relaxed) {
+        let Ok((stream, _)) = listener.accept() else { break };
+        let master_port = Arc::clone(&target_master_port);
+        let st = Arc::clone(&stop_flag);
+        std::thread::spawn(move || {
+          let mut writer = stream.try_clone().expect("clone");
+          let mut reader = BufReader::new(stream);
+          while !st.load(Ordering::Relaxed) {
+            let Some(cmd) = read_mock_resp(&mut reader) else { break };
+            let op = cmd.first().map(|s| s.to_ascii_uppercase()).unwrap_or_default();
+            match op.as_str() {
+              "SENTINEL" => {
+                let name = cmd.get(2).map(String::as_str).unwrap_or("");
+                if name == expected_master_name {
+                  let p = master_port.load(Ordering::SeqCst).to_string();
+                  let reply = format!("*2\r\n$9\r\n127.0.0.1\r\n${}\r\n{p}\r\n", p.len());
+                  let _ = writer.write_all(reply.as_bytes());
+                } else {
+                  let _ = writer.write_all(b"*-1\r\n");
+                }
+              }
+              "PING" => {
+                let _ = writer.write_all(b"+PONG\r\n");
+              }
+              _ => {
+                let _ = writer.write_all(b"+OK\r\n");
+              }
+            }
+          }
+        });
+      }
+    });
+    (port, stop)
+  }
+
+  fn spawn_mock_data_node(
+    readonly: Arc<AtomicBool>,
+  ) -> (u16, Arc<std::sync::atomic::AtomicUsize>, Arc<AtomicBool>) {
+    use std::io::{BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind data node");
+    let port = listener.local_addr().expect("data addr").port();
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let writes_counter = Arc::clone(&writes);
+    let stop_flag = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+      while !stop_flag.load(Ordering::Relaxed) {
+        let Ok((stream, _)) = listener.accept() else { break };
+        let ro = Arc::clone(&readonly);
+        let wc = Arc::clone(&writes_counter);
+        let st = Arc::clone(&stop_flag);
+        std::thread::spawn(move || {
+          let mut writer = stream.try_clone().expect("clone");
+          let mut reader = BufReader::new(stream);
+          while !st.load(Ordering::Relaxed) {
+            let Some(cmd) = read_mock_resp(&mut reader) else { break };
+            let op = cmd.first().map(|s| s.to_ascii_uppercase()).unwrap_or_default();
+            match op.as_str() {
+              "PING" => {
+                let _ = writer.write_all(b"+PONG\r\n");
+              }
+              "SET" | "UNLINK" => {
+                wc.fetch_add(1, Ordering::SeqCst);
+                if ro.load(Ordering::SeqCst) {
+                  let _ =
+                    writer.write_all(b"-READONLY You can't write against a read only replica.\r\n");
+                } else if op == "UNLINK" {
+                  let _ = writer.write_all(b":1\r\n");
+                } else {
+                  let _ = writer.write_all(b"+OK\r\n");
+                }
+              }
+              _ => {
+                let _ = writer.write_all(b"+OK\r\n");
+              }
+            }
+          }
+        });
+      }
+    });
+    (port, writes, stop)
+  }
+
+  #[test]
+  fn parse_sentinel_nodes_supports_lists_ipv6_defaults_dedup_and_rejects_invalid() {
+    let nodes = parse_sentinel_nodes(
+      "sentinel1.local",
+      26379,
+      Some("sentinel2.local:26380, sentinel3.local\n[::1]:26381;SENTINEL1.LOCAL:26379"),
+    )
+    .expect("parse nodes");
+    assert_eq!(
+      nodes,
+      vec![
+        ("sentinel1.local".to_string(), 26379),
+        ("sentinel2.local".to_string(), 26380),
+        ("sentinel3.local".to_string(), 26379),
+        ("::1".to_string(), 26381),
+      ]
+    );
+
+    assert!(parse_sentinel_nodes("127.0.0.1", 26379, Some("bad:99999"))
+      .expect_err("bad port")
+      .starts_with(REDIS_SENTINEL_NODES_INVALID));
+    assert!(parse_sentinel_nodes("127.0.0.1", 26379, Some("bad:0"))
+      .expect_err("zero port")
+      .starts_with(REDIS_SENTINEL_NODES_INVALID));
+    assert!(parse_sentinel_nodes("127.0.0.1", 26379, Some(":26379"))
+      .expect_err("missing host")
+      .starts_with(REDIS_SENTINEL_NODES_INVALID));
+  }
+
+  #[tokio::test]
+  async fn sentinel_falls_back_to_secondary_node_when_primary_unreachable() {
+    // 抢占并立即释放一个端口，确保主哨兵端口确定不可达（ECONNREFUSED）
+    let dead_port = {
+      let tmp = std::net::TcpListener::bind("127.0.0.1:0").expect("bind dead");
+      tmp.local_addr().expect("addr").port()
+    };
+    let (data_port, _writes, stop_data) = spawn_mock_data_node(Arc::new(AtomicBool::new(false)));
+    let master_port = Arc::new(std::sync::atomic::AtomicU16::new(data_port));
+    let (backup_sentinel_port, stop_sentinel) = spawn_mock_sentinel(master_port, "mymaster");
+
+    let mut profile = sentinel_profile(Some("mymaster"));
+    profile.host = "127.0.0.1".to_string();
+    profile.port = dead_port;
+    profile
+      .options
+      .insert(REDIS_SENTINEL_NODES_OPTION.to_string(), format!("127.0.0.1:{backup_sentinel_port}"));
+
+    let target = RedisTarget::from_profile(&profile).expect("target");
+    let pool = connect(target).await.expect("fallback to secondary sentinel");
+    let reply = execute(&pool, 0, vec![b"PING".to_vec()], Duration::from_secs(3))
+      .await
+      .expect("ping through master");
+    assert!(matches!(reply, RedisReply::Status { value } if value == "PONG"));
+
+    stop_sentinel.store(true, Ordering::Relaxed);
+    stop_data.store(true, Ordering::Relaxed);
+    let _ = std::net::TcpStream::connect(("127.0.0.1", backup_sentinel_port));
+    let _ = std::net::TcpStream::connect(("127.0.0.1", data_port));
+  }
+
+  #[tokio::test]
+  async fn sentinel_auto_refreshes_master_on_readonly_failover() {
+    let old_readonly = Arc::new(AtomicBool::new(false));
+    let (old_port, old_writes, stop_old) = spawn_mock_data_node(Arc::clone(&old_readonly));
+    let (new_port, new_writes, stop_new) = spawn_mock_data_node(Arc::new(AtomicBool::new(false)));
+
+    let master_port = Arc::new(std::sync::atomic::AtomicU16::new(old_port));
+    let (sentinel_port, stop_sentinel) = spawn_mock_sentinel(Arc::clone(&master_port), "mymaster");
+
+    let mut profile = sentinel_profile(Some("mymaster"));
+    profile.host = "127.0.0.1".to_string();
+    profile.port = sentinel_port;
+    profile.database = Some("0".to_string());
+    let target = RedisTarget::from_profile(&profile).expect("target");
+    let pool = connect(target).await.expect("connect to old master");
+
+    // 模拟主从切换：旧主降级为只读从库，哨兵切向新主
+    old_readonly.store(true, Ordering::SeqCst);
+    master_port.store(new_port, Ordering::SeqCst);
+
+    // 1) `execute` 写命令撞上 READONLY 后自动切主并单次重试成功
+    let reply = execute(
+      &pool,
+      0,
+      vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+      Duration::from_secs(5),
+    )
+    .await
+    .expect("execute after failover");
+    assert!(matches!(reply, RedisReply::Status { value } if value == "OK"));
+    assert_eq!(old_writes.load(Ordering::SeqCst), 1);
+    assert_eq!(new_writes.load(Ordering::SeqCst), 1);
+
+    // 2) 再次模拟切回另一轮 READONLY，验证 `change_key` 写路径同样自动切主重试
+    let (third_port, third_writes, stop_third) =
+      spawn_mock_data_node(Arc::new(AtomicBool::new(false)));
+    let new_ro = Arc::new(AtomicBool::new(true));
+    let (ro_port, ro_writes, stop_ro) = spawn_mock_data_node(new_ro);
+    master_port.store(ro_port, Ordering::SeqCst);
+    let _ = pool.refresh_sentinel_connection(0).await.expect("switch to ro node");
+    master_port.store(third_port, Ordering::SeqCst);
+
+    change_key(&pool, 0, b"k".to_vec(), KeyChange::Delete, Duration::from_secs(5))
+      .await
+      .expect("change_key after failover");
+    assert_eq!(ro_writes.load(Ordering::SeqCst), 1);
+    assert_eq!(third_writes.load(Ordering::SeqCst), 1);
+
+    stop_sentinel.store(true, Ordering::Relaxed);
+    stop_old.store(true, Ordering::Relaxed);
+    stop_new.store(true, Ordering::Relaxed);
+    stop_third.store(true, Ordering::Relaxed);
+    stop_ro.store(true, Ordering::Relaxed);
+    for p in [sentinel_port, old_port, new_port, third_port, ro_port] {
+      let _ = std::net::TcpStream::connect(("127.0.0.1", p));
+    }
+  }
+
+  #[tokio::test]
+  async fn sentinel_readonly_retries_at_most_once_without_infinite_loop() {
+    let always_ro = Arc::new(AtomicBool::new(true));
+    let (ro_port, writes, stop_ro) = spawn_mock_data_node(always_ro);
+    let master_port = Arc::new(std::sync::atomic::AtomicU16::new(ro_port));
+    let (sentinel_port, stop_sentinel) = spawn_mock_sentinel(master_port, "mymaster");
+
+    let mut profile = sentinel_profile(Some("mymaster"));
+    profile.host = "127.0.0.1".to_string();
+    profile.port = sentinel_port;
+    profile.database = Some("0".to_string());
+    let pool =
+      connect(RedisTarget::from_profile(&profile).expect("target")).await.expect("connect");
+
+    let reply = execute(
+      &pool,
+      0,
+      vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+      Duration::from_secs(5),
+    )
+    .await
+    .expect("server error reply");
+    assert!(
+      matches!(reply, RedisReply::Error { ref message } if message.contains("READONLY")),
+      "expected READONLY reply, got {reply:?}"
+    );
+    assert_eq!(writes.load(Ordering::SeqCst), 2, "must attempt initial + at most 1 failover retry");
+
+    stop_sentinel.store(true, Ordering::Relaxed);
+    stop_ro.store(true, Ordering::Relaxed);
+    let _ = std::net::TcpStream::connect(("127.0.0.1", sentinel_port));
+    let _ = std::net::TcpStream::connect(("127.0.0.1", ro_port));
   }
 }

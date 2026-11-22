@@ -5,9 +5,11 @@ import {
   REDIS_MODE_OPTION,
   REDIS_SENTINEL,
   REDIS_SENTINEL_MASTER_OPTION,
+  REDIS_SENTINEL_NODES_OPTION,
   redisMode,
   withRedisMode,
-  withRedisSentinelMaster
+  withRedisSentinelMaster,
+  withRedisSentinelNodes
 } from './redisConnection';
 
 describe('Redis 的部署方式', () => {
@@ -55,5 +57,15 @@ describe('Redis 的部署方式', () => {
   it('改主节点名只动那一项，清空就去掉', () => {
     expect(withRedisSentinelMaster({ a: '1' }, 'mymaster')).toEqual({ a: '1', [REDIS_SENTINEL_MASTER_OPTION]: 'mymaster' });
     expect(withRedisSentinelMaster({ a: '1', [REDIS_SENTINEL_MASTER_OPTION]: 'm' }, '')).toEqual({ a: '1' });
+  });
+
+  it('改备用哨兵节点只动那一项，空白时清空（DC3）', () => {
+    expect(withRedisSentinelNodes({ a: '1' }, 's2:26379, s3:26379')).toEqual({
+      a: '1',
+      [REDIS_SENTINEL_NODES_OPTION]: 's2:26379, s3:26379'
+    });
+    expect(withRedisSentinelNodes({ a: '1', [REDIS_SENTINEL_NODES_OPTION]: 's2:26379' }, '   ')).toEqual({
+      a: '1'
+    });
   });
 });

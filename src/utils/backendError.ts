@@ -213,6 +213,7 @@ const MESSAGES: Readonly<Record<string, TranslationKey>> = {
   DATAOMNI_REDIS_TLS_FILE_INVALID: 'error.backend.redisTlsFileInvalid',
   DATAOMNI_REDIS_SENTINEL_MASTER_MISSING: 'error.backend.redisSentinelMasterMissing',
   DATAOMNI_REDIS_SENTINEL_MASTER_UNKNOWN: 'error.backend.redisSentinelMasterUnknown',
+  DATAOMNI_REDIS_SENTINEL_NODES_INVALID: 'error.backend.redisSentinelNodesInvalid',
   DATAOMNI_REDIS_DISCOVERY_VIA_TUNNEL: 'error.backend.redisDiscoveryViaTunnel',
   DATAOMNI_REDIS_CLUSTER_DATABASE: 'error.backend.redisClusterDatabase',
   DATAOMNI_NEO4J_ROUTING_VIA_TUNNEL: 'error.backend.neo4jRoutingViaTunnel',
