@@ -1,3 +1,4 @@
+pub mod active_sessions;
 #[cfg(feature = "ai")]
 pub mod ai;
 pub mod backup;
@@ -39,6 +40,11 @@ pub mod ssh_tunnel;
 pub mod transaction_state;
 pub mod write_batch;
 
+pub use active_sessions::{
+  active_sessions_query, execute_session_action, ActiveSessionsQuery, SessionAction,
+  TerminateSessionResult, ACTIVE_SESSIONS_UNSUPPORTED, INVALID_SESSION_ID,
+  SESSION_ACTION_UNSUPPORTED,
+};
 pub use completion_catalog::{completion_catalog_query, CompletionCatalogQuery};
 pub use connection_probe::{diagnose, ConnectionDiagnosis, DiagnosisStep};
 pub use connection_service::ConnectionService;

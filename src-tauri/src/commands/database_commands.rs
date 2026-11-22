@@ -831,3 +831,59 @@ pub fn get_session_target_query(
   crate::services::session_target_query(&db_type)
     .ok_or_else(|| format!("{SESSION_TARGET_UNSUPPORTED}: {db_type:?}"))
 }
+
+/// 取该方言的活跃会话与锁等待诊断查询（只读 SQL + 支持的终止能力）。
+#[tauri::command]
+pub fn get_active_sessions_query(
+  db_type: crate::models::DatabaseType,
+) -> Result<crate::services::ActiveSessionsQuery, String> {
+  crate::services::active_sessions_query(&db_type)
+    .ok_or_else(|| format!("{}: {db_type:?}", crate::services::ACTIVE_SESSIONS_UNSUPPORTED))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminateSessionRequest {
+  connection_id: String,
+  action: crate::services::SessionAction,
+  session_id: String,
+}
+
+/// 在独立非事务连接上取消查询或终止指定数据库会话。
+/// 不接受前端任意 SQL：会话 ID 在后端经严格白名单校验后拼装管理语句。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn terminate_database_session(
+  request: TerminateSessionRequest,
+  connection_service_state: State<'_, ConnectionServiceState>,
+  tunnels: State<'_, TunnelRegistry>,
+  database_instances: State<'_, SqlxRegistry>,
+  sql_server: State<'_, SqlServerRegistry>,
+  oracle: State<'_, OracleRegistry>,
+  duckdb: State<'_, DuckDbRegistry>,
+  clickhouse: State<'_, ClickHouseRegistry>,
+) -> Result<crate::services::TerminateSessionResult, QueryError> {
+  let tunnel_port = tunnels.local_port(&request.connection_id).await;
+  let connection_string = {
+    let connection_service_guard = connection_service_state
+      .lock()
+      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
+    let service =
+      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
+    service
+      .resolve_connection_string(&request.connection_id, tunnel_port)
+      .map_err(QueryError::from_connection_service)?
+  };
+
+  let resolved = ResolvedPool::resolve(
+    connection_string,
+    &database_instances,
+    &sql_server,
+    &oracle,
+    &duckdb,
+    &clickhouse,
+  )
+  .await?;
+  let pool = resolved.pool_ref()?;
+  crate::services::execute_session_action(pool, request.action, &request.session_id).await
+}
