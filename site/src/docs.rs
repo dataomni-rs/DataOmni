@@ -1102,7 +1102,7 @@ const EN_DATABASES_SECTIONS: &[DocSection] = &[
     heading: "Connection notes for relational and analytical engines",
     blocks: &[
       DocBlock::Paragraph(
-        "DataOmni ships seven native relational drivers (PostgreSQL, MySQL, SQLite, SQL Server, Oracle, DuckDB, and ClickHouse) plus dedicated connection presets and dialect adaptations for MariaDB, TiDB, OceanBase, CockroachDB, and openGauss.",
+        "DataOmni ships seven native relational drivers (PostgreSQL, MySQL, SQLite, SQL Server, Oracle, DuckDB, and ClickHouse), an opt-in Dameng DM8 ODBC feature, plus dedicated presets and dialect adaptations for MariaDB, TiDB, OceanBase, CockroachDB, openGauss, and KingbaseES.",
       ),
       DocBlock::Table {
         caption: "Dialect-specific connection and editing details",
@@ -1113,12 +1113,16 @@ const EN_DATABASES_SECTIONS: &[DocSection] = &[
             "Oracle Instant Client (Basic Light) is bundled inside every installer (Linux .deb/.rpm pulls libaio). Put the Easy Connect Service Name (e.g. FREEPDB1) in Database; encrypt via SSH tunnel; terminate PL/SQL blocks with a standalone / line; empty grid strings follow Oracle semantics and store NULL.",
           ],
           &[
-            "PostgreSQL, CockroachDB & openGauss",
-            "Full PG 16/17 support including schema diff, ER codegen, and pg_dump. CockroachDB defaults to port 26257 + Prefer TLS. openGauss accounts using default sha256 password storage authenticate seamlessly via DataOmni's built-in local PBKDF2-HMAC-SHA1 relay while keeping TLS intact.",
+            "PostgreSQL, CockroachDB, openGauss & KingbaseES",
+            "Full PG 16/17 support including schema diff, ER codegen, and pg_dump. CockroachDB defaults to port 26257 + Prefer TLS. openGauss sha256 and SM3 (GB/T 32905-2016) accounts authenticate via DataOmni's built-in local relay over configured TLS. KingbaseES V9 (PG mode) ships a dedicated port 54321 preset and automatically hides 9 internal schemas.",
+          ],
+          &[
+            "Dameng DM8 (opt-in ODBC)",
+            "Enabled via --features odbc (off by default; zero closed-source libraries bundled). Connects through your locally installed official Dameng ODBC driver (Linux libdodbc.so / Windows DM8 ODBC DRIVER) with automatic UTF-8 dm_svc.conf and wide-text CLOB handling.",
           ],
           &[
             "MySQL, MariaDB, TiDB & OceanBase",
-            "New MySQL connections default to Require TLS — switch to Disable or Prefer TLS for local unencrypted Docker servers or MySQL 5.7 (no ECDHE ciphers). For OceanBase (MySQL mode), select MySQL on port 2881 with username formatted as user@tenant (e.g. root@test).",
+            "New MySQL connections default to Require TLS — switch to Disable or Prefer TLS for local unencrypted Docker servers or MySQL 5.7 (no ECDHE ciphers). For OceanBase (MySQL mode), select MySQL on port 2881 with username user@tenant (e.g. root@test); expression defaults are disambiguated automatically via SHOW CREATE TABLE.",
           ],
           &[
             "SQL Server (2019 / 2022)",
@@ -1154,7 +1158,7 @@ const EN_DATABASES_SECTIONS: &[DocSection] = &[
   },
   DocSection {
     id: "matrix",
-    toc_label: "18-server smoke matrix",
+    toc_label: "20-server smoke matrix",
     heading: "Live-database smoke test compatibility matrix",
     blocks: &[
       DocBlock::Paragraph(
@@ -1169,10 +1173,10 @@ static EN_DATABASES: DocPage = DocPage {
   slug: DocSlug::Databases,
   locale: Locale::En,
   meta_title: "Database Guides & Compatibility Matrix — DataOmni Docs",
-  meta_description: "Connection guides and real-database smoke test matrix across 17 engines: PostgreSQL, MySQL, Oracle, SQL Server, DuckDB, ClickHouse, MongoDB, and Redis.",
+  meta_description: "Connection guides and real-database smoke test matrix across 19 engines: PostgreSQL, MySQL, Oracle, SQL Server, KingbaseES, Dameng DM8, MongoDB & Redis.",
   breadcrumb_group: "Docs",
   title: "Database guides & compatibility matrix",
-  lead: "Practical connection specifics — bundled Oracle Instant Client, openGauss sha256 relay, DuckDB Parquet streaming, ClickHouse HTTP mutations — plus the full 18-server smoke-test ledger.",
+  lead: "Practical connection specifics — bundled Oracle Instant Client, openGauss sha256/SM3 relay, KingbaseES V9, opt-in Dameng DM8 ODBC, DuckDB Parquet — plus the 20-server smoke-test ledger.",
   toc_heading: "On this page",
   sections: EN_DATABASES_SECTIONS,
 };
@@ -1184,7 +1188,7 @@ const ZH_DATABASES_SECTIONS: &[DocSection] = &[
     heading: "关系型与分析型数据库连接要点",
     blocks: &[
       DocBlock::Paragraph(
-        "DataOmni 内置七套原生关系型驱动（PostgreSQL、MySQL、SQLite、SQL Server、Oracle、DuckDB、ClickHouse），并针对 MariaDB、TiDB、OceanBase、CockroachDB 与 openGauss 做了专门的连接预设与目录方言适配。",
+        "DataOmni 内置七套原生关系型驱动（PostgreSQL、MySQL、SQLite、SQL Server、Oracle、DuckDB、ClickHouse）与可选的达梦 DM8 ODBC 特性，并针对 MariaDB、TiDB、OceanBase、CockroachDB、openGauss 与人大金仓 KingbaseES 做了连接预设与目录方言适配。",
       ),
       DocBlock::Table {
         caption: "各关系型引擎连接与使用细节",
@@ -1195,12 +1199,16 @@ const ZH_DATABASES_SECTIONS: &[DocSection] = &[
             "安装包已随包集成 Oracle Instant Client（Basic Light），免配环境变量（Linux deb/rpm 自动依赖 libaio）。「数据库」一栏填 Easy Connect 服务名（如 FREEPDB1）；加密传输请勾 SSH 隧道；PL/SQL 块以单独一行 / 结尾；遵循 Oracle 语义将空字符串存为 NULL。",
           ],
           &[
-            "PostgreSQL、CockroachDB 与 openGauss",
-            "完整支持 PG 16/17 结构比对、ER 代码生成与 pg_dump。CockroachDB 独立入口默认填 26257 端口与「优先使用 TLS」。openGauss 默认只存 sha256 口令的账号由内置本地转发口（PBKDF2-HMAC-SHA1）自动完成握手并保留 TLS 校验。",
+            "PostgreSQL、CockroachDB、openGauss 与 KingbaseES",
+            "完整支持 PG 16/17 结构比对、ER 代码生成与 pg_dump。CockroachDB 独立入口默认 26257 端口与「优先使用 TLS」。openGauss 默认 sha256 与国密 SM3 口令由内置本地转发口自动握手并保留 TLS 校验。人大金仓 KingbaseES V9（PG 模式）提供 54321 快捷入口并自动过滤 9 个内置系统 schema。",
+          ],
+          &[
+            "达梦 Dameng DM8（可选 ODBC）",
+            "经默认关闭的 --features odbc 按需编入（不随包分发闭源驱动），对接用户本机安装的达梦官方 ODBC 驱动（Linux libdodbc.so / Windows DM8 ODBC DRIVER），自动配置 UTF-8 dm_svc.conf 与宽字符 CLOB 读取。",
           ],
           &[
             "MySQL、MariaDB、TiDB 与 OceanBase",
-            "新建 MySQL 连接默认「要求 TLS」——连本地未开加密的实例或旧版 MySQL 5.7（无 ECDHE 套件）请改为「禁用」或「优先使用 TLS」。连 OceanBase（MySQL 模式）选 MySQL、端口填 2881、用户名按 用户@租户（如 root@test）填写。",
+            "新建 MySQL 连接默认「要求 TLS」——连本地未开加密的实例或旧版 MySQL 5.7（无 ECDHE 套件）请改为「禁用」或「优先使用 TLS」。连 OceanBase（MySQL 模式）选 MySQL、端口填 2881、用户名按 用户@租户（如 root@test）填写，表达式默认值自动经 SHOW CREATE TABLE 消歧。",
           ],
           &[
             "SQL Server（2019 / 2022）",
@@ -1236,8 +1244,8 @@ const ZH_DATABASES_SECTIONS: &[DocSection] = &[
   },
   DocSection {
     id: "matrix",
-    toc_label: "18 种服务端真库兼容矩阵",
-    heading: "18 种服务端真库冒烟测试兼容性矩阵",
+    toc_label: "20 种服务端真库兼容矩阵",
+    heading: "20 种服务端真库冒烟测试兼容性矩阵",
     blocks: &[
       DocBlock::Paragraph(
         "下表每一行均由 src-tauri/tests/*_smoke.rs 连真实数据库实例自动化跑出，计数依次代表「通过 / 跳过 / 夹具不支持」：",
@@ -1251,10 +1259,10 @@ static ZH_DATABASES: DocPage = DocPage {
   slug: DocSlug::Databases,
   locale: Locale::Zh,
   meta_title: "数据库连接指南与兼容性矩阵 — DataOmni 使用文档",
-  meta_description: "涵盖 17 种数据库的连接配置要点与真库冒烟测试矩阵：内置 Oracle Instant Client、openGauss sha256 转发、DuckDB 直查 Parquet，以及四大非关系型专用工作区。",
+  meta_description: "涵盖 19 种数据库的连接要点与真库冒烟测试矩阵：内置 Oracle、openGauss sha256/SM3、人大金仓、达梦 DM8 ODBC 与四大 NoSQL 工作区。",
   breadcrumb_group: "文档",
   title: "数据库连接指南与兼容性矩阵",
-  lead: "汇总 Oracle 内置驱动免配、openGauss sha256 转发、DuckDB 流式查 Parquet、ClickHouse HTTP 接口等实战连接细节，并附完整 18 项真库冒烟兼容台账。",
+  lead: "汇总 Oracle 内置驱动免配、openGauss sha256/SM3 转发、人大金仓 V9、达梦 DM8 可选 ODBC 与 DuckDB 流式查 Parquet，附完整 20 项真库冒烟台账。",
   toc_heading: "本页目录",
   sections: ZH_DATABASES_SECTIONS,
 };
@@ -1264,6 +1272,23 @@ static ZH_DATABASES: DocPage = DocPage {
 // ============================================================================
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-3-1",
+    toc_label: "v1.3.1 (2026-11-22)",
+    heading: "v1.3.1 — 2026-11-22",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Closes key dialect and driver gaps for enterprise and Chinese databases, adds a manual-refresh relational Active Sessions & Locks diagnostic panel, and completes zero-ignore frontend dependency audit hardening.",
+      ),
+      DocBlock::Bullets(&[
+        "openGauss SM3 authentication & dedicated relay runtime: extends DataOmni's built-in local protocol relay with GB/T 32905-2016 SM3 challenge-response (AUTH_REQ_SM3 = 13) alongside sha256, hosted on a dedicated background Tokio runtime so listeners stay alive across short-lived runtime boundaries.",
+        "KingbaseES V9 (PG mode) support: verified 42/42 against a live UTF-8 KingbaseES V9 instance (catalog, EXPLAIN, structure editing, bind parameters, import/export, pg_dump), automatically hides 9 KingbaseES internal schemas, and adds a port-54321 connection preset plus DBeaver import mapping.",
+        "Dameng DM8 via opt-in odbc Cargo feature: adds a default-off odbc feature (odbc-api + BYO official libdodbc/dodbc driver, zero closed-source libraries bundled) covering catalog, metadata, completion, ER diagrams, streaming parameterized queries, write batches, export, active sessions, and read-only CLI/MCP with automatic UTF-8 dm_svc.conf and wide-text off-row CLOB decoding.",
+        "Relational Active Sessions & Locks panel: inspect running queries and lock waits on MySQL, PostgreSQL, openGauss, KingbaseES, SQL Server, Oracle, ClickHouse, and Dameng DM8 from the SQL toolbar or Command Palette — strictly manual refresh (zero background polling) and two-step PROD-aware confirmation before terminating a session.",
+        "Daily SQL & Redis ergonomics: bare column completion directly after FROM / JOIN without requiring a table alias (with multi-table source disambiguation); multi-node Redis Sentinel failover with automatic READONLY master rediscovery and single retry; OceanBase MySQL-mode expression default disambiguation via SHOW CREATE TABLE; plus typescript-eslint 8.73 / minimatch 11 zero-ignore frontend security audit.",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-3-0",
     toc_label: "v1.3.0 (2026-11-21)",
@@ -1379,7 +1404,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.0 through v1.0.0 across macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.1 through v1.0.0 across macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1388,6 +1413,23 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-3-1",
+    toc_label: "v1.3.1（2026-11-22）",
+    heading: "v1.3.1 — 2026-11-22",
+    blocks: &[
+      DocBlock::Paragraph(
+        "完成国产数据库适配与高频方言缺口收口，新增零后台轮询的关系库活跃会话与锁等待诊断面板，并实现前端依赖安全审计零豁免全绿。",
+      ),
+      DocBlock::Bullets(&[
+        "openGauss 国密 SM3 认证与独立转发运行时：本地协议转发口新增 GB/T 32905-2016 SM3（AUTH_REQ_SM3 = 13）挑战应答支持，同时兼容 sha256 与 SM3 口令并将监听宿主迁至独立常驻 Tokio 运行时，彻底消除跨运行时监听失活。",
+        "人大金仓 KingbaseES V9（PG 模式）完整适配：通过 UTF-8 真库 42/42 全量冒烟验收（目录、执行计划、改结构、绑定参数、导入导出与 pg_dump 备份），自动隐藏 9 个内置系统 schema，新增 54321 端口快捷预设与 DBeaver 导入映射。",
+        "达梦 Dameng DM8 可选 odbc 特性接入：新增默认关闭的 odbc Cargo feature（odbc-api 对接本机官方 libdodbc/dodbc 驱动、零闭源库随包分发），覆盖对象目录、元数据、补全、ER 图、参数化流式查询、事务写批、流式导出、活跃会话与只读 CLI/MCP，内置自动 UTF-8 dm_svc.conf 与宽字符 CLOB 解码。",
+        "关系库活跃会话与锁诊断面板：覆盖 MySQL、PostgreSQL、openGauss、KingbaseES、SQL Server、Oracle、ClickHouse 与 Dameng DM8，支持从 SQL 工具栏或命令面板按需手动刷新（零后台轮询）与锁等待定位，终止会话强制经二次确认并保留 PROD 红色警示。",
+        "日常 SQL / Redis 体验与依赖安全加固：新增 FROM / JOIN 无表别名裸列补全（多表自动标注来源表）；Redis Sentinel 支持多哨兵顺序降级与遇 READONLY 自动切主单次重试；OceanBase MySQL 模式改结构与比对自动扫描 SHOW CREATE TABLE 消歧表达式默认值；前端升级 typescript-eslint 8.73 / minimatch 11 并清零 audit 临时豁免。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-3-0",
     toc_label: "v1.3.0（2026-11-21）",
@@ -1503,7 +1545,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.3.0、v1.2.2、v1.2.1、v1.1.0 与 v1.0.0 正式版面向用户的能力更新、真库回归覆盖、安全加固细节与本地配置文件前后向兼容性说明，覆盖三平台。",
+  meta_description: "DataOmni v1.3.1、v1.3.0 与 v1.2.x 至 v1.0.0 正式版能力更新、国产库与真库回归覆盖、安全加固细节与配置文件前后向兼容说明。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
