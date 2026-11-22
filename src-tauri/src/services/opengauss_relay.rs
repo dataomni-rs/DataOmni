@@ -245,25 +245,70 @@ fn hex_decode(text: &[u8]) -> Result<Vec<u8>, String> {
     .collect()
 }
 
+fn relay_runtime() -> Result<tokio::runtime::Handle, String> {
+  static RUNTIME: OnceLock<Result<tokio::runtime::Handle, String>> = OnceLock::new();
+  RUNTIME
+    .get_or_init(|| {
+      let (tx, rx) = std::sync::mpsc::sync_channel(1);
+      std::thread::Builder::new()
+        .name("opengauss-relay".to_string())
+        .spawn(move || {
+          let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| error.to_string());
+          match runtime {
+            Ok(runtime) => {
+              let _ = tx.send(Ok(runtime.handle().clone()));
+              runtime.block_on(std::future::pending::<()>());
+            }
+            Err(error) => {
+              let _ = tx.send(Err(error));
+            }
+          }
+        })
+        .map_err(|error| error.to_string())?;
+      rx.recv().map_err(|error| error.to_string())?
+    })
+    .clone()
+}
+
 /// 这个服务端的转发口，没有就开一个。同一个服务端与口令只开一个，连接池里每条连接都连它：
-/// 转发口跟着应用走，不跟着池子走，数目以「连过几个这样的服务端」为上限。经 SSH 隧道时本机端口每次
-/// 重连都不同，旧的那个留着空等——一个监听套接字，没有连接就不占别的
+/// 转发口跟着应用走，不跟着池子或单次 Tokio 运行时走，数目以「连过几个这样的服务端」为上限。
+/// 经 SSH 隧道时本机端口每次重连都不同，旧的那个留着空等——一个监听套接字，没有连接就不占别的
 pub async fn local_port(upstream: Upstream) -> Result<u16, String> {
   static RELAYS: OnceLock<Mutex<HashMap<Upstream, u16>>> = OnceLock::new();
   let relays = RELAYS.get_or_init(Default::default);
   if let Some(port) = relays.lock().map_err(|error| error.to_string())?.get(&upstream) {
     return Ok(*port);
   }
-  let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| error.to_string())?;
-  let port = listener.local_addr().map_err(|error| error.to_string())?.port();
-  relays.lock().map_err(|error| error.to_string())?.insert(upstream.clone(), port);
-  let upstream = Arc::new(upstream);
-  tokio::spawn(async move {
+  let handle = relay_runtime()?;
+  let (port_tx, port_rx) = tokio::sync::oneshot::channel();
+  let upstream_for_task = Arc::new(upstream.clone());
+  handle.spawn(async move {
+    let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
+      Ok(listener) => listener,
+      Err(error) => {
+        let _ = port_tx.send(Err(error.to_string()));
+        return;
+      }
+    };
+    let port = match listener.local_addr() {
+      Ok(addr) => addr.port(),
+      Err(error) => {
+        let _ = port_tx.send(Err(error.to_string()));
+        return;
+      }
+    };
+    if port_tx.send(Ok(port)).is_err() {
+      return;
+    }
     loop {
       let Ok((client, _)) = listener.accept().await else {
         continue;
       };
-      let upstream = Arc::clone(&upstream);
+      let upstream = Arc::clone(&upstream_for_task);
       tokio::spawn(async move {
         if let Err(error) = relay(client, &upstream).await {
           log::warn!("openGauss relay: {error}");
@@ -271,6 +316,8 @@ pub async fn local_port(upstream: Upstream) -> Result<u16, String> {
       });
     }
   });
+  let port = port_rx.await.map_err(|error| error.to_string())??;
+  relays.lock().map_err(|error| error.to_string())?.insert(upstream, port);
   Ok(port)
 }
 

@@ -189,7 +189,7 @@
 
 ### Phase 1（P0，零外部阻塞，目标 `v1.3.1`）
 
-- [x] DC1 openGauss SM3 认证支持（`369c7ab`，`opengauss_relay::tests` 6 条全通含 GB/T 32905-2016 向量、OpenSSL 3 交叉向量与真实 `sqlx` 经转发口端到端 SM3 握手、`clippy` 默认与 `--no-default-features` 零告警；`database_smoke.rs` 已补可选 `DATAOMNI_OPENGAUSS_SM3_TEST_URL` 真库冒烟）
+- [x] DC1 openGauss SM3 认证支持（`369c7ab`，`opengauss_relay::tests` 6 条全通含 GB/T 32905-2016 向量、OpenSSL 3 交叉向量与真实 `sqlx` 经转发口端到端 SM3 握手、`clippy` 默认与 `--no-default-features` 零告警；已在 `cu` 上实测 `enmotech/opengauss-lite:5.0.3` `password_encryption_type = 3` 真库冒烟，SHA256 + SM3 并行与 `--test-threads=1` 串行均 2/2 全通，并顺带修复 `opengauss_relay::local_port` 跨短命 Tokio 运行时缓存监听器失活问题）
 - [x] DC2 SQL 编辑器无表别名裸列补全（`943212e`，`sqlCompletionSchema.test.ts` 37/37 含单表/多表/引号/语句隔离/`.` 与字符串注释退让及真 `EditorView` 协同补全、`eslint` + `tsc` 全绿）
 - [x] DC3 Redis Sentinel 多哨兵列表故障转移与 `READONLY` 单次自动切主重连（`92f8d4e`，Rust `services::redis::tests` 20/20 含多哨兵降级、`execute`/`change_key` `READONLY` 切主重试与防死循环反向门 + 前端 4 文件 48/48、`clippy` 双构建 + `eslint` + `tsc` 全绿）
 - [x] DC4 OceanBase MySQL 模式表达式默认值消歧（`bc8de01`，`tableDdl.test.ts` 53/53 含 `SHOW CREATE TABLE` 词法正反例与 `buildTableDdl` 串联门、`TableDataViewer`/`SchemaCompareDialog` 回归 + `eslint` + `tsc` 全绿）
