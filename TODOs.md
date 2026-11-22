@@ -27,7 +27,7 @@
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
-| v1.3.1+ 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、达梦 DM8 与 KingbaseES（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [-] Phase 1（`DC0-E1` + `DC1–DC4`）已在 `feat/v1.3.1-gap-closure` 完成；`DC0-E2` / `DC5–DC6` 待实验环境到位后推进 |
+| v1.3.1+ 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [-] `DC0–DC4` + `DC6` 已随 PR `#69` 合入 `main`，`DC7` 已完成；下一步推进 `DC5`（达梦 DM8 `odbc` feature 路线） |
 | 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
@@ -196,12 +196,12 @@
 
 ### Phase 2（P1，依赖外部实验环境，承接 `M2` / `B1b`）
 
-- [!] DC5 达梦 DM8 完整接入（`DC0-E2` 实测推荐走 `M1` 可选 `odbc` Cargo feature + BYO 官方驱动路线，待确认是否拍板该路线并做 `odbc-api` + `libdodbc.so` 实测后进入实现）
+- [-] DC5 达梦 DM8 完整接入（已确认走 `M1` 可选 `odbc` Cargo feature + BYO 官方驱动路线，即将于 `cu` 跑 `odbc-api` + `libdodbc.so` 实测并进入实现）
 - [x] DC6 人大金仓 KingbaseES（PG 模式）完整接入（`cu` 上 `if010/kingbase:v009r001c001b0025` `DB_MODE=pg` 真库实测 DataOmni 全量 42 条 PostgreSQL 冒烟 UTF-8 库 42/42 全通含目录/执行计划/改结构/绑定参数/导入导出/`pg_dump` 备份；`object_catalog.rs` `postgres_hidden_schemas!()` 补齐 9 个 KingbaseES 内置系统 schema 过滤并由 `database_smoke.rs` 先红后绿钉住，前端新增 `KingbaseES` 快捷预设与 DBeaver 导入映射，同步更新 `README.md` / `README.en.md` 兼容性矩阵）
 
 ### Phase 3（可选单机运维补强）
 
-- [ ] DC7 关系库活跃会话与锁诊断面板（MySQL / PostgreSQL / SQL Server / Oracle / ClickHouse 按需刷新查看与二次确认终止）
+- [x] DC7 关系库活跃会话与锁诊断面板（`4fd9a12`，覆盖 MySQL / PostgreSQL / SQL Server / Oracle / ClickHouse 五大服务端关系库统一 10 列投影查询与 openGauss / 旧 ClickHouse 回退查询；独立非事务白名单校验终止命令 `terminate_database_session`；前端 `ActiveSessionsDialog` 接入 `SqlWorkbench` 工具栏与命令面板，手动按需刷新且由单测门禁钉死零 `setInterval`，强制二次确认复用 `DestructiveStatementPrompt` 含 `PROD` 红色警示；前端 218 文件 2455 条单测、`clippy` 默认与 `--no-default-features`、Rust 515 条单测及 `cu` 真 KingbaseES V9 实库会话查询与终止对端连接冒烟全绿）
 
 ---
 
