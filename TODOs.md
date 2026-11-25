@@ -27,7 +27,7 @@
 | v1.2 | 移除 `tauri-plugin-sql`、多页双语文档、连接迁移导入、查询模板、macOS 签名公证、Homebrew Tap、应用内签名更新、双语隐私页与驱动 feature 解耦（`rfcs/roadmap-1.2.md`、`rfcs/roadmap-1.3.md` 核心项） | [x] `v1.2.0`（2026-11-17）、`v1.2.1`（2026-11-18）与 `v1.2.2`（2026-11-19，含 `P0–P3`、`U1`、`U2`、`M1`）正式发布 |
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
-| v1.3.1 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [x] `DC0–DC7` 全部合并（`DC0–DC4` + `DC6` PR `#69`、`DC7` PR `#70`、`DC5` 达梦 DM8 `odbc` feature PR `#71`），版本号升至 `1.3.1` 准备发版 |
+| v1.3.1 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [x] `DC0–DC7` 全部合并（`DC0–DC4` + `DC6` PR `#69`、`DC7` PR `#70`、`DC5` 达梦 DM8 `odbc` feature PR `#71`），已于 2026-11-22 正式发布 `v1.3.1`（三平台 10 项产物、`latest.json`、`dataomni-rs/homebrew-tap` 与 `dataomni.dev` 全量上线） |
 | 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
@@ -67,7 +67,7 @@
 - [x] U2 官网双语隐私与安全合规声明页（`/privacy/` 与 `/zh/privacy/`，独立官网 PR `#51` / `1642fc0` 已上线）
   - 已在 `site/` 新增中英双语隐私政策与数据安全声明页（零遥测、无云账号、凭据只进系统钥匙串、三类出网请求完整披露、只读 Agent `PROD` 物理不可见、`--no-default-features` 编译剔除），补齐页脚、侧边栏与 `sitemap.xml` 并修复窄屏 `.docs-sidebar` 横向溢出；`site:check`、桌面深浅色与真实 375px 视口（`scrollWidth=375`）及线上 `https://dataomni.dev/privacy/`、`https://dataomni.dev/zh/privacy/`（HTTP 200）全部核验通过。
 - [-] U3 在途外部渠道收口、官网 SEO/GEO 与生态目录推广
-  - [-] `HOMEBREW_TAP_TOKEN` 跨仓自动同步闭环：`v1.2.2`（运行 `44457288934`）因 Tap 已是最新提前退出未触达 `git push`；`v1.3.0`（运行 `44920012714`）首次真实推送触发 `403`（`yuxuetr` 对 `dataomni-rs/homebrew-tap` 无写权限），`v1.3.0` 已本地校验并推至 `dataomni-rs/homebrew-tap`（`a5e0ea6`）。待更新 `HOMEBREW_TAP_TOKEN` 为 `dataomni-rs` 组织下具备 `dataomni-rs/homebrew-tap` `Contents: Read and write` 的 Fine-grained PAT，并于下次发版实测真推闭环。
+  - [-] `HOMEBREW_TAP_TOKEN` 跨仓自动同步闭环：`v1.2.2`（运行 `44457288934`）因 Tap 已是最新提前退出未触达 `git push`；`v1.3.0` / `v1.3.1` 首次 `release: published` 推送因令牌权限触发 `403` 后，已更新为具备 `dataomni-rs/homebrew-tap` `Contents: Read and write` 的 Fine-grained PAT 并经 `workflow_dispatch`（运行 `45015753561`）实测真推 `v1.3.1` 成功（`dataomni-rs/homebrew-tap@d3d9e75`）；待下次正式发版确认 `release: published` 自动触发闭环。
   - [ ] WinGet（已提首单 PR：`microsoft/winget-pkgs#481999` 等待上游人工合入）：首单未合入前不重复开第二单；合入后运行 `scripts/winget-manifest.sh` 提交最新稳定版，分别在 `README.md` / `README.en.md` 与 `site/`（独立 PR）补上 `winget install DataOmni.DataOmni`，并在下次发版时对齐 `src-tauri/tauri.conf.json` 的 `bundle.publisher`。
   - [ ] 上游 `Homebrew/homebrew-cask`：待 `dataomni.dev` 域名注册满 30 天且主仓星标达标（他人提 ≥75 / 维护者自提 ≥225）后，将 `packaging/homebrew/Casks/dataomni.rb` 原样提交至官方核心库。
   - [ ] Windows 代码签名评估：结合 Windows 用户反馈评估接入 Azure Trusted Signing 云端签名消除 SmartScreen 首次运行提示。

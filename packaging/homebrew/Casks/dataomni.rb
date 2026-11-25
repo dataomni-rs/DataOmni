@@ -1,6 +1,6 @@
 cask "dataomni" do
-  version "1.2.2"
-  sha256 "2a2021440eed3c4e2c029d9723ecf7a5d85ce05b2c9089d3a2b9fa385684167d"
+  version "1.3.1"
+  sha256 "e1235fa60ebe539120dbd7090aef6a25cbac8681b57af7b879568830cfef4f78"
 
   url "https://github.com/dataomni-rs/DataOmni/releases/download/v#{version}/DataOmni_#{version}_aarch64.dmg"
   name "DataOmni"

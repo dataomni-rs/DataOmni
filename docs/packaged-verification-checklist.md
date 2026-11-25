@@ -12,21 +12,21 @@
 
 ## 0. 安装包与环境准备
 
-- **下载正式包**（以 `v1.3.0` 为例，从 `https://dataomni.dev/zh/` 或 [GitHub Releases](https://github.com/dataomni-rs/DataOmni/releases/latest) 获取）：
+- **下载正式包**（以 `v1.3.1` 为例，从 `https://dataomni.dev/zh/` 或 [GitHub Releases](https://github.com/dataomni-rs/DataOmni/releases/latest) 获取）：
   - **Windows 11 (`x64`)**：
-    - `DataOmni_1.3.0_x64-setup.exe`（NSIS，默认安装至 `%LOCALAPPDATA%\DataOmni\dataomni.exe`）
-    - 或 `DataOmni_1.3.0_x64_en-US.msi`（MSI，默认安装至 `C:\Program Files\DataOmni\dataomni.exe`）
+    - `DataOmni_1.3.1_x64-setup.exe`（NSIS，默认安装至 `%LOCALAPPDATA%\DataOmni\dataomni.exe`）
+    - 或 `DataOmni_1.3.1_x64_en-US.msi`（MSI，默认安装至 `C:\Program Files\DataOmni\dataomni.exe`）
     - *注：接入商业代码签名前，首次双击弹出 Windows SmartScreen（「Windows 已保护你的电脑」→ 更多信息 → 仍要运行）属预期现象。*
   - **Linux 虚拟机 (`x86_64` / `amd64`)**：
-    - 发布产物 `DataOmni_1.3.0_amd64.deb` / `DataOmni-1.3.0-1.x86_64.rpm` 为 `x86_64` 架构，推荐直接在 Windows 11 Pro（自带 Hyper-V 或 VMware）上安装 **Ubuntu 24.04 Desktop (`amd64`)** 走原生硬件虚拟化（避免在 Apple Silicon Mac 上软件模拟 x86_64）。
+    - 发布产物 `DataOmni_1.3.1_amd64.deb` / `DataOmni-1.3.1-1.x86_64.rpm` 为 `x86_64` 架构，推荐直接在 Windows 11 Pro（自带 Hyper-V 或 VMware）上安装 **Ubuntu 24.04 Desktop (`amd64`)** 走原生硬件虚拟化（避免在 Apple Silicon Mac 上软件模拟 x86_64）。
     - Ubuntu / Debian 安装命令（一并确认系统钥匙串组件已装）：
       ```bash
       sudo apt update
-      sudo apt install -y gnome-keyring libsecret-1-0 ./DataOmni_1.3.0_amd64.deb
+      sudo apt install -y gnome-keyring libsecret-1-0 ./DataOmni_1.3.1_amd64.deb
       ```
     - Fedora / RHEL 安装命令：
       ```bash
-      sudo dnf install -y gnome-keyring libsecret ./DataOmni-1.3.0-1.x86_64.rpm
+      sudo dnf install -y gnome-keyring libsecret ./DataOmni-1.3.1-1.x86_64.rpm
       ```
 
 - **可选：一键启动四大 NoSQL 测试容器**（若局域网内没有现成测试实例，可在任意装有 Docker 的主机运行）：
