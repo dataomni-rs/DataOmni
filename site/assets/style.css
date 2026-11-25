@@ -173,7 +173,7 @@ a:hover {
   outline-offset: 2px;
 }
 
-[hidden] {
+[hidden]:not([hidden='until-found']) {
   display: none !important;
 }
 
@@ -1100,7 +1100,62 @@ a:hover {
   font-size: 0.81rem;
 }
 
-/* Multi-client MCP preset switcher inside #agents */
+/* Multi-platform code block tabs */
+.code-tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 0.2rem;
+  padding-inline: 0.72rem;
+  background: var(--dm-code-bar);
+  border-bottom: 1px solid var(--dm-code-line);
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-snap-type: inline proximity;
+}
+
+.code-tab-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.code-tab {
+  position: relative;
+  flex: none;
+  scroll-snap-align: start;
+  padding: 0.48rem 0.72rem;
+  border: 0;
+  background: transparent;
+  color: var(--dm-code-muted);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.code-tab:hover {
+  color: var(--dm-code-fg);
+}
+
+.code-tab[aria-selected='true'] {
+  color: #79c0ff;
+}
+
+.code-tab[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 2px solid #79c0ff;
+}
+
+.code-tab-panel {
+  /* Zero box styling on panel itself so hidden="until-found" never leaves an empty strip */
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* Multi-client & multi-OS MCP preset switcher inside #agents and /docs/mcp/ */
 .mcp-switcher {
   border-top: 1px solid var(--dm-code-line);
   background: var(--dm-code-bar);
@@ -1112,12 +1167,50 @@ a:hover {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem 0.75rem;
-  padding: 0.62rem 0.95rem 0.5rem;
+  padding: 0.62rem 0.95rem 0.45rem;
 }
 
 .mcp-switcher-note {
   color: var(--dm-code-muted);
   font-size: 0.79rem;
+}
+
+.mcp-os-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.16rem;
+  padding: 0.16rem;
+  border: 1px solid var(--dm-code-line);
+  border-radius: 6px;
+  background: var(--dm-code-bg);
+}
+
+.mcp-os-tab {
+  position: relative;
+  padding: 0.18rem 0.52rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dm-code-muted);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mcp-os-tab:hover {
+  color: var(--dm-code-fg);
+}
+
+.mcp-os-tab[aria-pressed='true'] {
+  background: rgb(56 139 253 / 0.2);
+  border-color: rgb(88 166 255 / 0.52);
+  color: #79c0ff;
+}
+
+.mcp-client-row {
+  padding: 0 0.95rem 0.48rem;
 }
 
 .mcp-client-tabs {
@@ -1147,7 +1240,6 @@ a:hover {
   background: rgb(56 139 253 / 0.18);
   border-color: rgb(88 166 255 / 0.52);
   color: #79c0ff;
-  font-weight: 600;
 }
 
 .copy-cmd-row {
@@ -1155,22 +1247,36 @@ a:hover {
   align-items: center;
   justify-content: space-between;
   gap: 0.65rem;
-  padding: 0.55rem 0.95rem 0.68rem;
+  padding: 0.12rem 0.95rem 0.68rem;
+}
+
+.mcp-cmd-stage {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .copy-cmd-row code {
+  display: block;
   min-width: 0;
-  flex: 1 1 auto;
-  padding: 0.4rem 0.6rem;
+  width: 100%;
+  padding: 0.46rem 0.68rem;
   border-radius: 5px;
   background: var(--dm-code-bg);
   border: 1px solid var(--dm-code-line);
   font-family: var(--font-mono);
-  font-size: 0.73rem;
-  line-height: 1.45;
-  color: #a5d6ff;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--dm-code-fg);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.mcp-os-note {
+  margin: 0;
+  padding: 0 0.95rem 0.68rem;
+  color: var(--dm-code-muted);
+  font-size: 0.76rem;
+  line-height: 1.5;
 }
 
 .copy-btn {
