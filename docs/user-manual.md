@@ -1,6 +1,6 @@
 # DataOmni 用户手册
 
-适用于 DataOmni 1.2.2。这份手册讲「怎么用」；「支持哪些
+适用于 DataOmni 1.3.1。这份手册讲「怎么用」；「支持哪些
 数据库、在哪些平台验过」以 [README](../README.md) 为准，这里不重复。
 
 界面上的名字按中文界面写。英文界面的对应项在同一个位置，意思相同。
@@ -11,17 +11,21 @@
 - [界面一览](#界面一览)
 - [连接数据库](#连接数据库)
 - [浏览数据库对象](#浏览数据库对象)
+- [MongoDB](#mongodb)
 - [Redis](#redis)
+- [Neo4j](#neo4j)
+- [Elasticsearch](#elasticsearch)
 - [写 SQL 与执行](#写-sql-与执行)
 - [事务](#事务)
 - [执行计划](#执行计划)
 - [查询结果](#查询结果)
+- [本地数据分析与画像](#本地数据分析与画像)
 - [浏览和编辑表数据](#浏览和编辑表数据)
 - [表结构](#表结构)
 - [导入 CSV](#导入-csv)
 - [导出](#导出)
 - [ER 关系图](#er-关系图)
-- [AI 设计新表](#ai-设计新表)
+- [AI 设计新表与 SQL 助手](#ai-设计新表)
 - [查询历史](#查询历史)
 - [设置](#设置)
 - [快捷键](#快捷键)
@@ -84,25 +88,32 @@
 | --- | --- |
 | 连接名称 | 只给自己看，列表和标签上显示它 |
 | 环境 | 开发 / 测试 / 预发 / 生产。见下面的[环境](#环境) |
-| 数据库类型 | MySQL、PostgreSQL、SQLite、SQL Server、Oracle、DuckDB、ClickHouse、MongoDB、Redis、Neo4j、Elasticsearch，以及 MariaDB、TiDB、CockroachDB |
+| 数据库类型 | MySQL、PostgreSQL、SQLite、SQL Server、Oracle、DuckDB、ClickHouse、MongoDB、Redis、Neo4j、Elasticsearch，以及 MariaDB、TiDB、CockroachDB、KingbaseES 快捷入口（启用 `--features odbc` 构建时还包含达梦 DM8） |
 | 主机地址、端口 | 数据库服务器的地址。端口按类型自动填默认值 |
 | 数据库名称 | 连上之后默认进入的库。MySQL 必须填：对象树、补全和 ER 图都按这个库读 |
 | 用户名、密码 | 数据库账号 |
 | 将密码保存到系统凭据库 | 默认勾上。取消后密码只在这次运行中有效，重启后要重新输入 |
-| TLS 模式 | 仅 MySQL / PostgreSQL。见下面的 [TLS](#tls) |
+| TLS 模式 | MySQL / PostgreSQL / SQL Server / ClickHouse / MongoDB / Redis / Neo4j / Elasticsearch。见下面的 [TLS](#tls) |
 | 通过 SSH 隧道连接 | 数据库只在内网能访问时用。见 [SSH 隧道](#ssh-隧道) |
+| 本地业务语义备注 | 可选 Markdown 备注（独立保存在 `semantics/<id>.md`，上限 32 KB），用于记录业务口径、枚举含义与表说明，自动注入数据字典、SQL 编辑器 AI 助手与 CLI / MCP（按 `### <表名>` 分节可按单表返回） |
 
 填完先点「测试连接」，通过后「保存连接」。之后在欢迎页或连接选择器里点这个
 连接就会连上。
 
-**MariaDB、TiDB、CockroachDB** 各有一个入口，选了会填好它自己的默认端口（TiDB 是
-4000，CockroachDB 是 26257）和默认库，TLS 设成「优先使用 TLS」。它们走的是
-MySQL / PostgreSQL 协议，连上之后的用法和 MySQL / PostgreSQL 一样。CockroachDB
-那一格标着「有缺口」，选中时表单里会列出具体哪几项用不了；完整的对照见 README 的
-「兼容性矩阵」。
+**MariaDB、TiDB、CockroachDB、KingbaseES（人大金仓）** 各有一个入口，选了会填好它自己的默认端口（TiDB 是
+4000，CockroachDB 是 26257，KingbaseES 是 54321）和默认库。它们走的是
+MySQL / PostgreSQL 协议，连上之后的用法和 MySQL / PostgreSQL 一样。KingbaseES V9（PG 兼容模式）会自动过滤
+`sys_catalog`、`sysmac`、`sysaudit` 等 9 个内置系统 schema；CockroachDB
+那一格标着「有缺口」，选中时表单里会列出具体哪几项用不了；完整的对照见 README 的「兼容性矩阵」。
+
+**openGauss**（GaussDB 同源，PG 兼容模式）选 PostgreSQL 入口。只存 sha256（`password_encryption_type = 2`，默认）
+或国密 SM3（`password_encryption_type = 3`）口令的用户都能直连：应用自动经本机转发口完成握手并保留连接里设置的 TLS 校验。
 
 **OceanBase**（MySQL 模式）没有单独的入口，选 MySQL：端口填 2881，用户名写成
-`用户@租户`（如 `root@test`）。它的执行计划和改结构的差别见后面各节，缺口见 README。
+`用户@租户`（如 `root@test`）。它的表达式默认值（如 `DEFAULT (UUID())`）在结构编辑与跨库比对时会自动经
+`SHOW CREATE TABLE` 词法扫描消歧；执行计划和改结构的差别见后面各节，缺口见 README。
+
+**达梦 Dameng DM8** 属于默认关闭的可选 Cargo 特性（`--features odbc`，不随包分发任何闭源动态库），需自行构建启用并安装本机达梦官方 ODBC 驱动（Linux `/opt/dmdbms/bin/libdodbc.so` 或 Windows `DM8 ODBC DRIVER`，可在表单填驱动路径或设 `DATAOMNI_DM8_ODBC_DRIVER`）。开启后自动配置 UTF-8 `dm_svc.conf` 与宽字符 CLOB 读取，支持对象浏览、查询、分页、批量写入、导出、活跃会话诊断与只读 CLI / MCP；ODBC `EXPLAIN` 与可视化改结构暂未开放，macOS ARM64 暂缺官方原生 ODBC 驱动。
 
 **SQL Server** 的功能和 MySQL / PostgreSQL 一样齐：连接（TLS、SSH 隧道）、执行、
 对象树与表结构、ER 图、表格编辑、事务、执行计划、改结构与建表、CSV 导入、整表导出。
@@ -135,8 +146,7 @@ MySQL / PostgreSQL 协议，连上之后的用法和 MySQL / PostgreSQL 一样�
 **Oracle** 的功能与另外几家一致：对象树按 schema 分组（包归在「过程」里），结构页的
 建表语句由 `DBMS_METADATA` 给出。与另外几家不同的几点：
 
-- 「数据库」那一格填的是**服务名**（Easy Connect），例如 `FREEPDB1`、`ORCLPDB1`；按 SID
-  连接还不支持。TLS 要用钱包，这一版也不支持——需要加密就走 SSH 隧道。
+- 「连接方式」支持按**服务名**（Easy Connect，例如 `FREEPDB1`、`ORCLPDB1`）或 **SID** 连接。TLS 要用钱包，这一版不支持——需要加密就走 SSH 隧道。
 - Oracle 没有 `BEGIN`：事务随第一条修改数据的语句开始。自动提交开着时，每条修改
   执行成功就提交；关掉之后要自己按「提交」或「回滚」。「开始事务」发的是
   `SET TRANSACTION READ WRITE`，开始之后即使自动提交还开着，也不会替你逐条提交。
@@ -234,6 +244,8 @@ MySQL / PostgreSQL 协议，连上之后的用法和 MySQL / PostgreSQL 一样�
 关掉应用内容就没了。
 
 Windows 上库文件路径支持中文、空格、`\\服务器\共享` 网络路径以及超过 260 个字符的长路径。
+
+如果只是想分析本地的 `.parquet`、`.csv`、`.tsv`、`.json` 或 `.ndjson` 数据文件（无需先建数据库连接），直接点侧边栏的「打开本地数据文件…」进入内置 DuckDB 分析工作台，见[本地数据分析与画像](#本地数据分析与画像)。
 
 ### 密码存在哪里
 
@@ -446,6 +458,7 @@ MongoDB 连接能浏览库、集合与文档，并按 `_id` 改、增、删单�
   - `find`、`aggregate` 只回第一批（`batchSize`，默认 101 条），剩下的游标当场关掉；要更多就调大
     `batchSize`，或者到集合页翻页。
   - 跑过的命令进[查询历史](#查询历史)，写法错了没发出去的不记。
+- **Schema 漂移与索引体检**：集合页工具栏的「Schema / 索引」按当前过滤条件用 `$sample` 受限采样（默认 1,000 / 上限 10,000，硬限深度 8 / 路径 300 防爆炸），递归展平嵌套字段，精确区分字段缺失与显式 `null`、识别混合类型漂移与数组长度分位数；点击异常类型或缺失标签一键生成 `{ "path": { $type / $exists } }` 回填筛选框。同时并行拉取 `$collStats` / `$indexStats` 列出长期 0 命中候选僵尸索引（视图或权限不足时自动局部降级）。集合查询与聚合结果也支持「画像」与「图表」一键出图。
 - 命令面板里没有「ER 图」：MongoDB 连接上没有 SQL。
 
 ## Redis
@@ -454,7 +467,8 @@ Redis 连接能浏览逻辑库里的键和值，并在命令行里跑命令。
 
 - **新建连接**：「数据库编号」是连上时先打开的逻辑库，通常是 0。口令必填与否看服务端；
   Redis 6 起有 ACL 用户的，把用户名也填上，只有口令的留空。TLS 可以给 CA 证书，
-  不收客户端证书。
+  不收客户端证书。支持三种部署形态：单机、**Sentinel（多哨兵节点列表）** 与 **Cluster 集群**（仅 0 号库，键浏览自动逐个主节点 `SCAN`；Sentinel 与集群暂不支持 SSH 隧道）。Sentinel 模式下可在「备用哨兵节点」填入逗号/换行分隔的 `host:port` 列表，单哨兵不可达时按序降级发现主节点，主从切换遇 `READONLY` 时自动重新寻主并单次重试。
+- **Keyspace 内存、TTL 与 BigKey 体检**：键浏览页工具栏的「Keyspace 体检」基于非阻塞 `SCAN`（严禁 `KEYS *`，受 15 秒与 20,000 键双上限保护且随时可取消），按可配分隔符（`:` / `/` / `.`）聚合前缀树内存占比、TTL 5 档健康分布与 Top 50 BigKey（点击直达键详情；服务端 ACL 禁用 `MEMORY USAGE` 时首键探测后平滑降级为元素数/长度估算）。查看 Hash 或 ZSet 单键值时也可一键送入内置 DuckDB 工作台做二次 SQL 分析。
 - **对象树**列出所有有键的逻辑库（`db0`、`db3`……），加上连接里填的那一个，哪怕它是空的。
   点一个打开它的键浏览页。
 - **找键**：左上角填模式（`*` 任意一段、`?` 一个字符、`[abc]` 其中之一），可以只看某一种
@@ -494,8 +508,8 @@ Neo4j 连接用 Cypher 查询，结果按 Cypher 的写法显示。
 
 - **新建连接**：端口默认 7687（Bolt）。「库」空着就是这个用户的主库（通常叫 `neo4j`）。
   服务端关着认证的，用户名、口令都留空。TLS 可以给 CA 证书，不收客户端证书。
-  总是直连这一台服务端，集群的路由（`neo4j://`）这一版不做；AuraDB 用 `bolt+s` 那样的直连就行，
-  即 TLS 选「校验证书和主机名」。
+  支持直连（`bolt://`）与**集群路由**（`neo4j://`，结果下方标明实际执行的集群成员，路由模式不走 SSH 隧道）；AuraDB 选「校验证书和主机名」即可。
+- **图谱拓扑与超级节点体检**：查询工具栏的「图谱体检」全程在 Bolt 只读事务中分两层执行：第一层经 O(1) count store 汇总各 Label 节点数与 Relationship Type 边数并可一键出图；第二层按需受限采样（500 / 1,000 / 5,000 节点）统计度分位数（P50 / P95 / Max）、孤立节点占比、Top 20 超级节点与稀疏属性覆盖率，点击超级节点可一键载入只读邻域 Cypher 在图视图展开。
 - **对象树**按库列出标签与关系类型（看不到 `system` 库）。点一个标签开一个 `:Person` 标签页，
   里面是 `MATCH (n:Person) RETURN n LIMIT 25`，开出来就跑一次；点关系类型看带它的路径。
   右键可以复制成 `:Person` 这样的写法。
@@ -601,8 +615,8 @@ Elasticsearch 连接用的是控制台：写法和 Kibana 的 Dev Tools 一样�
   `POST 索引/_doc` 按「追加」，写或删一份文档、改 Mapping 按「有界的写」，`_bulk`、`_delete_by_query`、
   `_update_by_query`、`_reindex` 与改权限、改集群设置按「批量写」，删索引、删数据流、删快照按
   「会丢掉数据」。写错请求体的那条之后的请求到不了，不会为它们弹框。
-- 建索引、改别名在控制台里写（`PUT 索引 {…}`、`POST _aliases`），没有另做对话框。
-- 还没有的：API Key 认证。
+- **原生聚合分析与 Mapping 健康诊断**：在索引结构页点「原生聚合分析」或控制台搜索命中点「画像」，可自动统计 `_mapping` 叶子字段数（≥ 800 / 1,000 膨胀预警）与 `text + .keyword` 双存情况，直接下推 `size: 0` 的 `date_histogram` / `terms + missing` / `extended_stats + percentiles` 聚合到服务端并将结果直连图表；同时独立检查 `_cat/indices` 与 `_cat/shards` 的软删除率及过大/过碎/未分配分片（无监控权限遇 `403` 时局部折叠，不阻塞只读聚合）。
+- 认证方式支持用户名口令、**API Key** 或无认证（OpenSearch 无 API Key 认证）。建索引、改别名在控制台里写（`PUT 索引 {…}`、`POST _aliases`），没有另做对话框。
 
 ## 写 SQL 与执行
 
@@ -652,18 +666,25 @@ Elasticsearch 连接用的是控制台：写法和 Kibana 的 Dev Tools 一样�
 
 ### 补全、格式化与查找
 
-- 补全按当前连接的真实结构给出表、视图和它们的列（带类型）。写了
-  `FROM orders o` 之后，`o.` 会补出 orders 的列。关键字按方言过滤。
+- 补全按当前连接的真实结构给出表、视图和它们的列（带类型）。写了 `FROM orders o` 之后，`o.` 会补出 orders 的列；不写别名时（如 `SELECT | FROM orders` 或多表 `JOIN` 后的 `WHERE |`）也支持**无表别名裸列补全**，多表自动标出来源表名。关键字按方言过滤。
+- **`:name` 绑定参数**：在 SQL 里直接写 `:customer_id` 这类命名占位符，执行前弹框填值，由驱动原生参数化绑定（不往 SQL 里拼字符串，文本无需加引号，值也不落盘）。ClickHouse 与执行计划暂不支持。
 - **查询模板**：编辑器工具栏的书签按钮或命令面板（⌘K）可以把常用 SQL（可直接带 `:name` 绑定参数，可选限定方言）存成模板，支持「插入」或「插入并执行」。
 - **⇧⌘F** 格式化 SQL：有选区只排选区。解析不了的 SQL 只报错，正文不动。
 - **⌘F** 查找（可替换），**⌘G** / **⇧⌘G** 下一个 / 上一个，**⌥⌘G** 跳转到行，
   **⌘/** 行注释，**⇧⌥A** 块注释。
 
+### 活跃会话与锁诊断
+
+在服务端关系库（MySQL、PostgreSQL、openGauss、KingbaseES、SQL Server、Oracle、ClickHouse、达梦 DM8）的 SQL 工作台工具栏或命令面板点「活跃会话」，可查看当前运行中的查询、耗时、客户端、状态与阻塞/锁等待关系：
+
+- **纯手动按需刷新**：零后台轮询，不给线上库增加额外监控开销。
+- **终止会话二次确认**：点终止连接/查询会走独立的非事务白名单终止命令，强制经过「危险语句确认」（`PROD` 环境醒目红标提示），绝不误杀。
+
 ### 出错时
 
 失败的语句下面会显示数据库的原话：错误码（SQLSTATE）、出错位置、详情、提示、
 涉及的约束和表。PostgreSQL 给了位置时可以点「跳到出错位置」。「复制完整详情」
-把这些连同语句一起复制，方便贴给别人。
+把这些连同语句一起复制，方便贴给别人。启用 AI 后还提供「AI 诊断修复」入口（只发报错与涉及的表列定义，不发任何表数据）。
 
 ### 危险语句确认
 
@@ -743,9 +764,16 @@ CockroachDB 同样可以「真的执行一遍」（`EXPLAIN ANALYZE`），「原
 
 ### 快速图表
 
-结果上方的「图表」把当前结果画成柱状图或折线图，看一眼形状。默认只画第一列数值；
-勾选量级差很远的几列会提示你分开看。超过 200 个点不画，先用聚合或 `LIMIT`
-收一收。
+结果、表数据、MongoDB 集合/聚合、Elasticsearch 聚合与 Neo4j 体检上方的「图表」基于原生 SVG 绘制：支持柱状图、堆叠柱状图、折线图、面积图、散点图（上限 2,000 点）与二维热力图（24×24 及相关性发散色阶），并可一键导出带主题背景色的 **SVG**、**2× PNG** 或 Markdown 摘要。默认只画第一列数值；勾选量级差很远的几列会提示你分开看。超过 200 行时，可在图表弹窗内直接启用**内存 DuckDB 显式聚合**（`SUM`/`AVG`/`COUNT`/`MAX`/`MIN` + Top 10/20/50，标题栏注明口径）而不必回库重写 SQL。
+
+## 本地数据分析与画像
+
+DataOmni 内置了隔离的内存 DuckDB 沙盒（单会话上限 100,000 行 / 512 MB 内存，装载后立即锁死 `enable_external_access = false` 与 `lock_configuration = true`，支持随时取消），让你可以不离开客户端完成以下分析：
+
+- **列级数据画像（Data Profiling）**：在 SQL 查询结果、表浏览、MongoDB 集合页或 Elasticsearch 控制台点「画像」，一次性查看每列的推断类型、空值率、空串/首尾空格计数、基数、最小/最大、分位数、直方图、日期时间 Sparkline 与 Top-5 高频值；顶部列出异常摘要条，数值列支持 `<` / `>` / 离群值一键生成原库方言 `WHERE` 条件并直接「回表筛选」。支持一键复制/导出**脱敏 Markdown 体检报告**（不外泄样本值）、计算最多 12 个数值列的**皮尔逊相关性热力图**，以及启用 AI 后按需获取基于脱敏统计摘要的体检解读。
+- **表级受限抽样画像**：在关系库表浏览页打开「画像」时，可在「当前页」与「表抽样（1,000 / 5,000 / 20,000 行，继承当前筛选条件、明确标注样本口径、严禁 `ORDER BY RAND()` 全表排序且支持驱动级取消）」之间切换。
+- **二次 SQL / 透视 / 多表对账**：点「本地分析（DuckDB）」可将当前结果装入内存表 `_data`，直接用 DuckDB SQL 做 `GROUP BY`、`PIVOT`、窗口函数或导出 **Apache Parquet** / CSV / JSON；还可点击「附加表」挂载最多 4 个本地文件（`.parquet` / `.csv` / `.tsv` / `.json` / `.ndjson`）或当前工作区的另一份查询结果，直接用内置的 `LEFT JOIN 对账` / `EXCEPT 找差异` 模板跨源比对。
+- **免连接探索本地数据文件**：侧边栏点「打开本地数据文件…」，直接对本机 CSV / Parquet / JSON 文件做画像、SQL 探索、出图与格式转换。
 
 ## 浏览和编辑表数据
 
@@ -945,23 +973,36 @@ TiDB 与 OceanBase 上同时改列和改表名会拆成两条语句（它们不�
 - **搜索**表名或列名：把不相干的压暗，图的形状不变。
 - **过滤**：按 Schema、「以这张表为中心」走 N 跳关系、「只看有关联的表」。过滤直接把
   表拿掉并重新排布，表很多时用它。
-- 「导出」为 SVG（矢量）、PNG 或 PDF；或者导出文字：
-  - **数据字典（Markdown）**：每张表的列、类型、可空、主键、外键指向谁、被谁引用。
+- 「导出」为 SVG（矢量）、PNG 或 PDF；或者导出文字与代码：
+  - **数据字典（Markdown）**：每张表的列、类型、可空、主键、外键指向谁、被谁引用，并自动附入该连接已保存的本地业务语义备注。
   - **Agent Skill（`SKILL.md`）**：同一份字典加上 Skill 的 frontmatter，放进 Agent 的 skills 目录，
     它写这个库的 SQL 时就知道有哪些表、怎么关联。
-  两种都跟着图上看得到的表走（过滤过就只有过滤后的）。不含列注释、默认值、索引与唯一约束，文件开头也这么写。
+  - **代码生成（确定性，不依赖 AI）**：直接生成 Prisma Schema、TypeORM / MikroORM 实体（NestJS）、SeaORM 实体或 Rust `sqlx::FromRow` 结构体，无法映射的类型或表会在顶部明确列出。
+  - **AI 业务语义注释草拟**（启用 AI 时可见）：每批最多 20 张表、零数据行外发，按 `### <表名>` 分节草拟业务说明，审阅修改后写入该连接的本地 `semantics/<id>.md` 备注文件，反哺数据字典、编辑器 AI 助手与 CLI / MCP。
+- **结构比对**：命令面板或工具栏打开「结构比对」，对比两个连接之间的表、列、主键、索引与外键差异；同方言下可勾选需要同步的项并生成迁移脚本（在编辑器里经正常确认执行），跨方言仅出差异报告。
 - 在本应用里执行过 DDL 后会自动刷新；别处改过结构点「重新读取」。
 
 想先看看效果，可以导入仓库里的示例 schema（`examples/`，用法见 README）。
 
 ## AI 设计新表
 
-可选功能，默认关。先到「设置 → AI 设计」：
+可选功能，默认关（且可在构建时用 `--no-default-features` 从二进制中物理剔除）。先到「设置 → AI 助手与设计」：
 
-- 勾上「启用 AI 设计」；「接口」选 **OpenAI 兼容**（DeepSeek、通义千问、智谱、Kimi、本地 Ollama）或
-  **Anthropic**；「地址」写到 `/chat/completions` 之前那一段（DeepSeek 是 `https://api.deepseek.com`、模型 `deepseek-flash`，
+- 勾上「启用 AI」；「接口」选 **OpenAI 兼容**（DeepSeek、通义千问、智谱、Kimi、本地 Ollama）或
+  **Anthropic**；「地址」写到 `/chat/completions` 之前那一段（DeepSeek 是 `https://api.deepseek.com`，
   Ollama 是 `http://localhost:11434/v1`；Anthropic 写 `https://api.anthropic.com`）；「模型」填模型名。
-- 「API Key」填了按保存，存进系统钥匙串，界面上只显示「已存在钥匙串里」。清空那一格再按就是删除。
+- 「API Key」填了按保存，存进系统钥匙串，界面上只显示「已存在钥匙串里」。本地 Ollama（`127.0.0.1` / `localhost` / `::1`）支持免 Key 且自动绕过系统代理。
+- 支持**「测试连接」**验证配置、配置多套预设（如云端 + 本地 Ollama），并可开启**敏感环境守卫**（`预发`/`生产`连接仅允许调用本地模型端点，禁止向公网模型外发）。所有 AI 请求均支持途中随时取消，且零原始表数据行外发。
+
+### SQL 编辑器 AI 助手与画像解读
+
+开启 AI 后，除建表设计外还在三处克制提供辅助（发出的 `[system]` / `[user]` 原文全程可展开查看，**绝不自动执行任何 SQL**）：
+
+- **自然语言生成 / 选中改写 SQL**：编辑器工具栏的 AI 按钮，按需勾选最多 15 张表结构（`PROD` 默认 0 张）并融合连接级本地语义备注，生成或改写 SQL 后需人工确认插入编辑器。
+- **报错一键诊断修复**：SQL 执行失败面板里的「AI 诊断修复」，仅提取报错信息与涉及的表列定义给出修正建议。
+- **EXPLAIN 执行计划与画像体检解读**：执行计划弹窗可一键解读慢查询瓶颈与候选索引；数据画像弹窗可基于剥离样本值的脱敏统计摘要给出数据质量排查建议。
+
+### AI 设计新表流程
 
 然后在能建表的连接上（ClickHouse 不行），对象树头部的 ✨ 按钮或命令面板「AI 设计新表」打开设计页：
 
@@ -1018,7 +1059,8 @@ TiDB 与 OceanBase 上同时改列和改表名会拆成两条语句（它们不�
 - **危险语句确认**：每个环境从哪一级开始确认，见[危险语句确认](#危险语句确认)。
 - **查询历史保留**：保留期（7、30、90、365 天或不按时间删）、条数上限（100 到
   2000）、慢查询阈值。调小上限立刻生效，删掉的不可恢复。
-- **AI 设计**：开关、接口、地址、模型与 API Key，见 [AI 设计新表](#ai-设计新表)。不带 AI 的构建里没有这一节。
+- **AI 助手与设计**：开关、多预设（云端/本地 Ollama）、测试连接、敏感环境本地模型守卫与 API Key，见 [AI 设计新表](#ai-设计新表)。不带 AI 的构建里没有这一节。
+- **命令行与 Agent**：显示本机 `dataomni` 可执行路径、PATH 状态与已开放的非生产连接数；一键复制 Claude Code / Claude Desktop / Cursor 接入配置片段与导出 `SKILL.md`；内置只读审计日志查看器（直接读 `dataomni-cli.log`，按结果与关键字筛选，不提供删除或篡改入口）。
 - **关于与诊断**：当前版本；「启动时检查新版本」（默认开，每天最多一次，只向 GitHub 查询最新版本号，有新版本时在
   标签栏下面提示一行，绝不静默下载或强制重启：macOS `.dmg` 与 Windows `.msi` / `-setup.exe` 独立安装副本点「升级」可查看说明、经 Ed25519 签名校验后确认重启替换，Homebrew Cask 副本提供一键复制 `brew upgrade --cask dataomni`）；日志文件的位置。报告问题时按「复制诊断信息」，贴进 issue——里面是版本、系统、
   架构和 WebView 版本，不含连接与口令；「在文件夹中显示日志」找到日志文件一并附上。
@@ -1053,55 +1095,57 @@ TiDB 与 OceanBase 上同时改列和改表名会拆成两条语句（它们不�
 
 ## 命令行与 Agent
 
-`dataomni cli` 是应用自带的命令行：终端里、或者 AI Agent（Claude Code 之类）能用你在这里配好的连接做只读查询，
-口令留在系统钥匙串里，不交给调用方。
+`dataomni <command>`（旧写法 `dataomni cli <command>` 完全兼容）是应用自带的无头只读命令行：无需启动桌面窗口，终端或 AI Agent（Claude Code、Codex、Cursor 等）即可复用你在这里配好的连接、SSH 隧道与 TLS 配置，口令留在系统钥匙串里，绝不交给调用方。
 
-**开放一个连接**：编辑连接，把「命令行与 Agent 访问」设成「只读」，保存。
+**开放一个连接**：编辑连接，把「命令行与 Agent 访问」设成「只读」，保存（表单下方有直达「设置 → 命令行与 Agent」的入口，可一键复制接入配置）。
 
-- 生产环境的连接这一项固定为关、置灰；命令行里看不到它。
+- 生产环境的连接这一项固定为关、置灰；命令行里物理不可见，按名称查询也固定返回 `not_found`。
 - 口令要存进系统钥匙串（勾上「保存密码」）：命令行是另一个进程，拿不到只在这次会话里输入的口令。没勾时表单会提醒。
 - 第一次从命令行读某个连接的口令时，系统可能问一次能否读钥匙串，点「始终允许」。
 
-**装到 PATH 上**：`scripts/install-macos.sh` 会建 `~/.local/bin/dataomni`。用安装包装的，自己链一下：
-`ln -s /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni`。
-Windows 上就是安装目录里的 `dataomni.exe`（把那个目录加进 PATH）。它是窗口程序，终端里直接敲能看到输出，
-但终端不等它结束、拿不到退出码；脚本里要退出码就接管道（PowerShell `dataomni cli … | Out-String`）。
-Agent 本来就经管道调用，不受影响。
+**装到 PATH 上**：
+- **macOS**：Homebrew Cask（`brew install --cask dataomni-rs/tap/dataomni`）自动链接 `$(brew --prefix)/bin/dataomni`；手动 `.dmg` 拖入「应用程序」后可运行 `ln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni`。
+- **Linux**：`.deb` / `.rpm` 自动安装 `/usr/bin/dataomni`。
+- **Windows**：NSIS 默认在 `%LOCALAPPDATA%\DataOmni\dataomni.exe`，MSI 默认在 `C:\Program Files\DataOmni\dataomni.exe`（若安装时自定义了目录，请到自定义目录下找 `dataomni.exe` 并加入 PATH）。它是窗口子系统程序，在 PowerShell 交互终端里接 `| Out-String` 可等待完整输出并拿退出码，写 UTF-8 文件用 `Set-Content -Encoding utf8`，传 SQL 文件用 `Get-Content -Raw query.sql | dataomni query <连接> -`。Agent 本身经管道调用，不受影响。
 
-**常用命令**（`dataomni cli help` 有全部）：
+**终端自动美化与全局开关**：接管道或被 Agent 调起时输出单行紧凑 JSON（顶层 `"schema": 1`、零 ANSI 转义符）；直接在交互终端运行自动 2 空格缩进并带 ANSI 语法高亮。可用 `--pretty`、`--compact`（`-c`）、`--color auto|always|never`、`--no-color` 与 `NO_COLOR` 覆盖。
+
+**常用命令**（`dataomni --help` 有全部）：
 
 | 命令 | 做什么 |
 | --- | --- |
-| `connections` | 列出开放了的连接 |
-| `dictionary <连接>` | 整库的数据字典（Markdown），写 SQL 之前先读 |
-| `query <连接> "<SQL>"` | 跑一条只读语句，默认最多 200 行（`--limit` 到 10000） |
-| `explain <连接> "<SQL>"` | 执行计划，不带 ANALYZE，语句本身不执行 |
-| `schema <连接> [<表>]`、`ddl <连接> <表>` | 表与视图；一张表的列、索引、外键；数据库自己给的定义原文 |
-| `export <连接> "<SQL>" --out 文件` | 整份结果写进新文件（CSV / JSON），不覆盖已有的 |
+| `connections` | 列出开放了的非生产连接 |
+| `dictionary <连接>` | 整库数据字典（Markdown，自动附入本地语义备注），写 SQL 之前先读 |
+| `schema <连接> [<表>]`、`ddl <连接> <表>` | 表与视图清单；单表的列、索引、外键与语义备注；数据库原生建表定义 |
+| `query <连接> "<SQL>" [--param K=V] [--params-json '{}']` | 跑一条只读语句，支持 `:name` 原生绑定参数（参数值绝不记入日志），默认 200 行（`--limit` 到 10000） |
+| `profile <连接> "<SQL>"` / `profile --file <路径>` | 经内置沙箱 DuckDB 输出列级统计画像（默认 10,000 行，上限 100,000 行；也支持离线画像本地 Parquet / CSV / JSON） |
+| `diff <源连接> <目标连接> [--format json\|markdown]` | 两个已开放非生产连接之间的只读结构差异报告（绝不执行 DDL） |
+| `explain <连接> "<SQL>"` | 估算执行计划，不带 ANALYZE，语句本身不执行 |
+| `export <连接> "<SQL>" --out 文件 [--format csv\|json\|parquet]` | 流式导出整份结果到新文件（CSV / JSON / Apache Parquet），绝不覆盖已有文件 |
 | `backup <连接> --out 路径` | 和应用里的备份一样（pg_dump、mysqldump、mongodump、SQLite、DuckDB） |
-| `mongo`、`redis`、`neo4j`、`es` | 这几种库各自的只读命令 |
-| `test <连接>` | 试连；连不上时说断在解析还是端口 |
-| `guide` | 给 Agent 读的说明，存成 `SKILL.md` 放进 Agent 的 skills 目录就能用 |
+| `csv-preview <文件>` | 离线嗅探 CSV 分隔符、编码（UTF-8 / GB18030）与异常行 |
+| `mongo`、`redis`、`neo4j`、`es` | 四大 NoSQL 各自的只读命令 |
+| `test <连接>` | 试连；连不上时给出 DNS / TCP 诊断 |
+| `guide` | 打印内置 Agent `SKILL.md`（与 `https://dataomni.dev/SKILL.md` 逐字节一致） |
 
-**只读是怎么保证的**：每次只放行一条读语句（`SELECT`、`WITH`、`SHOW`、`EXPLAIN` 等），并在数据库自己的
+**只读是怎么保证的**：每次只放行一条读语句（`SELECT`、`WITH`、`SHOW`、`DESCRIBE`、`EXPLAIN`、`VALUES`、`TABLE` 等），并在数据库自己的
 只读事务或只读打开里执行、以回滚结束。MongoDB 只有读的接口，聚合里的 `$out` / `$merge` 被拒；Redis 只跑服务器
 标了 `readonly` 的命令；Neo4j 只跑服务器判为读的查询；Elasticsearch 只放行读的方法与路径。被拒时退出码是 3，
 命令行上没有绕过它的参数。挡不住的是不改数据的管理操作（比如 PostgreSQL 的 `pg_terminate_backend`）——
 真正的边界是给 Agent 用一个只读的数据库账号。
 
-**留痕**：每次调用写一行进 `dataomni-cli.log`（和 `dataomni.log` 同一个目录）：时间、连接、命令、语句的第一个
-关键字、长度与摘要、结果、行数、耗时，不记语句原文。
+**留痕**：每次调用写一行进 `dataomni-cli.log`（和 `dataomni.log` 同一个目录，满 2 MB 轮转，也可在「设置 → 命令行与 Agent」里只读查看）：时间、连接、命令、语句的第一个
+关键字、长度与 SHA-256 摘要、结果、行数、耗时，**绝不记录 SQL 原文与绑定参数值**。
 
-**MCP 服务**：不能跑 shell 的 Agent（Claude Desktop、一些 IDE 里的助手）接 `dataomni mcp`。它是同一个程序，
-在标准输入输出上说 MCP 协议，工具与上面的命令一一对应：`connections`、`test`、`query`、`explain`、`schema`、
+**MCP 服务**：不能跑 shell 的 Agent（Claude Desktop、Cursor、Windsurf 等）或需要高频多步调用（经 SSH 隧道复用单条长连接）时接 `dataomni mcp`。它是同一个程序，
+在标准输入输出上说 MCP 协议，暴露 **13 个只读工具**（均标 `readOnlyHint: true`）：`connections`、`test`、`query`（支持 `params`）、`profile`、`diff`、`explain`、`schema`、
 `ddl`、`dictionary`，以及 `mongo`、`redis`、`neo4j`、`es`。开放规则、只读、留痕都和命令行同一份。
-`export`、`backup`、`csv-preview` 不给：它们会在你的磁盘上写文件或读任意文件。
+涉及宿主机本地文件读写的 `export`、`backup`、`csv-preview` 与 `profile --file` 均不在 MCP 中暴露。
 
-- Claude Code：`claude mcp add dataomni -- /Applications/DataOmni.app/Contents/MacOS/dataomni mcp`
-- Claude Desktop：在配置文件的 `mcpServers` 里加
-  `"dataomni": { "command": "/Applications/DataOmni.app/Contents/MacOS/dataomni", "args": ["mcp"] }`
-- Windows 的路径是安装目录里的 `dataomni.exe`（安装包默认 `%LOCALAPPDATA%\DataOmni\` 或 `C:\Program Files\DataOmni\`），
-  Linux 是 `/usr/bin/dataomni`。
+- **推荐**：直接在 DataOmni 的「设置 → 命令行与 Agent」一键复制当前系统的真实路径配置。
+- macOS（Homebrew）：`claude mcp add dataomni -- /opt/homebrew/bin/dataomni mcp`（手动 `.dmg` 用 `/Applications/DataOmni.app/Contents/MacOS/dataomni`）
+- Linux（`.deb` / `.rpm`）：`claude mcp add dataomni -- /usr/bin/dataomni mcp`
+- Windows：NSIS 默认 `C:\Users\<USER>\AppData\Local\DataOmni\dataomni.exe`，MSI 默认 `C:\Program Files\DataOmni\dataomni.exe`（在 `mcp.json` 中反斜杠写作 `\\`；如安装时选了自定义目录，请改为自定义目录下的 `dataomni.exe`）。
 
 每次调用都重新读连接设置：在应用里关掉一个连接的访问，下一次调用就看不到它，不用重启服务。
 钥匙串第一次弹框时，这次调用会一直等到你点了「始终允许」。
@@ -1110,7 +1154,7 @@ Agent 本来就经管道调用，不受影响。
 
 | 什么 | 存在哪里 |
 | --- | --- |
-| 连接配置（不含密码） | 应用配置目录下的 `connections.json`：macOS 是 `~/Library/Application Support/com.dataomni.app/`，Linux 是 `~/.config/com.dataomni.app/`，Windows 是 `%APPDATA%\com.dataomni.app\`。卸载时不删 |
+| 连接配置（不含密码） | 应用配置目录下的 `connections.json`（及可选连接级业务语义备注 `semantics/<id>.md`）：macOS 是 `~/Library/Application Support/com.dataomni.app/`，Linux 是 `~/.config/com.dataomni.app/`，Windows 是 `%APPDATA%\com.dataomni.app\`。卸载时不删 |
 | 数据库密码、SSH 口令 | 系统钥匙串 |
 | 标签、SQL 草稿、查询模板、查询历史、设置 | 应用自己的本地存储，只在这台机器上 |
 | 查询结果 | 不保存 |

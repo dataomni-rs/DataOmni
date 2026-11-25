@@ -10,7 +10,7 @@ available in English and Chinese (the language switch is at the bottom of the si
 
 ## Why DataOmni
 
-- **One client for 16+ kinds of servers.** MySQL, PostgreSQL, SQLite, SQL Server, Oracle, DuckDB,
+- **One client for 20 real-server-tested databases.** MySQL, PostgreSQL, SQLite, SQL Server, Oracle, DuckDB,
   ClickHouse and opt-in Dameng DM8 (`--features odbc` + BYO official ODBC driver), plus MariaDB, TiDB,
   OceanBase, CockroachDB, openGauss (sha256 & SM3) and KingbaseES (PG mode) through the compatible
   connection types. MongoDB, Redis, Neo4j and Elasticsearch / OpenSearch each get their own workspace.
