@@ -1428,7 +1428,7 @@ const ZH_DATABASES_SECTIONS: &[DocSection] = &[
           ],
           &[
             "SQLite 与 DuckDB 2.0",
-            "可通过「打开数据库文件…」直连本地文件或 :memory:，完整支持 Windows 超 260 字符长路径。DuckDB 内置 parquet 与 json 扩展，可直接流式查询 SELECT * FROM 'events.parquet'；注意连接期间 DuckDB 独占文件锁，需在外部程序打开前请先点断开。",
+            "可通过「打开数据库文件…」直连本地文件或 :memory:，完整支持 Windows 超 260 字符长路径。DuckDB 内置 parquet 与 json 扩展，可直接流式查询 SELECT * FROM 'events.parquet'；注意连接期间 DuckDB 独占文件锁，在外部程序打开前请先点断开。",
           ],
           &[
             "ClickHouse",
