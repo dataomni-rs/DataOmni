@@ -264,6 +264,24 @@ describe.skipIf(process.platform === 'win32')('CI 变更范围过滤与工作流
     }
   });
 
+  it('Rust Clippy 强制 -D warnings，CI 覆盖 --features odbc 且发版包不引入 unixODBC', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts['rust:clippy']).toContain('-- -D warnings');
+    expect(pkg.scripts['rust:clippy:no-ai']).toContain('-- -D warnings');
+    expect(pkg.scripts['rust:clippy:odbc']).toContain('--features odbc');
+    expect(pkg.scripts['rust:clippy:odbc']).toContain('-- -D warnings');
+
+    const ciYaml = readFileSync('.github/workflows/ci.yml', 'utf8');
+    expect(ciYaml).toContain('unixodbc-dev');
+    expect(ciYaml).toContain('bun run rust:clippy:odbc');
+    expect(ciYaml).toContain('cargo test --manifest-path src-tauri/Cargo.toml --lib --features odbc');
+
+    const releaseYaml = readFileSync('.github/workflows/release.yml', 'utf8');
+    expect(releaseYaml).not.toContain('unixodbc');
+  });
+
   it('glama.json 符合 Glama MCP 目录认领格式且不含占位符', () => {
     const parsed = JSON.parse(readFileSync('glama.json', 'utf8')) as {
       $schema?: string;

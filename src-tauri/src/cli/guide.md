@@ -12,7 +12,7 @@ description: "Query and inspect databases configured in DataOmni through its hea
 - If `dataomni` is not on `PATH`:
   - **macOS**: `/Applications/DataOmni.app/Contents/MacOS/dataomni` (Homebrew Cask links `$(brew --prefix)/bin/dataomni`)
   - **Linux**: `/usr/bin/dataomni`
-  - **Windows**: `%LOCALAPPDATA%\DataOmni\dataomni.exe` or `C:\Program Files\DataOmni\dataomni.exe`
+  - **Windows**: `%LOCALAPPDATA%\DataOmni\dataomni.exe` (NSIS) or `C:\Program Files\DataOmni\dataomni.exe` (MSI); if you chose a custom install directory, locate `dataomni.exe` inside that folder.
 
 ## Access Rules & Security Guardrails
 
@@ -75,6 +75,7 @@ dataomni query <connection> "SELECT * FROM orders WHERE tenant_id = :t OR parent
 dataomni query <connection> - < query.sql
 ```
 
+- On **Windows PowerShell**, `<` stdin redirection is not supported and the GUI-subsystem binary returns immediately unless output is piped; pipe SQL via `Get-Content -Raw query.sql | dataomni query <connection> - | Out-String` (or `Set-Content -Encoding utf8` when saving Markdown/JSON files).
 - Check `truncated: true` in the response to know whether more rows existed beyond `--limit`.
 - Only **one** read-only statement is allowed per call (`SELECT`, read-only `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN` without `ANALYZE`, `VALUES`, `TABLE`). Writes, DDL, and multi-statements are refused with exit code `3`.
 
