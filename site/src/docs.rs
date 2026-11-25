@@ -104,6 +104,22 @@ pub enum CalloutTone {
   Guardrail,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeLang {
+  Shell,
+  PowerShell,
+  Json,
+}
+
+pub struct CodeTab {
+  pub id: &'static str,
+  pub os_targets: &'static str,
+  pub label: &'static str,
+  pub lang: CodeLang,
+  pub copy_text: Option<&'static str>,
+  pub raw_code: &'static str,
+}
+
 pub enum DocBlock {
   Paragraph(&'static str),
   Bullets(&'static [&'static str]),
@@ -117,6 +133,10 @@ pub enum DocBlock {
     label: &'static str,
     copy_text: Option<&'static str>,
     raw_code: &'static str,
+  },
+  TabbedCode {
+    label: &'static str,
+    tabs: &'static [CodeTab],
   },
   Table {
     caption: &'static str,
@@ -197,10 +217,34 @@ const EN_QUICKSTART_SECTIONS: &[DocSection] = &[
           ],
         ],
       },
-      DocBlock::Code {
-        label: "Install on macOS via Homebrew Cask",
-        copy_text: Some("brew install --cask dataomni-rs/tap/dataomni"),
-        raw_code: "brew install --cask dataomni-rs/tap/dataomni",
+      DocBlock::TabbedCode {
+        label: "Install commands by platform",
+        tabs: &[
+          CodeTab {
+            id: "macos",
+            os_targets: "macos",
+            label: "macOS",
+            lang: CodeLang::Shell,
+            copy_text: Some("brew install --cask dataomni-rs/tap/dataomni"),
+            raw_code: "# Install via Homebrew Cask (Apple Developer ID notarized; links dataomni onto PATH)\nbrew install --cask dataomni-rs/tap/dataomni\n\n# Upgrade later\nbrew upgrade --cask dataomni-rs/tap/dataomni",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("Invoke-WebRequest \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_x64-setup.exe\" -OutFile \"$env:TEMP\\DataOmni-setup.exe\"; Start-Process \"$env:TEMP\\DataOmni-setup.exe\""),
+            raw_code: "# Per-user NSIS installer (default dir: %LOCALAPPDATA%\\DataOmni\\)\nInvoke-WebRequest \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_x64-setup.exe\" `\n  -OutFile \"$env:TEMP\\DataOmni-setup.exe\"\nStart-Process \"$env:TEMP\\DataOmni-setup.exe\"\n\n# Or machine-wide MSI installer (default dir: C:\\Program Files\\DataOmni\\)\nInvoke-WebRequest \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_x64_en-US.msi\" `\n  -OutFile \"$env:TEMP\\DataOmni.msi\"\nmsiexec /i \"$env:TEMP\\DataOmni.msi\"",
+          },
+          CodeTab {
+            id: "linux",
+            os_targets: "linux",
+            label: "Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("sudo apt install ./DataOmni_{VERSION}_amd64.deb"),
+            raw_code: "# Debian / Ubuntu (.deb — installs /usr/bin/dataomni)\ncurl -fLO \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_amd64.deb\"\nsudo apt install ./DataOmni_{VERSION}_amd64.deb\n\n# Fedora / RHEL (.rpm — installs /usr/bin/dataomni)\ncurl -fLO \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni-{VERSION}-1.x86_64.rpm\"\nsudo dnf install ./DataOmni-{VERSION}-1.x86_64.rpm",
+          },
+        ],
       },
     ],
   },
@@ -373,10 +417,34 @@ const ZH_QUICKSTART_SECTIONS: &[DocSection] = &[
           ],
         ],
       },
-      DocBlock::Code {
-        label: "macOS 通过 Homebrew Cask 安装",
-        copy_text: Some("brew install --cask dataomni-rs/tap/dataomni"),
-        raw_code: "brew install --cask dataomni-rs/tap/dataomni",
+      DocBlock::TabbedCode {
+        label: "各平台命令行安装示例",
+        tabs: &[
+          CodeTab {
+            id: "macos",
+            os_targets: "macos",
+            label: "macOS",
+            lang: CodeLang::Shell,
+            copy_text: Some("brew install --cask dataomni-rs/tap/dataomni"),
+            raw_code: "# 通过 Homebrew Cask 安装（Apple 公证版，同时自动将 dataomni 软链进 PATH）\nbrew install --cask dataomni-rs/tap/dataomni\n\n# 日后升级到最新版本\nbrew upgrade --cask dataomni-rs/tap/dataomni",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("Invoke-WebRequest \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_x64-setup.exe\" -OutFile \"$env:TEMP\\DataOmni-setup.exe\"; Start-Process \"$env:TEMP\\DataOmni-setup.exe\""),
+            raw_code: "# 按用户安装 NSIS 包（默认安装目录：%LOCALAPPDATA%\\DataOmni\\）\nInvoke-WebRequest \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_x64-setup.exe\" `\n  -OutFile \"$env:TEMP\\DataOmni-setup.exe\"\nStart-Process \"$env:TEMP\\DataOmni-setup.exe\"\n\n# 或按机器安装 MSI 包（默认安装目录：C:\\Program Files\\DataOmni\\）\nInvoke-WebRequest \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_x64_en-US.msi\" `\n  -OutFile \"$env:TEMP\\DataOmni.msi\"\nmsiexec /i \"$env:TEMP\\DataOmni.msi\"",
+          },
+          CodeTab {
+            id: "linux",
+            os_targets: "linux",
+            label: "Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("sudo apt install ./DataOmni_{VERSION}_amd64.deb"),
+            raw_code: "# Debian / Ubuntu（.deb 包，自动安装 /usr/bin/dataomni）\ncurl -fLO \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni_{VERSION}_amd64.deb\"\nsudo apt install ./DataOmni_{VERSION}_amd64.deb\n\n# Fedora / RHEL（.rpm 包，自动安装 /usr/bin/dataomni）\ncurl -fLO \"https://github.com/dataomni-rs/DataOmni/releases/download/v{VERSION}/DataOmni-{VERSION}-1.x86_64.rpm\"\nsudo dnf install ./DataOmni-{VERSION}-1.x86_64.rpm",
+          },
+        ],
       },
     ],
   },
@@ -555,7 +623,7 @@ const EN_MCP_SECTIONS: &[DocSection] = &[
           &["Linux (.deb / .rpm)", "/usr/bin/dataomni", "mcp"],
           &[
             "Windows (NSIS / MSI)",
-            "%LOCALAPPDATA%\\DataOmni\\dataomni.exe or C:\\Program Files\\DataOmni\\dataomni.exe",
+            "%LOCALAPPDATA%\\DataOmni\\dataomni.exe (NSIS default) or C:\\Program Files\\DataOmni\\dataomni.exe (MSI default) — or dataomni.exe inside your custom install directory",
             "mcp",
           ],
         ],
@@ -686,7 +754,7 @@ const ZH_MCP_SECTIONS: &[DocSection] = &[
           &["Linux（.deb / .rpm）", "/usr/bin/dataomni", "mcp"],
           &[
             "Windows（NSIS / MSI）",
-            "%LOCALAPPDATA%\\DataOmni\\dataomni.exe 或 C:\\Program Files\\DataOmni\\dataomni.exe",
+            "%LOCALAPPDATA%\\DataOmni\\dataomni.exe（NSIS 默认）或 C:\\Program Files\\DataOmni\\dataomni.exe（MSI 默认）；若安装时自定义了目录，请到自定义目录下查找 dataomni.exe",
             "mcp",
           ],
         ],
@@ -801,7 +869,7 @@ const EN_CLI_SECTIONS: &[DocSection] = &[
       DocBlock::Steps(&[
         (
           "Put dataomni on your PATH",
-          "Homebrew Cask installs already link $(brew --prefix)/bin/dataomni on macOS, Linux packages install /usr/bin/dataomni, and manual macOS .dmg installs can symlink the binary inside DataOmni.app.",
+          "Homebrew Cask installs already link $(brew --prefix)/bin/dataomni on macOS, Linux packages install /usr/bin/dataomni, manual macOS .dmg installs can symlink the binary inside DataOmni.app, and Windows users can add %LOCALAPPDATA%\\DataOmni (NSIS default), C:\\Program Files\\DataOmni (MSI default), or their custom install directory to User PATH.",
         ),
         (
           "Open a non-production connection to Read-only in DataOmni",
@@ -812,10 +880,34 @@ const EN_CLI_SECTIONS: &[DocSection] = &[
           "Generate SKILL.md straight from your local binary (always matching your installed version) or curl the hosted copy from https://dataomni.dev/SKILL.md.",
         ),
       ]),
-      DocBlock::Code {
-        label: "PATH symlink & SKILL.md installation (Claude Code / Codex / Agents)",
-        copy_text: Some("mkdir -p ~/.claude/skills/dataomni && dataomni guide > ~/.claude/skills/dataomni/SKILL.md"),
-        raw_code: "# macOS manual .dmg symlink (Homebrew Cask already links dataomni automatically):\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# Verify headless CLI without launching the GUI\ndataomni --help\ndataomni connections\n\n# Option 1 (recommended): export SKILL.md directly from the installed binary\nmkdir -p ~/.claude/skills/dataomni\ndataomni guide > ~/.claude/skills/dataomni/SKILL.md\n\n# Option 2: download the hosted SKILL.md directly from dataomni.dev\ncurl -fsSL https://dataomni.dev/SKILL.md -o ~/.claude/skills/dataomni/SKILL.md",
+      DocBlock::TabbedCode {
+        label: "PATH & SKILL.md installation (Claude Code / Codex / Agents)",
+        tabs: &[
+          CodeTab {
+            id: "macos",
+            os_targets: "macos",
+            label: "macOS",
+            lang: CodeLang::Shell,
+            copy_text: Some("mkdir -p ~/.claude/skills/dataomni && dataomni guide > ~/.claude/skills/dataomni/SKILL.md"),
+            raw_code: "# macOS manual .dmg symlink (Homebrew Cask already links dataomni automatically):\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# Verify headless CLI without launching the GUI\ndataomni --help\ndataomni connections\n\n# Option 1 (recommended): export SKILL.md directly from the installed binary\nmkdir -p ~/.claude/skills/dataomni\ndataomni guide > ~/.claude/skills/dataomni/SKILL.md\n\n# Option 2: download the hosted SKILL.md directly from dataomni.dev\ncurl -fsSL https://dataomni.dev/SKILL.md -o ~/.claude/skills/dataomni/SKILL.md",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("New-Item -ItemType Directory -Force \"$HOME\\.claude\\skills\\dataomni\" | Out-Null; dataomni guide | Set-Content -Encoding utf8 \"$HOME\\.claude\\skills\\dataomni\\SKILL.md\""),
+            raw_code: "# Add default NSIS dir to User PATH (MSI uses C:\\Program Files\\DataOmni; adjust if installed to a custom folder)\n$binDir = \"$env:LOCALAPPDATA\\DataOmni\"\n[Environment]::SetEnvironmentVariable(\"Path\", \"$binDir;\" + [Environment]::GetEnvironmentVariable(\"Path\", \"User\"), \"User\")\n\n# Reopen PowerShell and verify headless CLI (pipe so interactive PowerShell waits for stdout)\ndataomni --help | Out-String\ndataomni connections | Out-String\n\n# Option 1 (recommended): export UTF-8 SKILL.md directly from the installed binary\nNew-Item -ItemType Directory -Force \"$HOME\\.claude\\skills\\dataomni\" | Out-Null\ndataomni guide | Set-Content -Encoding utf8 \"$HOME\\.claude\\skills\\dataomni\\SKILL.md\"\n\n# Option 2: download the hosted SKILL.md directly from dataomni.dev\nInvoke-WebRequest \"https://dataomni.dev/SKILL.md\" -OutFile \"$HOME\\.claude\\skills\\dataomni\\SKILL.md\"",
+          },
+          CodeTab {
+            id: "linux",
+            os_targets: "linux",
+            label: "Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("mkdir -p ~/.claude/skills/dataomni && dataomni guide > ~/.claude/skills/dataomni/SKILL.md"),
+            raw_code: "# .deb / .rpm packages install /usr/bin/dataomni onto PATH automatically\nwhich dataomni\ndataomni --help\ndataomni connections\n\n# Option 1 (recommended): export SKILL.md directly from the installed binary\nmkdir -p ~/.claude/skills/dataomni\ndataomni guide > ~/.claude/skills/dataomni/SKILL.md\n\n# Option 2: download the hosted SKILL.md directly from dataomni.dev\ncurl -fsSL https://dataomni.dev/SKILL.md -o ~/.claude/skills/dataomni/SKILL.md",
+          },
+        ],
       },
       DocBlock::Callout {
         tone: CalloutTone::Note,
@@ -851,10 +943,26 @@ const EN_CLI_SECTIONS: &[DocSection] = &[
           &["dataomni guide / version / --help", "Prints the built-in SKILL.md agent guide, CLI version JSON, or command reference."],
         ],
       },
-      DocBlock::Code {
+      DocBlock::TabbedCode {
         label: "End-to-end terminal & agent workflow examples",
-        copy_text: Some("dataomni schema shop_dev orders"),
-        raw_code: "# 1. Inspect real columns before writing SQL\ndataomni schema shop_dev\ndataomni schema shop_dev orders\ndataomni ddl shop_dev orders\n\n# 2. Run parameterized read-only SQL (parameter values are bound natively and never logged)\ndataomni query shop_dev \"SELECT id, status, total FROM orders WHERE customer_id = :cid AND deleted_at IS :del\" \\\n  --param cid=1042 --param-null del --limit 50\n\n# 3. Profile distributions via built-in DuckDB without pulling raw rows\ndataomni profile shop_dev \"SELECT * FROM orders\" --limit 10000\n\n# 4. Export to Apache Parquet and compare staging vs dev schemas\ndataomni export shop_dev - --out /tmp/orders.parquet --format parquet < report.sql\ndataomni profile --file /tmp/orders.parquet\ndataomni diff shop_dev shop_staging --format markdown",
+        tabs: &[
+          CodeTab {
+            id: "unix",
+            os_targets: "macos linux",
+            label: "macOS / Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("dataomni schema shop_dev orders"),
+            raw_code: "# 1. Inspect real columns before writing SQL\ndataomni schema shop_dev\ndataomni schema shop_dev orders\ndataomni ddl shop_dev orders\n\n# 2. Run parameterized read-only SQL (parameter values are bound natively and never logged)\ndataomni query shop_dev \"SELECT id, status, total FROM orders WHERE customer_id = :cid AND deleted_at IS :del\" \\\n  --param cid=1042 --param-null del --limit 50\n\n# 3. Profile distributions via built-in DuckDB without pulling raw rows\ndataomni profile shop_dev \"SELECT * FROM orders\" --limit 10000\n\n# 4. Export to Apache Parquet and compare staging vs dev schemas\ndataomni export shop_dev - --out /tmp/orders.parquet --format parquet < report.sql\ndataomni profile --file /tmp/orders.parquet\ndataomni diff shop_dev shop_staging --format markdown",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("dataomni schema shop_dev orders | Out-String"),
+            raw_code: "# 1. Inspect real columns before writing SQL\ndataomni schema shop_dev | Out-String\ndataomni schema shop_dev orders | Out-String\ndataomni ddl shop_dev orders | Out-String\n\n# 2. Run parameterized read-only SQL (backtick ` continues lines in PowerShell)\ndataomni query shop_dev \"SELECT id, status, total FROM orders WHERE customer_id = :cid AND deleted_at IS :del\" `\n  --param cid=1042 --param-null del --limit 50 | Out-String\n\n# 3. Profile distributions via built-in DuckDB without pulling raw rows\ndataomni profile shop_dev \"SELECT * FROM orders\" --limit 10000 | Out-String\n\n# 4. Pipe SQL from a file (PowerShell uses Get-Content | instead of <) and export Parquet\nGet-Content -Raw report.sql | dataomni export shop_dev - --out \"$env:TEMP\\orders.parquet\" --format parquet\ndataomni profile --file \"$env:TEMP\\orders.parquet\" | Out-String\ndataomni diff shop_dev shop_staging --format markdown | Out-String",
+          },
+        ],
       },
     ],
   },
@@ -866,10 +974,26 @@ const EN_CLI_SECTIONS: &[DocSection] = &[
       DocBlock::Paragraph(
         "Non-relational engines use purpose-built read-only subcommands with engine-native syntax and server/parser read-only verification:",
       ),
-      DocBlock::Code {
+      DocBlock::TabbedCode {
         label: "Read-only MongoDB, Redis, Neo4j, and Elasticsearch calls",
-        copy_text: None,
-        raw_code: "# MongoDB (mongosh filter/pipeline syntax; $out and $merge refused at parse time)\ndataomni mongo app_mongo collections\ndataomni mongo app_mongo find shop.orders '{ status: \"paid\" }' --sort '{ createdAt: -1 }' --limit 20\ndataomni mongo app_mongo aggregate shop.orders '[{ $group: { _id: \"$status\", n: { $sum: 1 } } }]'\n\n# Redis (--db N goes before the operation; command checks server COMMAND INFO readonly)\ndataomni redis cache_dev keyspaces\ndataomni redis cache_dev --db 0 scan \"session:*\" --limit 50\ndataomni redis cache_dev --db 0 get \"session:42\"\n\n# Neo4j (EXPLAIN verifies query type == r before running in a read-mode Bolt transaction)\ndataomni neo4j graph_dev labels\ndataomni neo4j graph_dev run \"MATCH (u:User)-[:BOUGHT]->(p) RETURN u.id, p.sku LIMIT 25\"\n\n# Elasticsearch / OpenSearch (GET/HEAD or search POST such as _search, _count, _msearch)\ndataomni es search_dev indices\ndataomni es search_dev request POST /orders/_search '{\"size\":10,\"query\":{\"match_all\":{}}}'",
+        tabs: &[
+          CodeTab {
+            id: "unix",
+            os_targets: "macos linux",
+            label: "macOS / Linux",
+            lang: CodeLang::Shell,
+            copy_text: None,
+            raw_code: "# MongoDB (mongosh filter/pipeline syntax; $out and $merge refused at parse time)\ndataomni mongo app_mongo collections\ndataomni mongo app_mongo find shop.orders '{ status: \"paid\" }' --sort '{ createdAt: -1 }' --limit 20\ndataomni mongo app_mongo aggregate shop.orders '[{ $group: { _id: \"$status\", n: { $sum: 1 } } }]'\n\n# Redis (--db N goes before the operation; command checks server COMMAND INFO readonly)\ndataomni redis cache_dev keyspaces\ndataomni redis cache_dev --db 0 scan \"session:*\" --limit 50\ndataomni redis cache_dev --db 0 get \"session:42\"\n\n# Neo4j (EXPLAIN verifies query type == r before running in a read-mode Bolt transaction)\ndataomni neo4j graph_dev labels\ndataomni neo4j graph_dev run \"MATCH (u:User)-[:BOUGHT]->(p) RETURN u.id, p.sku LIMIT 25\"\n\n# Elasticsearch / OpenSearch (GET/HEAD or search POST such as _search, _count, _msearch)\ndataomni es search_dev indices\ndataomni es search_dev request POST /orders/_search '{\"size\":10,\"query\":{\"match_all\":{}}}'",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: None,
+            raw_code: "# MongoDB (PowerShell 7+ keeps inner quotes inside '...'; in Windows PowerShell 5.1 escape inner \" as \\\")\ndataomni mongo app_mongo collections | Out-String\ndataomni mongo app_mongo find shop.orders '{ status: \"paid\" }' --sort '{ createdAt: -1 }' --limit 20 | Out-String\ndataomni mongo app_mongo aggregate shop.orders '[{ $group: { _id: \"$status\", n: { $sum: 1 } } }]' | Out-String\n\n# Redis (--db N goes before the operation; command checks server COMMAND INFO readonly)\ndataomni redis cache_dev keyspaces | Out-String\ndataomni redis cache_dev --db 0 scan \"session:*\" --limit 50 | Out-String\ndataomni redis cache_dev --db 0 get \"session:42\" | Out-String\n\n# Neo4j (EXPLAIN verifies query type == r before running in a read-mode Bolt transaction)\ndataomni neo4j graph_dev labels | Out-String\ndataomni neo4j graph_dev run \"MATCH (u:User)-[:BOUGHT]->(p) RETURN u.id, p.sku LIMIT 25\" | Out-String\n\n# Elasticsearch / OpenSearch (GET/HEAD or search POST such as _search, _count, _msearch)\ndataomni es search_dev indices | Out-String\ndataomni es search_dev request POST /orders/_search '{\"size\":10,\"query\":{\"match_all\":{}}}' | Out-String",
+          },
+        ],
       },
     ],
   },
@@ -893,10 +1017,26 @@ const EN_CLI_SECTIONS: &[DocSection] = &[
           &["NO_COLOR / CLICOLOR / CLICOLOR_FORCE / TERM=dumb", "Standard terminal color conventions respected automatically under --color auto."],
         ],
       },
-      DocBlock::Code {
-        label: "Combining formatting flags with less and jq",
-        copy_text: Some("dataomni schema shop_dev --pretty --color always | less -R"),
-        raw_code: "# Page long highlighted output in less -R\ndataomni schema shop_dev --pretty --color always | less -R\n\n# Copy compact monochrome JSON in a terminal\ndataomni connections -c --no-color\n\n# Pipe directly into jq (automatically compact & uncolored)\ndataomni schema shop_dev | jq '.objects | length'",
+      DocBlock::TabbedCode {
+        label: "Combining formatting flags with pagers and JSON pipelines",
+        tabs: &[
+          CodeTab {
+            id: "unix",
+            os_targets: "macos linux",
+            label: "macOS / Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("dataomni schema shop_dev --pretty --color always | less -R"),
+            raw_code: "# Page long highlighted output in less -R\ndataomni schema shop_dev --pretty --color always | less -R\n\n# Copy compact monochrome JSON in a terminal\ndataomni connections -c --no-color\n\n# Pipe directly into jq (automatically compact & uncolored)\ndataomni schema shop_dev | jq '.objects | length'",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("(dataomni schema shop_dev | ConvertFrom-Json).objects.Count"),
+            raw_code: "# Page long highlighted output in PowerShell\ndataomni schema shop_dev --pretty --color always | Out-Host -Paging\n\n# Copy compact monochrome JSON directly to the Windows clipboard\ndataomni connections -c --no-color | Set-Clipboard\n\n# Parse compact piped JSON natively with ConvertFrom-Json (no jq required)\n(dataomni schema shop_dev | ConvertFrom-Json).objects.Count",
+          },
+        ],
       },
     ],
   },
@@ -952,7 +1092,7 @@ const ZH_CLI_SECTIONS: &[DocSection] = &[
       DocBlock::Steps(&[
         (
           "确认 dataomni 已在 PATH 中",
-          "macOS 通过 Homebrew Cask 安装会自动软链 $(brew --prefix)/bin/dataomni；Linux 包默认安装到 /usr/bin/dataomni；手动拖 .dmg 安装可自行软链应用包内二进制。",
+          "macOS 通过 Homebrew Cask 安装会自动软链 $(brew --prefix)/bin/dataomni；Linux 包默认安装到 /usr/bin/dataomni；手动拖 .dmg 安装可自行软链应用包内二进制；Windows 用户可将默认目录 %LOCALAPPDATA%\\DataOmni（NSIS）或 C:\\Program Files\\DataOmni（MSI）（自定义安装目录则改为对应路径）加入用户 PATH。",
         ),
         (
           "在 DataOmni 中为非生产连接开启「只读」访问",
@@ -963,10 +1103,34 @@ const ZH_CLI_SECTIONS: &[DocSection] = &[
           "推荐直接用本机二进制导出与当前版本严格一致的 SKILL.md，也可直接从 https://dataomni.dev/SKILL.md 下载托管版本。",
         ),
       ]),
-      DocBlock::Code {
-        label: "macOS 软链配置与 SKILL.md 安装（Claude Code / Codex / Agent）",
-        copy_text: Some("mkdir -p ~/.claude/skills/dataomni && dataomni guide > ~/.claude/skills/dataomni/SKILL.md"),
-        raw_code: "# macOS 手动拖 .dmg 安装时补建软链（Homebrew Cask 安装已自动处理）：\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# 验证无头命令行（不会弹出桌面窗口）\ndataomni --help\ndataomni connections\n\n# 方式一（推荐）：直接由本地二进制导出与当前版本严格一致的 SKILL.md\nmkdir -p ~/.claude/skills/dataomni\ndataomni guide > ~/.claude/skills/dataomni/SKILL.md\n\n# 方式二：直接从官网拉取最新托管版 SKILL.md\ncurl -fsSL https://dataomni.dev/SKILL.md -o ~/.claude/skills/dataomni/SKILL.md",
+      DocBlock::TabbedCode {
+        label: "PATH 配置与 SKILL.md 安装（Claude Code / Codex / Agent）",
+        tabs: &[
+          CodeTab {
+            id: "macos",
+            os_targets: "macos",
+            label: "macOS",
+            lang: CodeLang::Shell,
+            copy_text: Some("mkdir -p ~/.claude/skills/dataomni && dataomni guide > ~/.claude/skills/dataomni/SKILL.md"),
+            raw_code: "# macOS 手动拖 .dmg 安装时补建软链（Homebrew Cask 安装已自动处理）：\nln -sf /Applications/DataOmni.app/Contents/MacOS/dataomni ~/.local/bin/dataomni\n\n# 验证无头命令行（不会弹出桌面窗口）\ndataomni --help\ndataomni connections\n\n# 方式一（推荐）：直接由本地二进制导出与当前版本严格一致的 SKILL.md\nmkdir -p ~/.claude/skills/dataomni\ndataomni guide > ~/.claude/skills/dataomni/SKILL.md\n\n# 方式二：直接从官网拉取最新托管版 SKILL.md\ncurl -fsSL https://dataomni.dev/SKILL.md -o ~/.claude/skills/dataomni/SKILL.md",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("New-Item -ItemType Directory -Force \"$HOME\\.claude\\skills\\dataomni\" | Out-Null; dataomni guide | Set-Content -Encoding utf8 \"$HOME\\.claude\\skills\\dataomni\\SKILL.md\""),
+            raw_code: "# 将 NSIS 默认目录加入用户 PATH（MSI 默认在 C:\\Program Files\\DataOmni；如安装时自定义了目录请改为实际路径）\n$binDir = \"$env:LOCALAPPDATA\\DataOmni\"\n[Environment]::SetEnvironmentVariable(\"Path\", \"$binDir;\" + [Environment]::GetEnvironmentVariable(\"Path\", \"User\"), \"User\")\n\n# 重开 PowerShell 验证无头命令行（接管道以等待交互终端打印完整输出）\ndataomni --help | Out-String\ndataomni connections | Out-String\n\n# 方式一（推荐）：直接由本地二进制导出 UTF-8 编码的 SKILL.md\nNew-Item -ItemType Directory -Force \"$HOME\\.claude\\skills\\dataomni\" | Out-Null\ndataomni guide | Set-Content -Encoding utf8 \"$HOME\\.claude\\skills\\dataomni\\SKILL.md\"\n\n# 方式二：直接从官网拉取最新托管版 SKILL.md\nInvoke-WebRequest \"https://dataomni.dev/SKILL.md\" -OutFile \"$HOME\\.claude\\skills\\dataomni\\SKILL.md\"",
+          },
+          CodeTab {
+            id: "linux",
+            os_targets: "linux",
+            label: "Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("mkdir -p ~/.claude/skills/dataomni && dataomni guide > ~/.claude/skills/dataomni/SKILL.md"),
+            raw_code: "# .deb / .rpm 安装后已自动将 /usr/bin/dataomni 放入 PATH\nwhich dataomni\ndataomni --help\ndataomni connections\n\n# 方式一（推荐）：直接由本地二进制导出与当前版本严格一致的 SKILL.md\nmkdir -p ~/.claude/skills/dataomni\ndataomni guide > ~/.claude/skills/dataomni/SKILL.md\n\n# 方式二：直接从官网拉取最新托管版 SKILL.md\ncurl -fsSL https://dataomni.dev/SKILL.md -o ~/.claude/skills/dataomni/SKILL.md",
+          },
+        ],
       },
       DocBlock::Callout {
         tone: CalloutTone::Note,
@@ -1002,10 +1166,26 @@ const ZH_CLI_SECTIONS: &[DocSection] = &[
           &["dataomni guide / version / --help", "打印内置 Agent SKILL.md 指南、版本 JSON 或完整命令行帮助。"],
         ],
       },
-      DocBlock::Code {
+      DocBlock::TabbedCode {
         label: "端到端查库、画像、导出与比对示例",
-        copy_text: Some("dataomni schema shop_dev orders"),
-        raw_code: "# 1. 先查真实表结构与原生建表语句，避免猜错列名\ndataomni schema shop_dev\ndataomni schema shop_dev orders\ndataomni ddl shop_dev orders\n\n# 2. 命名绑定参数安全查询（参数走驱动预处理，值永不写入审计日志）\ndataomni query shop_dev \"SELECT id, status, total FROM orders WHERE customer_id = :cid AND deleted_at IS :del\" \\\n  --param cid=1042 --param-null del --limit 50\n\n# 3. 用内置 DuckDB 做列级统计画像，无需拉回全量明细\ndataomni profile shop_dev \"SELECT * FROM orders\" --limit 10000\n\n# 4. 导出 Apache Parquet、离线画像本地文件、跨环境对比表结构\ndataomni export shop_dev - --out /tmp/orders.parquet --format parquet < report.sql\ndataomni profile --file /tmp/orders.parquet\ndataomni diff shop_dev shop_staging --format markdown",
+        tabs: &[
+          CodeTab {
+            id: "unix",
+            os_targets: "macos linux",
+            label: "macOS / Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("dataomni schema shop_dev orders"),
+            raw_code: "# 1. 先查真实表结构与原生建表语句，避免猜错列名\ndataomni schema shop_dev\ndataomni schema shop_dev orders\ndataomni ddl shop_dev orders\n\n# 2. 命名绑定参数安全查询（参数走驱动预处理，值永不写入审计日志）\ndataomni query shop_dev \"SELECT id, status, total FROM orders WHERE customer_id = :cid AND deleted_at IS :del\" \\\n  --param cid=1042 --param-null del --limit 50\n\n# 3. 用内置 DuckDB 做列级统计画像，无需拉回全量明细\ndataomni profile shop_dev \"SELECT * FROM orders\" --limit 10000\n\n# 4. 导出 Apache Parquet、离线画像本地文件、跨环境对比表结构\ndataomni export shop_dev - --out /tmp/orders.parquet --format parquet < report.sql\ndataomni profile --file /tmp/orders.parquet\ndataomni diff shop_dev shop_staging --format markdown",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("dataomni schema shop_dev orders | Out-String"),
+            raw_code: "# 1. 先查真实表结构与原生建表语句，避免猜错列名\ndataomni schema shop_dev | Out-String\ndataomni schema shop_dev orders | Out-String\ndataomni ddl shop_dev orders | Out-String\n\n# 2. 命名绑定参数安全查询（PowerShell 使用反引号 ` 续行）\ndataomni query shop_dev \"SELECT id, status, total FROM orders WHERE customer_id = :cid AND deleted_at IS :del\" `\n  --param cid=1042 --param-null del --limit 50 | Out-String\n\n# 3. 用内置 DuckDB 做列级统计画像，无需拉回全量明细\ndataomni profile shop_dev \"SELECT * FROM orders\" --limit 10000 | Out-String\n\n# 4. 用 Get-Content 管道传入 SQL 文件（PowerShell 不支持 < 重定向）并导出 Parquet\nGet-Content -Raw report.sql | dataomni export shop_dev - --out \"$env:TEMP\\orders.parquet\" --format parquet\ndataomni profile --file \"$env:TEMP\\orders.parquet\" | Out-String\ndataomni diff shop_dev shop_staging --format markdown | Out-String",
+          },
+        ],
       },
     ],
   },
@@ -1017,10 +1197,26 @@ const ZH_CLI_SECTIONS: &[DocSection] = &[
       DocBlock::Paragraph(
         "四类非关系型数据库各自提供符合原生习惯的只读子命令，每一种都有独立的服务端/词法双重只读校验：",
       ),
-      DocBlock::Code {
+      DocBlock::TabbedCode {
         label: "四大非关系型工作区 CLI 示例",
-        copy_text: None,
-        raw_code: "# MongoDB（沿用 mongosh 写法，解析期直接拒绝含 $out / $merge 的聚合管道）\ndataomni mongo app_mongo collections\ndataomni mongo app_mongo find shop.orders '{ status: \"paid\" }' --sort '{ createdAt: -1 }' --limit 20\ndataomni mongo app_mongo aggregate shop.orders '[{ $group: { _id: \"$status\", n: { $sum: 1 } } }]'\n\n# Redis（--db N 放在操作名前；command 先查服务端 COMMAND INFO 确认带 readonly 旗标）\ndataomni redis cache_dev keyspaces\ndataomni redis cache_dev --db 0 scan \"session:*\" --limit 50\ndataomni redis cache_dev --db 0 get \"session:42\"\n\n# Neo4j（先发 EXPLAIN 确认服务端判定查询类型为 r，再在只读路由事务内运行）\ndataomni neo4j graph_dev labels\ndataomni neo4j graph_dev run \"MATCH (u:User)-[:BOUGHT]->(p) RETURN u.id, p.sku LIMIT 25\"\n\n# Elasticsearch / OpenSearch（按路径段白名单放行 GET/HEAD 及 _search、_count、_msearch 等查询）\ndataomni es search_dev indices\ndataomni es search_dev request POST /orders/_search '{\"size\":10,\"query\":{\"match_all\":{}}}'",
+        tabs: &[
+          CodeTab {
+            id: "unix",
+            os_targets: "macos linux",
+            label: "macOS / Linux",
+            lang: CodeLang::Shell,
+            copy_text: None,
+            raw_code: "# MongoDB（沿用 mongosh 写法，解析期直接拒绝含 $out / $merge 的聚合管道）\ndataomni mongo app_mongo collections\ndataomni mongo app_mongo find shop.orders '{ status: \"paid\" }' --sort '{ createdAt: -1 }' --limit 20\ndataomni mongo app_mongo aggregate shop.orders '[{ $group: { _id: \"$status\", n: { $sum: 1 } } }]'\n\n# Redis（--db N 放在操作名前；command 先查服务端 COMMAND INFO 确认带 readonly 旗标）\ndataomni redis cache_dev keyspaces\ndataomni redis cache_dev --db 0 scan \"session:*\" --limit 50\ndataomni redis cache_dev --db 0 get \"session:42\"\n\n# Neo4j（先发 EXPLAIN 确认服务端判定查询类型为 r，再在只读路由事务内运行）\ndataomni neo4j graph_dev labels\ndataomni neo4j graph_dev run \"MATCH (u:User)-[:BOUGHT]->(p) RETURN u.id, p.sku LIMIT 25\"\n\n# Elasticsearch / OpenSearch（按路径段白名单放行 GET/HEAD 及 _search、_count、_msearch 等查询）\ndataomni es search_dev indices\ndataomni es search_dev request POST /orders/_search '{\"size\":10,\"query\":{\"match_all\":{}}}'",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: None,
+            raw_code: "# MongoDB（PowerShell 7+ 单引号内原样保留双引号；Windows PowerShell 5.1 需将内部 \" 转义为 \\\"）\ndataomni mongo app_mongo collections | Out-String\ndataomni mongo app_mongo find shop.orders '{ status: \"paid\" }' --sort '{ createdAt: -1 }' --limit 20 | Out-String\ndataomni mongo app_mongo aggregate shop.orders '[{ $group: { _id: \"$status\", n: { $sum: 1 } } }]' | Out-String\n\n# Redis（--db N 放在操作名前；command 先查服务端 COMMAND INFO 确认带 readonly 旗标）\ndataomni redis cache_dev keyspaces | Out-String\ndataomni redis cache_dev --db 0 scan \"session:*\" --limit 50 | Out-String\ndataomni redis cache_dev --db 0 get \"session:42\" | Out-String\n\n# Neo4j（先发 EXPLAIN 确认服务端判定查询类型为 r，再在只读路由事务内运行）\ndataomni neo4j graph_dev labels | Out-String\ndataomni neo4j graph_dev run \"MATCH (u:User)-[:BOUGHT]->(p) RETURN u.id, p.sku LIMIT 25\" | Out-String\n\n# Elasticsearch / OpenSearch（按路径段白名单放行 GET/HEAD 及 _search、_count、_msearch 等查询）\ndataomni es search_dev indices | Out-String\ndataomni es search_dev request POST /orders/_search '{\"size\":10,\"query\":{\"match_all\":{}}}' | Out-String",
+          },
+        ],
       },
     ],
   },
@@ -1044,10 +1240,26 @@ const ZH_CLI_SECTIONS: &[DocSection] = &[
           &["NO_COLOR / CLICOLOR / CLICOLOR_FORCE / TERM=dumb", "在 --color auto 下自动遵循标准终端色彩环境变量规范。"],
         ],
       },
-      DocBlock::Code {
-        label: "搭配 less -R 分页与 jq 管道的常用写法",
-        copy_text: Some("dataomni schema shop_dev --pretty --color always | less -R"),
-        raw_code: "# 长输出带颜色交给 less 分页浏览\ndataomni schema shop_dev --pretty --color always | less -R\n\n# 终端内强制单行无色输出\ndataomni connections -c --no-color\n\n# 直接管道给 jq（自动紧凑无色，无需加任何额外参数）\ndataomni schema shop_dev | jq '.objects | length'",
+      DocBlock::TabbedCode {
+        label: "搭配分页器、剪贴板与 JSON 管道的常用写法",
+        tabs: &[
+          CodeTab {
+            id: "unix",
+            os_targets: "macos linux",
+            label: "macOS / Linux",
+            lang: CodeLang::Shell,
+            copy_text: Some("dataomni schema shop_dev --pretty --color always | less -R"),
+            raw_code: "# 长输出带颜色交给 less 分页浏览\ndataomni schema shop_dev --pretty --color always | less -R\n\n# 终端内强制单行无色输出\ndataomni connections -c --no-color\n\n# 直接管道给 jq（自动紧凑无色，无需加任何额外参数）\ndataomni schema shop_dev | jq '.objects | length'",
+          },
+          CodeTab {
+            id: "windows",
+            os_targets: "windows",
+            label: "Windows (PowerShell)",
+            lang: CodeLang::PowerShell,
+            copy_text: Some("(dataomni schema shop_dev | ConvertFrom-Json).objects.Count"),
+            raw_code: "# 在 PowerShell 中分页浏览带颜色的长输出\ndataomni schema shop_dev --pretty --color always | Out-Host -Paging\n\n# 将单行无色 JSON 直接写入 Windows 剪贴板\ndataomni connections -c --no-color | Set-Clipboard\n\n# 用原生 ConvertFrom-Json 解析管道紧凑 JSON（无需额外安装 jq）\n(dataomni schema shop_dev | ConvertFrom-Json).objects.Count",
+          },
+        ],
       },
     ],
   },

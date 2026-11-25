@@ -1,7 +1,7 @@
 use crate::content::{
   Locale, PageCopy, ServerKind, SupportLevel, TrustIcon, WorkflowStory, EN_COPY, ZH_COPY,
 };
-use crate::docs::{doc_page, CalloutTone, DocBlock, DocPage, DocSlug, ALL_DOC_SLUGS};
+use crate::docs::{doc_page, CalloutTone, CodeLang, DocBlock, DocPage, DocSlug, ALL_DOC_SLUGS};
 use std::fmt::Write;
 
 pub const SITE_ORIGIN: &str = "https://dataomni.dev";
@@ -268,7 +268,6 @@ pub fn render_page(
     &og_image_url,
     &assets.release_tag_url,
   )?;
-  let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
   let macos_brew_cmd = "brew install --cask dataomni-rs/tap/dataomni";
   let linux_install_cmd = format!("sudo apt install ./DataOmni_{version}_amd64.deb");
 
@@ -733,47 +732,7 @@ pub fn render_page(
     "                <pre><code>{}</code></pre>",
     render_agents_cli(copy.agents_cli_comment)
   )?;
-  writeln!(html, "                <div class=\"mcp-switcher\">")?;
-  writeln!(html, "                  <div class=\"mcp-switcher-head\">")?;
-  writeln!(
-    html,
-    "                    <span class=\"mcp-switcher-note\">{}</span>",
-    escape_html(copy.agents_mcp_cmd_note)
-  )?;
-  writeln!(
-    html,
-    "                    <div class=\"mcp-client-tabs\" role=\"group\" aria-label=\"{}\">",
-    escape_html(copy.agents_mcp_aria_label)
-  )?;
-  for (index, preset) in copy.mcp_presets.iter().enumerate() {
-    let pressed = if index == 0 { "true" } else { "false" };
-    writeln!(
-      html,
-      "                      <button class=\"mcp-client-tab\" type=\"button\" aria-pressed=\"{pressed}\" data-mcp-preset=\"{id}\" data-mcp-cmd=\"{cmd}\">{label}</button>",
-      pressed = pressed,
-      id = escape_html(preset.id),
-      cmd = escape_html(preset.command),
-      label = escape_html(preset.label),
-    )?;
-  }
-  writeln!(html, "                    </div>")?;
-  writeln!(html, "                  </div>")?;
-  writeln!(html, "                  <div class=\"copy-cmd-row\">")?;
-  writeln!(
-    html,
-    "                    <code id=\"mcp-cmd-display\">{}</code>",
-    escape_html(default_mcp_cmd)
-  )?;
-  writeln!(
-    html,
-    "                    <button id=\"mcp-copy-btn\" class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
-    escape_html(default_mcp_cmd),
-    escape_html(copy.copy_label),
-    escape_html(copy.copied_label),
-    escape_html(copy.copy_label)
-  )?;
-  writeln!(html, "                  </div>")?;
-  writeln!(html, "                </div>")?;
+  render_mcp_switcher(&mut html, copy, "mcp-switcher")?;
   writeln!(html, "              </div>")?;
   writeln!(html, "            </div>")?;
   writeln!(html, "          </article>")?;
@@ -1156,26 +1115,462 @@ fn render_footer(
   writeln!(html, "  </footer>")
 }
 
-fn highlight_doc_code(raw: &str) -> String {
+fn expand_version(raw: &str, version: &str) -> String {
+  if raw.contains("{VERSION}") {
+    raw.replace("{VERSION}", version)
+  } else {
+    raw.to_string()
+  }
+}
+
+fn push_span(out: &mut String, class: &str, text: &str) {
+  let _ = write!(out, "<span class=\"{class}\">{}</span>", escape_html(text));
+}
+
+fn is_pure_number(token: &str) -> bool {
+  !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_subcommand_word(token: &str) -> bool {
+  !token.is_empty()
+    && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    && token.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+}
+
+fn subcommand_budget_for(cmd: &str) -> u8 {
+  match cmd {
+    "claude" | "codex" | "gemini" => 2,
+    "dataomni" | "brew" | "apt" | "dnf" | "cargo" => 1,
+    _ => 0,
+  }
+}
+
+fn highlight_json(raw: &str) -> String {
+  let bytes = raw.as_bytes();
   let mut out = String::with_capacity(raw.len() + 128);
+  let mut i = 0;
+
+  while i < bytes.len() {
+    match bytes[i] {
+      b'"' => {
+        let start = i;
+        i += 1;
+        while i < bytes.len() {
+          if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+          } else if bytes[i] == b'"' {
+            i += 1;
+            break;
+          } else {
+            i += 1;
+          }
+        }
+        let mut look = i;
+        while look < bytes.len() && bytes[look].is_ascii_whitespace() {
+          look += 1;
+        }
+        let class = if look < bytes.len() && bytes[look] == b':' { "tok-prop" } else { "tok-str" };
+        push_span(&mut out, class, &raw[start..i]);
+      }
+      b'-' | b'0'..=b'9' => {
+        let start = i;
+        i += 1;
+        while i < bytes.len()
+          && (bytes[i].is_ascii_digit() || matches!(bytes[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+        {
+          i += 1;
+        }
+        push_span(&mut out, "tok-num", &raw[start..i]);
+      }
+      b't' if raw[i..].starts_with("true") => {
+        push_span(&mut out, "tok-kw", "true");
+        i += 4;
+      }
+      b'f' if raw[i..].starts_with("false") => {
+        push_span(&mut out, "tok-kw", "false");
+        i += 5;
+      }
+      b'n' if raw[i..].starts_with("null") => {
+        push_span(&mut out, "tok-kw", "null");
+        i += 4;
+      }
+      _ => {
+        if let Some(ch) = raw[i..].chars().next() {
+          out.push_str(&escape_html(&raw[i..i + ch.len_utf8()]));
+          i += ch.len_utf8();
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  out
+}
+
+fn highlight_shell_line(
+  line: &str,
+  lang: CodeLang,
+  in_continuation: bool,
+  out: &mut String,
+) -> bool {
+  let trimmed_start = line.trim_start();
+  if trimmed_start.is_empty() {
+    out.push_str(line);
+    return false;
+  }
+  if trimmed_start.starts_with('#') {
+    push_span(out, "code-comment", line);
+    return false;
+  }
+
+  let leading_ws = line.len() - trimmed_start.len();
+  out.push_str(&line[..leading_ws]);
+
+  let mut rest = trimmed_start;
+  if lang == CodeLang::Shell {
+    if let Some(after_prompt) = rest.strip_prefix("$ ") {
+      push_span(out, "tok-prompt", "$");
+      out.push(' ');
+      rest = after_prompt;
+    }
+  } else if lang == CodeLang::PowerShell {
+    if let Some(after_prompt) = rest.strip_prefix("PS> ") {
+      push_span(out, "tok-prompt", "PS>");
+      out.push(' ');
+      rest = after_prompt;
+    }
+  }
+
+  let bytes = rest.as_bytes();
+  let mut i = 0;
+  let mut expect_cmd = !in_continuation;
+  let mut active_cmd: Option<&str> = None;
+  let mut subcmd_budget: u8 = 0;
+  let mut next_continuation = false;
+
+  while i < bytes.len() {
+    let b = bytes[i];
+    if b.is_ascii_whitespace() {
+      let start = i;
+      while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+      }
+      out.push_str(&rest[start..i]);
+      continue;
+    }
+
+    // Inline comment preceded by whitespace
+    if b == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+      push_span(out, "code-comment", &rest[i..]);
+      break;
+    }
+
+    // Single-quoted string
+    if b == b'\'' {
+      let start = i;
+      i += 1;
+      while i < bytes.len() {
+        if bytes[i] == b'\'' {
+          i += 1;
+          if lang == CodeLang::PowerShell && i < bytes.len() && bytes[i] == b'\'' {
+            i += 1;
+            continue;
+          }
+          break;
+        }
+        i += 1;
+      }
+      push_span(out, "tok-str", &rest[start..i]);
+      expect_cmd = false;
+      continue;
+    }
+
+    // Double-quoted string
+    if b == b'"' {
+      let start = i;
+      i += 1;
+      while i < bytes.len() {
+        if (lang == CodeLang::Shell && bytes[i] == b'\\' && i + 1 < bytes.len())
+          || (lang == CodeLang::PowerShell
+            && (bytes[i] == b'`' || bytes[i] == b'\\')
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'"')
+        {
+          i += 2;
+        } else if bytes[i] == b'"' {
+          i += 1;
+          break;
+        } else {
+          i += 1;
+        }
+      }
+      push_span(out, "tok-str", &rest[start..i]);
+      expect_cmd = false;
+      continue;
+    }
+
+    // Line-continuation operator at end of line (`\` in Shell, `` ` `` in PowerShell)
+    if ((lang == CodeLang::Shell && b == b'\\') || (lang == CodeLang::PowerShell && b == b'`'))
+      && rest[i + 1..].trim().is_empty()
+    {
+      push_span(out, "tok-kw", &rest[i..i + 1]);
+      next_continuation = true;
+      i += 1;
+      continue;
+    }
+
+    // Shell / PowerShell operators
+    if rest[i..].starts_with("&&") || rest[i..].starts_with("||") || rest[i..].starts_with(">>") {
+      let op = &rest[i..i + 2];
+      push_span(out, "tok-kw", op);
+      if op != ">>" {
+        expect_cmd = true;
+        active_cmd = None;
+        subcmd_budget = 0;
+      }
+      i += 2;
+      continue;
+    }
+    if matches!(b, b'|' | b'>' | b'<' | b';' | b'(' | b')' | b'+') {
+      let op = &rest[i..i + 1];
+      push_span(out, "tok-kw", op);
+      if matches!(b, b'|' | b';' | b'(') {
+        expect_cmd = true;
+        active_cmd = None;
+        subcmd_budget = 0;
+      }
+      i += 1;
+      continue;
+    }
+
+    // Read a regular word token
+    let start = i;
+    while i < bytes.len() {
+      let ch = bytes[i];
+      if ch.is_ascii_whitespace()
+        || matches!(ch, b'|' | b'>' | b'<' | b';' | b'(' | b')' | b'"' | b'\'' | b'+')
+        || (ch == b'&' && i + 1 < bytes.len() && bytes[i + 1] == b'&')
+      {
+        break;
+      }
+      i += 1;
+    }
+    let word = &rest[start..i];
+    if word.is_empty() {
+      if let Some(ch) = rest[i..].chars().next() {
+        out.push_str(&escape_html(&rest[i..i + ch.len_utf8()]));
+        i += ch.len_utf8();
+      }
+      continue;
+    }
+
+    if word == "--" {
+      push_span(out, "tok-kw", word);
+      subcmd_budget = 0;
+      continue;
+    }
+
+    // PowerShell static method call like [Environment]::SetEnvironmentVariable
+    if lang == CodeLang::PowerShell {
+      if let Some((type_part, method_part)) = word.split_once("::") {
+        if type_part.starts_with('[') && type_part.ends_with(']') {
+          push_span(out, "tok-type", type_part);
+          out.push_str("::");
+          push_span(out, "tok-cmd", method_part);
+          expect_cmd = false;
+          continue;
+        }
+      }
+    }
+
+    // Environment / shell variables ($binDir, $env:TEMP, %LOCALAPPDATA%)
+    if word.starts_with('$') || (word.starts_with('%') && word.len() > 2 && word.ends_with('%')) {
+      push_span(out, "tok-param", word);
+      if expect_cmd {
+        expect_cmd = false;
+      }
+      continue;
+    }
+
+    // Assignment operator `=` in PowerShell (`$binDir = ...`)
+    if word == "=" {
+      push_span(out, "tok-kw", word);
+      continue;
+    }
+
+    if expect_cmd {
+      if word == "sudo" {
+        push_span(out, "tok-kw", word);
+      } else {
+        push_span(out, "tok-cmd", word);
+        active_cmd = Some(word);
+        subcmd_budget = subcommand_budget_for(word);
+        expect_cmd = false;
+      }
+      continue;
+    }
+
+    if word == "-" {
+      push_span(out, "tok-kw", word);
+      continue;
+    }
+
+    if word.starts_with('-')
+      || (lang == CodeLang::PowerShell
+        && active_cmd == Some("msiexec")
+        && word.starts_with('/')
+        && word.len() <= 4)
+    {
+      push_span(out, "tok-attr", word);
+      continue;
+    }
+
+    if subcmd_budget > 0 && is_subcommand_word(word) {
+      push_span(out, "tok-type", word);
+      subcmd_budget -= 1;
+      continue;
+    }
+
+    if is_pure_number(word) {
+      push_span(out, "tok-num", word);
+      continue;
+    }
+
+    // Key=value bindings like cid=1042
+    if let Some((key, val)) = word.split_once('=') {
+      if !key.is_empty()
+        && !val.is_empty()
+        && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+      {
+        push_span(out, "tok-prop", key);
+        out.push('=');
+        if is_pure_number(val) {
+          push_span(out, "tok-num", val);
+        } else {
+          push_span(out, "tok-str", val);
+        }
+        continue;
+      }
+    }
+
+    out.push_str(&escape_html(word));
+  }
+
+  next_continuation
+}
+
+pub fn highlight_code(raw: &str, lang: CodeLang) -> String {
+  if lang == CodeLang::Json {
+    return highlight_json(raw);
+  }
+  let mut out = String::with_capacity(raw.len() + 256);
+  let mut in_continuation = false;
   for (index, line) in raw.lines().enumerate() {
     if index > 0 {
       out.push('\n');
     }
-    let trimmed = line.trim_start();
-    if trimmed.starts_with('#') {
-      let _ = write!(out, "<span class=\"code-comment\">{}</span>", escape_html(line));
-    } else if let Some(rest) = line.strip_prefix("$ ") {
-      let _ = write!(
-        out,
-        "<span class=\"tok-prompt\">$</span> <span class=\"tok-cmd\">{}</span>",
-        escape_html(rest)
-      );
-    } else {
-      out.push_str(&escape_html(line));
-    }
+    in_continuation = highlight_shell_line(line, lang, in_continuation, &mut out);
   }
   out
+}
+
+fn render_mcp_switcher(
+  html: &mut String,
+  copy: &PageCopy,
+  switcher_class: &str,
+) -> Result<(), std::fmt::Error> {
+  let default_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |p| p.macos_command);
+  let os_options = [("macos", "macOS"), ("windows", "Windows"), ("linux", "Linux")];
+
+  writeln!(html, "            <div class=\"{switcher_class}\" data-mcp-switcher>")?;
+  writeln!(html, "              <div class=\"mcp-switcher-head\">")?;
+  writeln!(
+    html,
+    "                <span class=\"mcp-switcher-note\">{}</span>",
+    escape_html(copy.agents_mcp_cmd_note)
+  )?;
+  writeln!(
+    html,
+    "                <div class=\"mcp-os-tabs\" role=\"group\" aria-label=\"{}\">",
+    escape_html(copy.agents_mcp_os_aria_label)
+  )?;
+  for (index, (os_id, os_label)) in os_options.iter().enumerate() {
+    let pressed = if index == 0 { "true" } else { "false" };
+    writeln!(
+      html,
+      "                  <button class=\"mcp-os-tab\" type=\"button\" aria-pressed=\"{pressed}\" data-mcp-os-btn=\"{os_id}\" data-os-sync=\"{os_id}\">{os_label}</button>"
+    )?;
+  }
+  writeln!(html, "                </div>")?;
+  writeln!(html, "              </div>")?;
+  writeln!(html, "              <div class=\"mcp-client-row\">")?;
+  writeln!(
+    html,
+    "                <div class=\"mcp-client-tabs\" role=\"group\" aria-label=\"{}\">",
+    escape_html(copy.agents_mcp_aria_label)
+  )?;
+  for (index, preset) in copy.mcp_presets.iter().enumerate() {
+    let pressed = if index == 0 { "true" } else { "false" };
+    writeln!(
+      html,
+      "                  <button class=\"mcp-client-tab\" type=\"button\" aria-pressed=\"{pressed}\" data-mcp-preset=\"{id}\">{label}</button>",
+      pressed = pressed,
+      id = escape_html(preset.id),
+      label = escape_html(preset.label),
+    )?;
+  }
+  writeln!(html, "                </div>")?;
+  writeln!(html, "              </div>")?;
+  writeln!(html, "              <div class=\"copy-cmd-row\">")?;
+  writeln!(html, "                <div class=\"mcp-cmd-stage\">")?;
+  for (preset_idx, preset) in copy.mcp_presets.iter().enumerate() {
+    let per_os = [
+      (
+        "macos",
+        preset.macos_command,
+        if preset.id == "json" { CodeLang::Json } else { CodeLang::Shell },
+      ),
+      (
+        "windows",
+        preset.windows_command,
+        if preset.id == "json" { CodeLang::Json } else { CodeLang::PowerShell },
+      ),
+      (
+        "linux",
+        preset.linux_command,
+        if preset.id == "json" { CodeLang::Json } else { CodeLang::Shell },
+      ),
+    ];
+    for (os_idx, (os_id, raw_cmd, lang)) in per_os.iter().enumerate() {
+      let is_default = preset_idx == 0 && os_idx == 0;
+      let hidden_attr = if is_default { "" } else { " hidden" };
+      writeln!(
+        html,
+        "                  <code class=\"mcp-cmd-code\" data-mcp-os=\"{os_id}\" data-mcp-client=\"{client}\" data-raw-cmd=\"{raw}\"{hidden_attr}>{highlighted}</code>",
+        client = escape_html(preset.id),
+        raw = escape_html(raw_cmd),
+        highlighted = highlight_code(raw_cmd, *lang),
+      )?;
+    }
+  }
+  writeln!(html, "                </div>")?;
+  writeln!(
+    html,
+    "                <button class=\"copy-btn\" type=\"button\" data-mcp-copy-btn data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
+    escape_html(default_cmd),
+    escape_html(copy.copy_label),
+    escape_html(copy.copied_label),
+    escape_html(copy.copy_label)
+  )?;
+  writeln!(html, "              </div>")?;
+  writeln!(
+    html,
+    "              <p class=\"mcp-os-note\" data-mcp-os-note=\"windows\" hidden>{}</p>",
+    escape_html(copy.agents_mcp_windows_note)
+  )?;
+  writeln!(html, "            </div>")?;
+  Ok(())
 }
 
 fn render_doc_structured_data(
@@ -1264,7 +1659,6 @@ pub fn render_doc_page(
   let structured_data =
     render_doc_structured_data(page, version, released_at, &canonical_url, &og_image_url)?;
   let install_href = format!("{}#install", page.locale.canonical_path());
-  let default_mcp_cmd = copy.mcp_presets.first().map_or("dataomni mcp", |preset| preset.command);
 
   let mut html = String::with_capacity(40_960);
   writeln!(html, "<!DOCTYPE html>")?;
@@ -1527,6 +1921,7 @@ pub fn render_doc_page(
           writeln!(html, "          </div>")?;
         }
         DocBlock::Code { label, copy_text, raw_code } => {
+          let expanded_code = expand_version(raw_code, version);
           writeln!(html, "          <div class=\"code-panel docs-code-panel\">")?;
           writeln!(html, "            <div class=\"code-panel-bar\">")?;
           writeln!(
@@ -1535,17 +1930,86 @@ pub fn render_doc_page(
             escape_html(label)
           )?;
           if let Some(copy_cmd) = copy_text {
+            let expanded_copy = expand_version(copy_cmd, version);
             writeln!(
               html,
               "              <button class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
-              escape_html(copy_cmd),
+              escape_html(&expanded_copy),
               escape_html(copy.copy_label),
               escape_html(copy.copied_label),
               escape_html(copy.copy_label)
             )?;
           }
           writeln!(html, "            </div>")?;
-          writeln!(html, "            <pre><code>{}</code></pre>", highlight_doc_code(raw_code))?;
+          writeln!(
+            html,
+            "            <pre><code>{}</code></pre>",
+            highlight_code(&expanded_code, CodeLang::Shell)
+          )?;
+          writeln!(html, "          </div>")?;
+        }
+        DocBlock::TabbedCode { label, tabs } => {
+          let has_any_copy = tabs.iter().any(|tab| tab.copy_text.is_some());
+          let default_copy =
+            tabs.first().and_then(|tab| tab.copy_text).map(|text| expand_version(text, version));
+          let tablist_aria = match page.locale {
+            Locale::En => format!("{label} — operating system"),
+            Locale::Zh => format!("{label} — 操作系统切换"),
+          };
+          writeln!(html, "          <div class=\"code-panel docs-code-panel\" data-code-tabs>")?;
+          writeln!(html, "            <div class=\"code-panel-bar\">")?;
+          writeln!(
+            html,
+            "              <span class=\"panel-bar-title\"><span class=\"win-dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>{}</span></span>",
+            escape_html(label)
+          )?;
+          if has_any_copy {
+            let hidden_btn = if default_copy.is_some() { "" } else { " hidden" };
+            writeln!(
+              html,
+              "              <button class=\"copy-btn\" type=\"button\" data-code-copy-btn data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\"{hidden_btn}>{}</button>",
+              escape_html(default_copy.as_deref().unwrap_or("")),
+              escape_html(copy.copy_label),
+              escape_html(copy.copied_label),
+              escape_html(copy.copy_label)
+            )?;
+          }
+          writeln!(html, "            </div>")?;
+          writeln!(
+            html,
+            "            <div class=\"code-tab-bar\" role=\"tablist\" aria-label=\"{}\">",
+            escape_html(&tablist_aria)
+          )?;
+          for (tab_idx, tab) in tabs.iter().enumerate() {
+            let tab_dom_id = format!("code-tab-{}-{sec_idx}-{blk_idx}-{}", section.id, tab.id);
+            let selected = if tab_idx == 0 { "true" } else { "false" };
+            let tabindex = if tab_idx == 0 { "0" } else { "-1" };
+            let primary_os = tab.os_targets.split_whitespace().next().unwrap_or("macos");
+            writeln!(
+              html,
+              "              <button id=\"{tab_dom_id}\" class=\"code-tab\" type=\"button\" role=\"tab\" aria-selected=\"{selected}\" tabindex=\"{tabindex}\" data-code-tab=\"{tab_idx}\" data-os-targets=\"{targets}\" data-os-sync=\"{primary_os}\">{tab_label}</button>",
+              targets = escape_html(tab.os_targets),
+              tab_label = escape_html(tab.label),
+            )?;
+          }
+          writeln!(html, "            </div>")?;
+          for (tab_idx, tab) in tabs.iter().enumerate() {
+            let tab_dom_id = format!("code-tab-{}-{sec_idx}-{blk_idx}-{}", section.id, tab.id);
+            let hidden_attr = if tab_idx == 0 { "" } else { " hidden=\"until-found\"" };
+            let expanded_code = expand_version(tab.raw_code, version);
+            let expanded_copy = tab.copy_text.map(|text| expand_version(text, version));
+            writeln!(
+              html,
+              "            <div class=\"code-tab-panel\" role=\"tabpanel\" aria-labelledby=\"{tab_dom_id}\" data-code-panel=\"{tab_idx}\" data-panel-copy=\"{}\"{hidden_attr}>",
+              escape_html(expanded_copy.as_deref().unwrap_or(""))
+            )?;
+            writeln!(
+              html,
+              "              <pre><code>{}</code></pre>",
+              highlight_code(&expanded_code, tab.lang)
+            )?;
+            writeln!(html, "            </div>")?;
+          }
           writeln!(html, "          </div>")?;
         }
         DocBlock::Table { caption, headers, rows } => {
@@ -1597,47 +2061,7 @@ pub fn render_doc_page(
           )?;
           writeln!(html, "              <span class=\"env-pill-prod\">PROD HIDDEN</span>")?;
           writeln!(html, "            </div>")?;
-          writeln!(html, "            <div class=\"mcp-switcher docs-mcp-switcher\">")?;
-          writeln!(html, "              <div class=\"mcp-switcher-head\">")?;
-          writeln!(
-            html,
-            "                <span class=\"mcp-switcher-note\">{}</span>",
-            escape_html(copy.agents_mcp_cmd_note)
-          )?;
-          writeln!(
-            html,
-            "                <div class=\"mcp-client-tabs\" role=\"group\" aria-label=\"{}\">",
-            escape_html(copy.agents_mcp_aria_label)
-          )?;
-          for (index, preset) in copy.mcp_presets.iter().enumerate() {
-            let pressed = if index == 0 { "true" } else { "false" };
-            writeln!(
-              html,
-              "                  <button class=\"mcp-client-tab\" type=\"button\" aria-pressed=\"{pressed}\" data-mcp-preset=\"{id}\" data-mcp-cmd=\"{cmd}\">{label}</button>",
-              pressed = pressed,
-              id = escape_html(preset.id),
-              cmd = escape_html(preset.command),
-              label = escape_html(preset.label),
-            )?;
-          }
-          writeln!(html, "                </div>")?;
-          writeln!(html, "              </div>")?;
-          writeln!(html, "              <div class=\"copy-cmd-row\">")?;
-          writeln!(
-            html,
-            "                <code id=\"mcp-cmd-display\">{}</code>",
-            escape_html(default_mcp_cmd)
-          )?;
-          writeln!(
-            html,
-            "                <button id=\"mcp-copy-btn\" class=\"copy-btn\" type=\"button\" data-copy-text=\"{}\" data-default-label=\"{}\" data-copied-label=\"{}\">{}</button>",
-            escape_html(default_mcp_cmd),
-            escape_html(copy.copy_label),
-            escape_html(copy.copied_label),
-            escape_html(copy.copy_label)
-          )?;
-          writeln!(html, "              </div>")?;
-          writeln!(html, "            </div>")?;
+          render_mcp_switcher(&mut html, copy, "mcp-switcher docs-mcp-switcher")?;
           writeln!(html, "          </div>")?;
         }
         DocBlock::CompatibilityMatrix => {
@@ -2038,11 +2462,29 @@ pub fn render_llms_full_txt(version: &str, released_at: &str) -> Result<String, 
             writeln!(md)?;
           }
           DocBlock::Code { label, raw_code, .. } => {
+            let expanded = expand_version(raw_code, version);
             writeln!(md, "*{label}*:")?;
-            writeln!(md, "```")?;
-            writeln!(md, "{raw_code}")?;
+            writeln!(md, "```sh")?;
+            writeln!(md, "{expanded}")?;
             writeln!(md, "```")?;
             writeln!(md)?;
+          }
+          DocBlock::TabbedCode { label, tabs } => {
+            writeln!(md, "*{label}*:")?;
+            writeln!(md)?;
+            for tab in *tabs {
+              let fence = match tab.lang {
+                CodeLang::Shell => "sh",
+                CodeLang::PowerShell => "powershell",
+                CodeLang::Json => "json",
+              };
+              let expanded = expand_version(tab.raw_code, version);
+              writeln!(md, "**{}**:", tab.label)?;
+              writeln!(md, "```{fence}")?;
+              writeln!(md, "{expanded}")?;
+              writeln!(md, "```")?;
+              writeln!(md)?;
+            }
           }
           DocBlock::Table { headers, rows, .. } => {
             writeln!(md, "| {} |", headers.join(" | "))?;
@@ -2055,7 +2497,10 @@ pub fn render_llms_full_txt(version: &str, released_at: &str) -> Result<String, 
           }
           DocBlock::McpPresets => {
             for preset in EN_COPY.mcp_presets {
-              writeln!(md, "- **{}**: `{}`", preset.label, preset.command)?;
+              writeln!(md, "- **{}**:", preset.label)?;
+              writeln!(md, "  - macOS: `{}`", preset.macos_command)?;
+              writeln!(md, "  - Windows: `{}`", preset.windows_command)?;
+              writeln!(md, "  - Linux: `{}`", preset.linux_command)?;
             }
             writeln!(md)?;
           }

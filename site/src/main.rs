@@ -469,7 +469,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::render::escape_html;
+  use crate::docs::CodeLang;
+  use crate::render::{escape_html, highlight_code};
 
   #[test]
   fn parses_stable_release_version_and_rejects_prereleases_or_malformed_values() {
@@ -730,6 +731,86 @@ mod tests {
     let broken_cross_anchor = mcp_en.replace("href=\"/#install\"", "href=\"/#nonexistent-anchor\"");
     assert!(verify_html_invariants("docs/mcp/index.html", &broken_cross_anchor, &temp_dir).is_err());
 
+    // Multi-platform command tabs, syntax highlighting, and Windows/Linux MCP presets
+    let version = resolve_release_version(&repo_root, None).unwrap();
+    for rel in [
+      "docs/quickstart/index.html",
+      "zh/docs/quickstart/index.html",
+      "docs/mcp/index.html",
+      "zh/docs/mcp/index.html",
+      "docs/cli/index.html",
+      "zh/docs/cli/index.html",
+    ] {
+      let html = fs::read_to_string(temp_dir.join(rel)).unwrap();
+      assert!(!html.contains("{VERSION}"), "{rel}: unexpanded {{VERSION}} placeholder");
+      assert!(html.contains("class=\"tok-cmd\""), "{rel}: missing shell command highlighting");
+    }
+
+    let qs_en = fs::read_to_string(temp_dir.join("docs/quickstart/index.html")).unwrap();
+    assert!(qs_en.contains("brew install --cask dataomni-rs/tap/dataomni"));
+    assert!(qs_en.contains(&format!("DataOmni_{version}_x64-setup.exe")));
+    assert!(qs_en.contains(&format!("DataOmni_{version}_amd64.deb")));
+    assert!(qs_en.contains(&format!("DataOmni-{version}-1.x86_64.rpm")));
+
+    let mcp_zh = fs::read_to_string(temp_dir.join("zh/docs/mcp/index.html")).unwrap();
+    for html in [&mcp_en, &mcp_zh] {
+      assert!(html.contains("data-mcp-os-btn=\"macos\""));
+      assert!(html.contains("data-mcp-os-btn=\"windows\""));
+      assert!(html.contains("data-mcp-os-btn=\"linux\""));
+      assert!(html.contains("$env:LOCALAPPDATA\\DataOmni\\dataomni.exe"));
+      assert!(html.contains("/usr/bin/dataomni"));
+      assert!(html.contains("class=\"tok-prop\""));
+    }
+
+    let cli_en = fs::read_to_string(temp_dir.join("docs/cli/index.html")).unwrap();
+    let cli_zh = fs::read_to_string(temp_dir.join("zh/docs/cli/index.html")).unwrap();
+    for html in [&cli_en, &cli_zh] {
+      assert!(html.contains("Set-Content"));
+      assert!(html.contains("ConvertFrom-Json"));
+      assert!(html.contains("which</span> dataomni"));
+      assert!(html.contains("class=\"tok-attr\""));
+      assert!(html.contains("class=\"tok-str\""));
+    }
+
+    let llms_full = fs::read_to_string(temp_dir.join("llms-full.txt")).unwrap();
+    assert!(!llms_full.contains("{VERSION}"));
+    assert!(llms_full.contains("```powershell"));
+    assert!(llms_full.contains("/usr/bin/dataomni mcp"));
+
     let _ = fs::remove_dir_all(&temp_dir);
+  }
+
+  #[test]
+  fn highlights_shell_powershell_and_json_safely() {
+    let sh = highlight_code(
+      "# comment <script>\ndataomni query shop_dev \"SELECT * FROM t WHERE a < 1\" \\\n  --param cid=1042 --limit 50 | jq '.len'",
+      CodeLang::Shell,
+    );
+    assert!(sh.contains("<span class=\"code-comment\"># comment &lt;script&gt;</span>"));
+    assert!(
+      sh.contains("<span class=\"tok-cmd\">dataomni</span> <span class=\"tok-type\">query</span>")
+    );
+    assert!(
+      sh.contains("<span class=\"tok-str\">&quot;SELECT * FROM t WHERE a &lt; 1&quot;</span>")
+    );
+    assert!(sh.contains("<span class=\"tok-kw\">\\</span>"));
+    assert!(sh.contains("<span class=\"tok-attr\">--param</span> <span class=\"tok-prop\">cid</span>=<span class=\"tok-num\">1042</span>"));
+    assert!(sh.contains("<span class=\"tok-kw\">|</span> <span class=\"tok-cmd\">jq</span>"));
+
+    let ps = highlight_code(
+      "Get-Content -Raw report.sql | dataomni export shop_dev - --out \"$env:TEMP\\a.parquet\" `\n  --format parquet",
+      CodeLang::PowerShell,
+    );
+    assert!(ps
+      .contains("<span class=\"tok-cmd\">Get-Content</span> <span class=\"tok-attr\">-Raw</span>"));
+    assert!(ps.contains("<span class=\"tok-kw\">`</span>"));
+    assert!(ps.contains("<span class=\"tok-attr\">--format</span> parquet"));
+
+    let json = highlight_code(
+      "{\"mcpServers\":{\"dataomni\":{\"command\":\"/usr/bin/dataomni\",\"args\":[\"mcp\"]}}}",
+      CodeLang::Json,
+    );
+    assert!(json.contains("<span class=\"tok-prop\">&quot;mcpServers&quot;</span>"));
+    assert!(json.contains("<span class=\"tok-str\">&quot;/usr/bin/dataomni&quot;</span>"));
   }
 }

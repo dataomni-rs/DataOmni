@@ -113,28 +113,8 @@
     });
   });
 
-  // Multi-client MCP preset switcher inside #agents
-  const mcpBtns = Array.from(document.querySelectorAll('[data-mcp-preset][data-mcp-cmd]'));
-  const mcpDisplay = document.getElementById('mcp-cmd-display');
-  const mcpCopyBtn = document.getElementById('mcp-copy-btn');
-  mcpBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const cmd = btn.getAttribute('data-mcp-cmd') || '';
-      mcpBtns.forEach((other) => {
-        other.setAttribute('aria-pressed', String(other === btn));
-      });
-      if (mcpDisplay) {
-        mcpDisplay.textContent = cmd;
-      }
-      if (mcpCopyBtn) {
-        mcpCopyBtn.setAttribute('data-copy-text', cmd);
-        const defaultLabel = mcpCopyBtn.getAttribute('data-default-label');
-        if (defaultLabel) mcpCopyBtn.textContent = defaultLabel;
-      }
-    });
-  });
-
   // Highlight visitor's platform download without hiding other platforms
+  const osStorageKey = 'dataomni-site-os';
   const ua = (navigator.userAgent || '').toLowerCase();
   const detectedOs = ua.includes('mac')
     ? 'macos'
@@ -155,6 +135,177 @@
       if (href) primaryBtn.setAttribute('href', href);
       if (label) primaryBtn.textContent = label;
     }
+  }
+
+  // Synced multi-platform code tabs & MCP preset switchers
+  const codeTabGroups = Array.from(document.querySelectorAll('[data-code-tabs]'));
+  const mcpSwitchers = Array.from(document.querySelectorAll('[data-mcp-switcher]'));
+
+  const activateCodeTab = (group, tabIndex, moveFocus) => {
+    const groupTabs = Array.from(group.querySelectorAll('[role="tab"][data-code-tab]'));
+    const groupPanels = Array.from(group.querySelectorAll('[role="tabpanel"][data-code-panel]'));
+    const copyBtn = group.querySelector('[data-code-copy-btn]');
+    const targetIdx = String(tabIndex);
+
+    groupTabs.forEach((tab) => {
+      const active = tab.getAttribute('data-code-tab') === targetIdx;
+      tab.setAttribute('aria-selected', String(active));
+      tab.setAttribute('tabindex', active ? '0' : '-1');
+      if (active) {
+        if (moveFocus) tab.focus();
+        tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    });
+
+    groupPanels.forEach((panel) => {
+      const active = panel.getAttribute('data-code-panel') === targetIdx;
+      if (active) {
+        panel.removeAttribute('hidden');
+        if (copyBtn) {
+          const panelCopy = panel.getAttribute('data-panel-copy') || '';
+          if (panelCopy) {
+            copyBtn.hidden = false;
+            copyBtn.setAttribute('data-copy-text', panelCopy);
+            const defaultLabel = copyBtn.getAttribute('data-default-label');
+            if (defaultLabel) copyBtn.textContent = defaultLabel;
+          } else {
+            copyBtn.hidden = true;
+          }
+        }
+      } else {
+        panel.setAttribute('hidden', 'until-found');
+      }
+    });
+  };
+
+  const renderMcpSwitcher = (switcher, nextOs, nextClient) => {
+    const currentOs =
+      nextOs ||
+      switcher.getAttribute('data-active-os') ||
+      'macos';
+    const currentClient =
+      nextClient ||
+      switcher.getAttribute('data-active-client') ||
+      'claude';
+
+    switcher.setAttribute('data-active-os', currentOs);
+    switcher.setAttribute('data-active-client', currentClient);
+
+    switcher.querySelectorAll('[data-mcp-os-btn]').forEach((btn) => {
+      btn.setAttribute('aria-pressed', String(btn.getAttribute('data-mcp-os-btn') === currentOs));
+    });
+    switcher.querySelectorAll('[data-mcp-preset]').forEach((btn) => {
+      btn.setAttribute(
+        'aria-pressed',
+        String(btn.getAttribute('data-mcp-preset') === currentClient)
+      );
+    });
+
+    let activeRawCmd = '';
+    switcher.querySelectorAll('code[data-mcp-os][data-mcp-client]').forEach((codeEl) => {
+      const match =
+        codeEl.getAttribute('data-mcp-os') === currentOs &&
+        codeEl.getAttribute('data-mcp-client') === currentClient;
+      codeEl.hidden = !match;
+      if (match) {
+        activeRawCmd = codeEl.getAttribute('data-raw-cmd') || '';
+      }
+    });
+
+    const copyBtn = switcher.querySelector('[data-mcp-copy-btn]');
+    if (copyBtn && activeRawCmd) {
+      copyBtn.setAttribute('data-copy-text', activeRawCmd);
+      const defaultLabel = copyBtn.getAttribute('data-default-label');
+      if (defaultLabel) copyBtn.textContent = defaultLabel;
+    }
+
+    switcher.querySelectorAll('[data-mcp-os-note]').forEach((noteEl) => {
+      noteEl.hidden = noteEl.getAttribute('data-mcp-os-note') !== currentOs;
+    });
+  };
+
+  const syncOsPreference = (os, persist) => {
+    if (!['macos', 'windows', 'linux'].includes(os)) return;
+    if (persist) {
+      try {
+        localStorage.setItem(osStorageKey, os);
+      } catch {
+        // Ignore storage restrictions in private windows
+      }
+    }
+    codeTabGroups.forEach((group) => {
+      const matchTab = Array.from(group.querySelectorAll('[role="tab"][data-code-tab]')).find(
+        (tab) => (tab.getAttribute('data-os-targets') || '').split(/\s+/).includes(os)
+      );
+      if (matchTab) {
+        activateCodeTab(group, matchTab.getAttribute('data-code-tab') || '0', false);
+      }
+    });
+    mcpSwitchers.forEach((switcher) => {
+      renderMcpSwitcher(switcher, os, null);
+    });
+  };
+
+  codeTabGroups.forEach((group) => {
+    const groupTabs = Array.from(group.querySelectorAll('[role="tab"][data-code-tab]'));
+    const groupPanels = Array.from(group.querySelectorAll('[role="tabpanel"][data-code-panel]'));
+
+    groupTabs.forEach((tab, index) => {
+      const selectAndSync = (moveFocus) => {
+        const idx = tab.getAttribute('data-code-tab') || '0';
+        activateCodeTab(group, idx, moveFocus);
+        const osKey = tab.getAttribute('data-os-sync') || '';
+        if (osKey) syncOsPreference(osKey, true);
+      };
+      tab.addEventListener('click', () => selectAndSync(false));
+      tab.addEventListener('keydown', (event) => {
+        let nextIndex = -1;
+        if (event.key === 'ArrowRight') nextIndex = (index + 1) % groupTabs.length;
+        else if (event.key === 'ArrowLeft')
+          nextIndex = (index - 1 + groupTabs.length) % groupTabs.length;
+        else if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = groupTabs.length - 1;
+        if (nextIndex < 0) return;
+        event.preventDefault();
+        const nextTab = groupTabs[nextIndex];
+        activateCodeTab(group, nextTab.getAttribute('data-code-tab') || '0', true);
+        const osKey = nextTab.getAttribute('data-os-sync') || '';
+        if (osKey) syncOsPreference(osKey, true);
+      });
+    });
+
+    // Sync tab state when browser find-in-page opens a hidden="until-found" panel
+    groupPanels.forEach((panel) => {
+      panel.addEventListener('beforematch', () => {
+        activateCodeTab(group, panel.getAttribute('data-code-panel') || '0', false);
+      });
+    });
+  });
+
+  mcpSwitchers.forEach((switcher) => {
+    switcher.querySelectorAll('[data-mcp-os-btn]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const os = btn.getAttribute('data-mcp-os-btn') || 'macos';
+        syncOsPreference(os, true);
+      });
+    });
+    switcher.querySelectorAll('[data-mcp-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const client = btn.getAttribute('data-mcp-preset') || 'claude';
+        renderMcpSwitcher(switcher, null, client);
+      });
+    });
+  });
+
+  let savedOs = '';
+  try {
+    savedOs = localStorage.getItem(osStorageKey) || '';
+  } catch {
+    savedOs = '';
+  }
+  const initialOs = ['macos', 'windows', 'linux'].includes(savedOs) ? savedOs : detectedOs;
+  if (initialOs) {
+    syncOsPreference(initialOs, false);
   }
 
   // Copy buttons for CLI / MCP / first-launch commands
