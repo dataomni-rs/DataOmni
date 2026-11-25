@@ -110,7 +110,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            unixodbc-dev
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -159,6 +160,12 @@ jobs:
         run: |
           bun run rust:clippy:no-ai
           cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features
+
+      # 可选 ODBC 特性（达梦 DM8，默认关闭）仅在 CI 装 unixodbc-dev 做编译与纯本地单测防退化，不进 release.yml 官方包
+      - name: Rust clippy and unit tests (odbc feature)
+        run: |
+          bun run rust:clippy:odbc
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --features odbc
 
       - name: Test Rust
         run: bun run rust:test
