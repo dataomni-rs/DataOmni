@@ -11,6 +11,8 @@ interface GridColumnMenuProps {
   hidden: ReadonlySet<string>;
   onToggle: (name: string) => void;
   onShowAll: () => void;
+  hasCustomOrder?: boolean;
+  onResetOrder?: () => void;
   density: GridDensity;
   onDensityChange: (density: GridDensity) => void;
   frozenCount: number;
@@ -23,6 +25,8 @@ export function GridColumnMenu({
   hidden,
   onToggle,
   onShowAll,
+  hasCustomOrder = false,
+  onResetOrder,
   density,
   onDensityChange,
   frozenCount,
@@ -120,14 +124,25 @@ export function GridColumnMenu({
           <Columns3 size={12} />
           {t('columns.title')}
         </span>
-        <button
-          type="button"
-          onClick={onShowAll}
-          disabled={hidden.size === 0}
-          className="rounded-control px-1.5 py-0.5 text-xs text-accent hover:bg-accent-soft disabled:opacity-40"
-        >
-          {t('columns.showAll')}
-        </button>
+        <div className="flex items-center gap-1">
+          {hasCustomOrder && onResetOrder && (
+            <button
+              type="button"
+              onClick={onResetOrder}
+              className="rounded-control px-1.5 py-0.5 text-xs text-accent hover:bg-accent-soft"
+            >
+              {t('columns.resetOrder')}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onShowAll}
+            disabled={hidden.size === 0}
+            className="rounded-control px-1.5 py-0.5 text-xs text-accent hover:bg-accent-soft disabled:opacity-40"
+          >
+            {t('columns.showAll')}
+          </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto py-1">

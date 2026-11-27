@@ -974,6 +974,7 @@ export const zh = {
   // 列控制：显示/隐藏、冻结、密度（列宽由拖拽与双击自适应完成）
   'columns.title': '列',
   'columns.showAll': '全部显示',
+  'columns.resetOrder': '重置列顺序',
   'columns.hiddenCount': '已隐藏 {count} 列',
   'columns.hiddenCount.one': '已隐藏 {count} 列',
   'columns.lastVisible': '至少要留一列',

@@ -142,9 +142,13 @@ import { GridContextMenu, type GridContextTarget } from './GridContextMenu';
 import {
   DENSITY_CELL_CLASS,
   frozenLeftOffsets,
+  isCustomColumnOrder,
+  normalizeColumnOrder,
+  reorderColumnOrder,
   toggleHiddenColumn,
   visibleColumnIndexes
 } from '../utils/gridColumns';
+import { useColumnReorder } from '../hooks/useColumnReorder';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useTableEditStore, tableEditKey } from '../stores/tableEditStore';
 import { selectTableStructure, useAppStore } from '../stores/appStore';
@@ -243,6 +247,7 @@ export default function TableDataViewer({
     | null
   >(null);
   const [hiddenColumns, setHiddenColumns] = useState<ReadonlySet<string>>(new Set());
+  const [columnOrder, setColumnOrder] = useState<number[]>([]);
   const [frozenCount, setFrozenCount] = useState(0);
   // 行高是应用级偏好：换张表、关掉标签再开，挑好的那档还在
   const density = useSettingsStore((state) => state.gridDensity);
@@ -652,8 +657,9 @@ export default function TableDataViewer({
     setFindQuery('');
     setActiveMatchIndex(0);
     setInspectorState(null);
-    // 列偏好同理：隐藏集里存的是列名，换表后指的是另一张表的列
+    // 列偏好同理：隐藏集与自定义顺序属于旧表，换表后回到默认
     setHiddenColumns(new Set());
+    setColumnOrder([]);
     setFrozenCount(0);
     // 待提交的变更**不**在这里清：它们现在按表存在 store 里，换表就是换一个键，
     // 「键指着另一张表的行」这种状态已经不存在了。
@@ -828,9 +834,20 @@ export default function TableDataViewer({
     resizingIndex
   } = useResizableColumns(columnNames, positionalRows, headerBadges);
 
+  const normalizedColumnOrder = React.useMemo(
+    () => normalizeColumnOrder(columnNames.length, columnOrder),
+    [columnNames.length, columnOrder]
+  );
+  const hasCustomColumnOrder = isCustomColumnOrder(normalizedColumnOrder);
+  const columnReorder = useColumnReorder((fromOriginalIndex, toOriginalIndex) => {
+    setColumnOrder((current) =>
+      reorderColumnOrder(normalizeColumnOrder(columnNames.length, current), fromOriginalIndex, toOriginalIndex)
+    );
+  });
+
   const visibleIndexes = React.useMemo(
-    () => visibleColumnIndexes(columnNames, hiddenColumns),
-    [columnNames, hiddenColumns]
+    () => visibleColumnIndexes(columnNames, hiddenColumns, normalizedColumnOrder),
+    [columnNames, hiddenColumns, normalizedColumnOrder]
   );
   // 选区按**看得见的**列建立：用户框住的是他看到的那几格，复制出来的却混进
   // 藏起来的列，是这类网格最难自查的一种错
@@ -989,6 +1006,7 @@ export default function TableDataViewer({
     currentTableKey,
     filterSignature(appliedFilters),
     sorts.map((item) => `${item.column}:${item.direction}`).join(','),
+    visibleIndexes.join(','),
     currentPage,
     pageSize
   ].join('|');
@@ -1786,12 +1804,14 @@ export default function TableDataViewer({
                       </button>
                       {showColumnMenu && (
                         <GridColumnMenu
-                          columns={columnNames}
+                          columns={normalizedColumnOrder.map((index) => columnNames[index] ?? '')}
                           hidden={hiddenColumns}
                           onToggle={(name) => (
                             setHiddenColumns((current) => toggleHiddenColumn(current, columnNames, name))
                           )}
                           onShowAll={() => setHiddenColumns(new Set())}
+                          hasCustomOrder={hasCustomColumnOrder}
+                          onResetOrder={() => setColumnOrder([])}
                           density={density}
                           onDensityChange={setDensity}
                           frozenCount={frozenCount}
@@ -2097,9 +2117,12 @@ export default function TableDataViewer({
                               return (
                               <th
                                 key={index}
+                                data-col-orig-index={index}
+                                data-col-display-index={visiblePosition}
                                 // 冻结列自己接管 sticky：thead 的 sticky top 只管纵向，
                                 // 横向要在每个 th 上单独钉住，并压过后面滚过来的列
                                 style={frozenLeft === null ? undefined : { left: `${frozenLeft}px` }}
+                                onMouseDown={(event) => columnReorder.startColumnDrag(index, visiblePosition, event)}
                                 onContextMenu={(event) => {
                                   event.preventDefault();
                                   setContextTarget({
@@ -2112,9 +2135,19 @@ export default function TableDataViewer({
                                 className={clsx(
                                   'relative select-none border-r border-line px-2 py-1 text-left text-xs font-medium text-fg',
                                   frozenLeft !== null && 'sticky top-0 z-30 bg-surface-sunken',
-                                  visiblePosition === lastFrozenPosition && 'border-r-2 border-r-line-strong'
+                                  visiblePosition === lastFrozenPosition && 'border-r-2 border-r-line-strong',
+                                  columnReorder.draggingIndex === index && 'opacity-50'
                                 )}
                               >
+                                {columnReorder.overIndex === index && columnReorder.dropSide && (
+                                  <span
+                                    aria-hidden="true"
+                                    className={clsx(
+                                      'pointer-events-none absolute inset-y-0 z-40 w-0.5 bg-accent',
+                                      columnReorder.dropSide === 'left' ? 'left-0' : 'right-0'
+                                    )}
+                                  />
+                                )}
                                 <div className="flex items-center gap-1">
                                   {(() => {
                                     const sortIndex = sorts.findIndex((item) => item.column === column.name);
@@ -2304,13 +2337,18 @@ export default function TableDataViewer({
                   </div>
                   {inspectorState && tableSchema && (
                     <GridRowInspector
-                      columns={tableSchema.columns.map((column) => ({
-                        name: column.name,
-                        dataType: column.data_type
+                      columns={normalizedColumnOrder.map((origIndex) => ({
+                        name: tableSchema.columns[origIndex]?.name ?? '',
+                        dataType: tableSchema.columns[origIndex]?.data_type ?? null
                       }))}
-                      rowA={positionalRows[inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA] ?? []}
+                      rowA={normalizedColumnOrder.map(
+                        (origIndex) =>
+                          positionalRows[inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA]?.[origIndex] ?? null
+                      )}
                       rowALabel={`#${(currentPage - 1) * pageSize + (inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA) + 1}`}
-                      rowB={inspectorState.mode === 'compare' ? (positionalRows[inspectorState.rowB] ?? []) : undefined}
+                      rowB={inspectorState.mode === 'compare'
+                        ? normalizedColumnOrder.map((origIndex) => positionalRows[inspectorState.rowB]?.[origIndex] ?? null)
+                        : undefined}
                       rowBLabel={inspectorState.mode === 'compare'
                         ? `#${(currentPage - 1) * pageSize + inspectorState.rowB + 1}`
                         : undefined}
@@ -2438,6 +2476,7 @@ export default function TableDataViewer({
               : undefined
           }
           onSelectColumn={(column) => cells.selectColumn(column)}
+          onResetColumnOrder={hasCustomColumnOrder ? () => setColumnOrder([]) : undefined}
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
           onCopyColumnValues={(column) => cells.copyColumn(column, false)}

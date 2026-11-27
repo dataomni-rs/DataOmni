@@ -317,4 +317,76 @@ describe('单列复制与单列导出', () => {
     expect(container.querySelectorAll('tbody tr')).toHaveLength(1);
     expect(container.querySelector('[data-testid="grid-find-bar"]')?.textContent).toContain('1 / 3 matched');
   });
+
+  it('拖动列头可重排列顺序且不误触发排序，复制整行与右键重置均按新顺序生效', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    });
+
+    const result: QueryResult = {
+      columns: ['id', 'status', 'amount'],
+      rows: [
+        [1, 'paid', 10],
+        [2, 'failed', 20]
+      ],
+      affected_rows: 2,
+      execution_time: 1
+    };
+
+    await act(async () => {
+      root.render(<QueryResultScrollTable result={result} statementId="stmt-reorder" />);
+    });
+
+    const headers = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')];
+    expect(headers).toHaveLength(3);
+    headers.forEach((th, idx) => {
+      vi.spyOn(th, 'getBoundingClientRect').mockReturnValue({
+        left: idx * 100,
+        right: (idx + 1) * 100,
+        top: 0,
+        bottom: 32,
+        width: 100,
+        height: 32,
+        x: idx * 100,
+        y: 0,
+        toJSON: () => ({})
+      });
+    });
+
+    // 把第 0 列（id）拖到第 1 列（status）右侧 -> [status, id, amount]
+    await act(async () => {
+      headers[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 50, clientY: 16 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 1, clientX: 160, clientY: 16 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, clientX: 160, clientY: 16 }));
+    });
+
+    const reorderedCols = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')]
+      .map((th) => th.dataset.colOrigIndex);
+    expect(reorderedCols).toEqual(['1', '0', '2']);
+
+    const firstRowCells = [...container.querySelectorAll('tbody tr')[0].querySelectorAll('td')]
+      .map((td) => td.textContent?.trim());
+    expect(firstRowCells).toEqual(['paid', '1', '10']);
+
+    // 右键列头重置列顺序
+    await act(async () => {
+      container.querySelector('thead th[data-col-orig-index]')?.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 })
+      );
+    });
+    const resetBtn = [...container.querySelectorAll<HTMLButtonElement>('div.fixed button')].find((b) => b.textContent === 'Reset order');
+    if (!resetBtn) throw new Error('没有 Reset order 菜单项');
+    await act(async () => {
+      resetBtn.click();
+    });
+    const resetCols = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')]
+      .map((th) => th.dataset.colOrigIndex);
+    expect(resetCols).toEqual(['0', '1', '2']);
+  });
 });

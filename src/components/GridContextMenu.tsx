@@ -23,6 +23,7 @@ interface GridContextMenuProps {
   onFilterIsNull?: () => void;
   onFilterIsNotNull?: () => void;
   onSelectColumn?: (column: number) => void;
+  onResetColumnOrder?: () => void;
   onCopy: (withHeaders: boolean) => void;
   onCopyRow: (row: number) => void;
   onCopyColumnValues?: (column: number) => void;
@@ -65,6 +66,7 @@ export function GridContextMenu({
   onFilterIsNull,
   onFilterIsNotNull,
   onSelectColumn,
+  onResetColumnOrder,
   onCopy,
   onCopyRow,
   onCopyColumnValues,
@@ -153,8 +155,15 @@ export function GridContextMenu({
   }
   groups.push(columnItems);
 
-  if (target.row === null && onExportColumn) {
-    groups.push([{ label: exportColumnLabel, run: () => onExportColumn(target.column) }]);
+  if (target.row === null && (onExportColumn || onResetColumnOrder)) {
+    const headerExtras: MenuItem[] = [];
+    if (onExportColumn) {
+      headerExtras.push({ label: exportColumnLabel, run: () => onExportColumn(target.column) });
+    }
+    if (onResetColumnOrder) {
+      headerExtras.push({ label: t('columns.resetOrder'), run: onResetColumnOrder });
+    }
+    groups.push(headerExtras);
   }
 
   if (target.row !== null) {

@@ -55,18 +55,75 @@ export function saveGridDensity(density: GridDensity): void {
 }
 
 /**
- * 可见列在原始列表里的下标。
+ * 归一化列顺序为 `0..columnCount - 1` 的完整排列。
+ *
+ * 按原始列下标而不是列名存顺序：SQL 查询结果允许出现同名列（如 `SELECT a.id, b.id`），
+ * 按下标索引不会把两列混为一谈；换表或重跑结构变化时会自动丢弃越界项并补齐新列。
+ */
+export function normalizeColumnOrder(
+  columnCount: number,
+  order: readonly number[]
+): number[] {
+  const seen = new Set<number>();
+  const normalized: number[] = [];
+  for (const index of order) {
+    if (Number.isInteger(index) && index >= 0 && index < columnCount && !seen.has(index)) {
+      seen.add(index);
+      normalized.push(index);
+    }
+  }
+  for (let index = 0; index < columnCount; index += 1) {
+    if (!seen.has(index)) {
+      normalized.push(index);
+    }
+  }
+  return normalized;
+}
+
+export function isCustomColumnOrder(order: readonly number[]): boolean {
+  return order.some((value, index) => value !== index);
+}
+
+/**
+ * 把某列（按原始下标）拖动到目标列所在位置。
+ *
+ * 向右拖时落在目标列右侧，向左拖时落在目标列左侧，相邻两列则等价于直接交换；
+ * 即使中间存在隐藏列，未参与拖动的隐藏列也会保持相对位置不丢失。
+ */
+export function reorderColumnOrder(
+  order: readonly number[],
+  fromOriginalIndex: number,
+  toOriginalIndex: number
+): number[] {
+  if (fromOriginalIndex === toOriginalIndex) {
+    return [...order];
+  }
+  const fromPos = order.indexOf(fromOriginalIndex);
+  const toPos = order.indexOf(toOriginalIndex);
+  if (fromPos < 0 || toPos < 0) {
+    return [...order];
+  }
+  const next = [...order];
+  const [moved] = next.splice(fromPos, 1);
+  next.splice(toPos, 0, moved);
+  return next;
+}
+
+/**
+ * 可见列在原始列表里的下标（可叠加用户自定义列顺序）。
  *
  * 返回下标而不是列名：行数据是按位置排的数组，选区、列宽、对齐全都按下标索引，
  * 换成名字就得在每个调用点再映射一次，而那正是错位的来源。
  */
 export function visibleColumnIndexes(
   columns: readonly string[],
-  hidden: ReadonlySet<string>
+  hidden: ReadonlySet<string>,
+  columnOrder?: readonly number[]
 ): number[] {
-  return columns
-    .map((_, index) => index)
-    .filter((index) => !hidden.has(columns[index] ?? ''));
+  const ordered = columnOrder
+    ? normalizeColumnOrder(columns.length, columnOrder)
+    : columns.map((_, index) => index);
+  return ordered.filter((index) => !hidden.has(columns[index] ?? ''));
 }
 
 /**

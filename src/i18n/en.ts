@@ -954,6 +954,7 @@ export const en: Translations = {
   // Column control: show/hide, freeze, density (width comes from drag and double-click autofit)
   'columns.title': 'Columns',
   'columns.showAll': 'Show all',
+  'columns.resetOrder': 'Reset order',
   'columns.hiddenCount': '{count} columns hidden',
   'columns.hiddenCount.one': '{count} column hidden',
   'columns.lastVisible': 'At least one column must stay visible',

@@ -21,6 +21,7 @@ interface GridRowInspectorProps {
   onNextRow?: () => void;
   canPrevRow?: boolean;
   canNextRow?: boolean;
+  maxHeight?: number;
   onClose: () => void;
 }
 
@@ -38,6 +39,7 @@ export function GridRowInspector({
   onNextRow,
   canPrevRow = false,
   canNextRow = false,
+  maxHeight,
   onClose
 }: GridRowInspectorProps) {
   const t = useLanguageStore((state) => state.t);
@@ -69,6 +71,7 @@ export function GridRowInspector({
 
   return (
     <aside
+      style={maxHeight !== undefined ? { maxHeight: `${maxHeight}px` } : undefined}
       className={clsx(
         'flex shrink-0 flex-col border-l border-line bg-surface',
         isCompare ? 'w-[26rem] max-w-[55%]' : 'w-80 max-w-[45%]'

@@ -544,4 +544,68 @@ describe('TableDataViewer（单列复制与单列导出）', () => {
     });
     expect(writeText).toHaveBeenLastCalledWith('a1\tn1\nb2\tn2');
   });
+
+  it('拖动表头可交换列顺序并同步数据格与右键重置列顺序', async () => {
+    readQuery.mockImplementation(async (sql: string) => (
+      sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 2 }]
+        : [
+            { id: 10, fs: 'a1', note: 'n1' },
+            { id: 20, fs: 'b2', note: 'n2' }
+          ]
+    ));
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    const headers = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')];
+    expect(headers).toHaveLength(3);
+    // 给三列表头稳定的几何矩形，供拖动命中检测使用
+    headers.forEach((th, idx) => {
+      vi.spyOn(th, 'getBoundingClientRect').mockReturnValue({
+        left: idx * 100,
+        right: (idx + 1) * 100,
+        top: 0,
+        bottom: 32,
+        width: 100,
+        height: 32,
+        x: idx * 100,
+        y: 0,
+        toJSON: () => ({})
+      });
+    });
+
+    // 把第 2 列（note）拖到第 0 列（id）位置
+    await act(async () => {
+      headers[2].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 250, clientY: 16 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 1, clientX: 40, clientY: 16 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, clientX: 40, clientY: 16 }));
+    });
+
+    const reorderedCols = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')]
+      .map((th) => th.dataset.colOrigIndex);
+    expect(reorderedCols).toEqual(['2', '0', '1']);
+    const firstRowTexts = [...container.querySelectorAll('tbody tr')[0].querySelectorAll('td')]
+      .slice(0, 3)
+      .map((td) => td.textContent?.trim());
+    expect(firstRowTexts).toEqual(['n1', '10', 'a1']);
+
+    // 右键列头可一键重置列顺序
+    await act(async () => {
+      container.querySelector('thead th[data-col-orig-index]')?.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 })
+      );
+    });
+    await act(async () => {
+      menuItem('Reset order').click();
+    });
+    const resetCols = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')]
+      .map((th) => th.dataset.colOrigIndex);
+    expect(resetCols).toEqual(['0', '1', '2']);
+  });
 });

@@ -73,7 +73,13 @@ import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
 import { ResultChartDialog } from './ResultChartDialog';
 import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
 import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
-import { DENSITY_CELL_CLASS } from '../utils/gridColumns';
+import {
+  DENSITY_CELL_CLASS,
+  isCustomColumnOrder,
+  normalizeColumnOrder,
+  reorderColumnOrder
+} from '../utils/gridColumns';
+import { useColumnReorder } from '../hooks/useColumnReorder';
 import { useSettingsStore } from '../stores/settingsStore';
 import { SHORTCUTS, commandModifierLabel, formatShortcut, hasCommandModifier } from '../utils/shortcuts';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
@@ -135,6 +141,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const [filterByQuery, setFilterByQuery] = useState(true);
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [cellFilters, setCellFilters] = useState<ResultCellFilter[]>([]);
+  const [columnOrder, setColumnOrder] = useState<number[]>([]);
   const [inspectorState, setInspectorState] = useState<
     | { mode: 'single'; rowIndex: number }
     | { mode: 'compare'; rowA: number; rowB: number }
@@ -170,9 +177,10 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const footerRef = useRef<HTMLDivElement>(null);
   const [tableHeight, setTableHeight] = useState(FALLBACK_RESULT_TABLE_HEIGHT);
   
-  // 换一条结果集时清掉旧的客户端筛选、排序与详情抽屉，避免列下标错位
+  // 换一条结果集时清掉旧的客户端筛选、排序、自定义列序与详情抽屉，避免列下标错位
   useEffect(() => {
     setCellFilters([]);
+    setColumnOrder([]);
     setSorts([]);
     setFindQuery('');
     setShowFindBar(false);
@@ -205,21 +213,45 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     () => sortedRows.slice(startIndex, endIndex),
     [sortedRows, startIndex, endIndex]
   );
-  // 翻页、改排序、改筛选、换一条语句的结果都换了数据集，选区必须跟着清掉；
+  const normalizedColumnOrder = useMemo(
+    () => normalizeColumnOrder(result.columns.length, columnOrder),
+    [result.columns.length, columnOrder]
+  );
+  const hasCustomColumnOrder = isCustomColumnOrder(normalizedColumnOrder);
+  const columnReorder = useColumnReorder((fromOriginalIndex, toOriginalIndex) => {
+    setColumnOrder((current) =>
+      reorderColumnOrder(normalizeColumnOrder(result.columns.length, current), fromOriginalIndex, toOriginalIndex)
+    );
+  });
+  const orderedColumns = useMemo(
+    () => normalizedColumnOrder.map((index) => result.columns[index] ?? ''),
+    [normalizedColumnOrder, result.columns]
+  );
+  const orderedCurrentRows = useMemo(
+    () => currentRows.map((row) => normalizedColumnOrder.map((index) => row[index] ?? null)),
+    [currentRows, normalizedColumnOrder]
+  );
+  const orderedSortedRows = useMemo(
+    () => (hasCustomColumnOrder
+      ? sortedRows.map((row) => normalizedColumnOrder.map((index) => row[index] ?? null))
+      : sortedRows),
+    [hasCustomColumnOrder, sortedRows, normalizedColumnOrder]
+  );
+  // 翻页、改排序、改筛选、重排列、换一条语句的结果都换了视觉坐标，选区必须跟着清掉；
   // 同一页重新渲染则留着
   const filterKey = cellFilters.map((f) => `${f.columnIndex}:${f.operator}:${f.value}`).join(',');
   const sortKey = sorts.map((s) => `${s.column}:${s.direction}`).join(',');
-  const datasetKey = `${statementId}|${filterKey}|${showFindBar && filterByQuery ? findQuery : ''}|${sortKey}|${safePage}|${pageSize}`;
-  const cells = useCellSelection(currentRows, result.columns, datasetKey, {
+  const datasetKey = `${statementId}|${filterKey}|${showFindBar && filterByQuery ? findQuery : ''}|${sortKey}|${normalizedColumnOrder.join(',')}|${safePage}|${pageSize}`;
+  const cells = useCellSelection(orderedCurrentRows, orderedColumns, datasetKey, {
     onFind: () => setShowFindBar(true)
   });
   const selectionSummary = useMemo(
-    () => summarizeSelection(currentRows, cells.selection),
-    [currentRows, cells.selection]
+    () => summarizeSelection(orderedCurrentRows, cells.selection),
+    [orderedCurrentRows, cells.selection]
   );
   const findMatches = useMemo(
-    () => (showFindBar ? findGridMatches(currentRows, findQuery) : []),
-    [showFindBar, currentRows, findQuery]
+    () => (showFindBar ? findGridMatches(orderedCurrentRows, findQuery) : []),
+    [showFindBar, orderedCurrentRows, findQuery]
   );
   const findMatchSet = useMemo(
     () => new Set(findMatches.map((match) => `${match.row}:${match.column}`)),
@@ -354,7 +386,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       });
     }
     if (exportIntent?.columnIndex === undefined && cells.selection) {
-      const subset = selectionSubset(currentRows, result.columns, cells.selection);
+      const subset = selectionSubset(orderedCurrentRows, orderedColumns, cells.selection);
       list.unshift({
         id: 'selection',
         label: t('export.scope.selection'),
@@ -367,28 +399,28 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       });
     }
     return list;
-  }, [cells.selection, currentRows, dialect, exportIntent?.columnIndex, result.columns, result.truncated, resultSql, t]);
+  }, [cells.selection, orderedCurrentRows, orderedColumns, dialect, exportIntent?.columnIndex, result.truncated, resultSql, t]);
 
   const profileSource = useMemo<DataProfileSource>(
     () => ({
       kind: 'resultSet',
-      columns: result.columns.map((name, index) => ({
-        name,
-        logicalType: result.column_metadata?.[index]?.logical_type ?? null,
-        databaseType: result.column_metadata?.[index]?.database_type ?? null
+      columns: normalizedColumnOrder.map((origIndex) => ({
+        name: result.columns[origIndex] ?? '',
+        logicalType: result.column_metadata?.[origIndex]?.logical_type ?? null,
+        databaseType: result.column_metadata?.[origIndex]?.database_type ?? null
       })),
-      rows: sortedRows
+      rows: orderedSortedRows
     }),
-    [result.column_metadata, result.columns, sortedRows]
+    [normalizedColumnOrder, result.column_metadata, result.columns, orderedSortedRows]
   );
   const analyticsSource = useMemo<LocalAnalyticsSource>(
     () => ({
       kind: 'resultSet',
       title: result.editability?.editable ? result.editability.table : t('result.queryResult'),
       columns: profileSource.kind === 'resultSet' ? profileSource.columns : [],
-      rows: sortedRows
+      rows: orderedSortedRows
     }),
-    [profileSource, result.editability, sortedRows, t]
+    [profileSource, result.editability, orderedSortedRows, t]
   );
   
   // 能不能改由 `describeResultEditability` 证明过：认得出是单表 SELECT，
@@ -771,11 +803,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
         />
       )}
 
-      {/* 导出的是排序后的整份结果，不是当前这一页——用户看到的次序就是文件里的次序 */}
+      {/* 导出的是排序与列重排后的整份结果，不是当前这一页——用户看到的次序就是文件里的次序 */}
       {exportIntent && (
         <ExportResultDialog
-          columns={result.columns}
-          rows={sortedRows}
+          columns={orderedColumns}
+          rows={orderedSortedRows}
           sourceName={editability?.editable ? editability.table : t('result.queryResult')}
           initialColumnIndexes={
             exportIntent.columnIndex !== undefined ? [exportIntent.columnIndex] : undefined
@@ -794,11 +826,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
         />
       )}
 
-      {/* 画的也是排序后的整份结果，和导出同一份：图上的次序就是表上的次序 */}
+      {/* 画的也是排序与列重排后的整份结果，和导出同一份：图上的次序就是表上的次序 */}
       {showChart && (
         <ResultChartDialog
-          columns={result.columns}
-          rows={sortedRows}
+          columns={orderedColumns}
+          rows={orderedSortedRows}
           onClose={() => setShowChart(false)}
         />
       )}
@@ -913,30 +945,45 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
               各列，量出来的列宽就失去意义了 */}
           <table className="table-fixed border-collapse" style={{ width: `${tableWidth}px` }}>
             <colgroup>
-              {widths.map((width, index) => (
-                <col key={index} style={{ width: `${width}px` }} />
+              {normalizedColumnOrder.map((origIndex) => (
+                <col key={origIndex} style={{ width: `${widths[origIndex]}px` }} />
               ))}
               {canEdit && <col style={{ width: `${ACTION_COLUMN_WIDTH}px` }} />}
             </colgroup>
             <thead className="sticky top-0 z-20 bg-surface-sunken">
               <tr className="bg-surface-sunken border-b border-line">
-                {result.columns.map((column, index) => (
+                {normalizedColumnOrder.map((origIndex, displayIndex) => {
+                  const column = result.columns[origIndex] ?? '';
+                  return (
                   <th
-                    key={index}
+                    key={origIndex}
+                    data-col-orig-index={origIndex}
+                    data-col-display-index={displayIndex}
+                    onMouseDown={(event) => columnReorder.startColumnDrag(origIndex, displayIndex, event)}
                     onContextMenu={totalRows > 0 ? (event) => {
                       event.preventDefault();
                       setContextTarget({
                         row: null,
-                        column: index,
+                        column: displayIndex,
                         x: event.clientX,
                         y: event.clientY
                       });
                     } : undefined}
                     className={clsx(
                       'relative select-none border-r border-line text-left text-xs font-medium text-fg',
-                      densityClass
+                      densityClass,
+                      columnReorder.draggingIndex === origIndex && 'opacity-50'
                     )}
                   >
+                    {columnReorder.overIndex === origIndex && columnReorder.dropSide && (
+                      <span
+                        aria-hidden="true"
+                        className={clsx(
+                          'pointer-events-none absolute inset-y-0 z-40 w-0.5 bg-accent',
+                          columnReorder.dropSide === 'left' ? 'left-0' : 'right-0'
+                        )}
+                      />
+                    )}
                     <div className="flex items-center gap-1">
                       {(() => {
                         const sortIndex = sorts.findIndex((item) => item.column === column);
@@ -954,22 +1001,22 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                           >
                             <div className="flex min-w-0 flex-1 flex-col">
                               <span className="truncate">{column}</span>
-                              {result.column_metadata?.[index] && (
+                              {result.column_metadata?.[origIndex] && (
                                 // 去掉逐格类型标签后这里是唯一显示类型的地方，
                                 // 窄列会截断，所以挂个 title 让悬停能看全
                                 <span
                                   className="truncate text-[10px] font-normal text-fg-subtle"
-                                  title={`${columnType(index)} · ${
-                                    result.column_metadata[index].nullable === null
+                                  title={`${columnType(origIndex)} · ${
+                                    result.column_metadata[origIndex].nullable === null
                                       ? t('result.nullUnknown')
-                                      : result.column_metadata[index].nullable ? 'NULL' : 'NOT NULL'
+                                      : result.column_metadata[origIndex].nullable ? 'NULL' : 'NOT NULL'
                                   }`}
                                 >
-                                  {columnType(index)}
+                                  {columnType(origIndex)}
                                   {' · '}
-                                  {result.column_metadata[index].nullable === null
+                                  {result.column_metadata[origIndex].nullable === null
                                     ? t('result.nullUnknown')
-                                    : result.column_metadata[index].nullable
+                                    : result.column_metadata[origIndex].nullable
                                       ? 'NULL'
                                       : 'NOT NULL'}
                                 </span>
@@ -983,12 +1030,13 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                       })()}
                     </div>
                     <ColumnResizeHandle
-                      active={resizingIndex === index}
-                      onPointerDown={(event) => startResize(index, event)}
-                      onDoubleClick={() => autoFitColumn(index)}
+                      active={resizingIndex === origIndex}
+                      onPointerDown={(event) => startResize(origIndex, event)}
+                      onDoubleClick={() => autoFitColumn(origIndex)}
                     />
                   </th>
-                ))}
+                  );
+                })}
                 {canEdit && (
                   <th className={clsx('text-left text-xs font-medium text-fg', densityClass)}>
                     {t('result.actions')}
@@ -1001,9 +1049,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
               {/* 新增行表单 */}
               {showAddForm && (
                 <tr className="bg-success-soft">
-                  {result.columns.map((column, columnIndex) => (
+                  {normalizedColumnOrder.map((origIndex) => {
+                    const column = result.columns[origIndex] ?? '';
+                    return (
                     <td 
-                      key={columnIndex} 
+                      key={origIndex} 
                       className={clsx('border-r border-line', densityClass)}
                     >
                       {keyColumns.has(column) || generatedColumns.has(column) ? (
@@ -1012,12 +1062,13 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                         <CellInputEditor
                           value={newRowData[column] ?? { kind: 'unset' }}
                           onChange={(next) => updateNewRowData(column, next)}
-                          dataType={columnType(columnIndex)}
+                          dataType={columnType(origIndex)}
                           dialect={dialect}
                         />
                       )}
                     </td>
-                  ))}
+                    );
+                  })}
                   {canEdit && (
                     <td className={densityClass}>
                       <div className="flex items-center gap-1">
@@ -1052,10 +1103,12 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                     pending?.kind === 'update' && 'bg-accent-soft'
                   )}
                 >
-                  {row.map((cell, cellIndex) => {
-                    const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.columnIndex === cellIndex;
+                  {normalizedColumnOrder.map((origIndex, displayIndex) => {
+                    const cell = row[origIndex] ?? null;
+                    const columnName = result.columns[origIndex] ?? '';
+                    const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.columnIndex === origIndex;
                     const inlineTarget = !isEditing
-                      ? columnJumpMap.get(cellIndex)?.find((item) => item.inline)
+                      ? columnJumpMap.get(origIndex)?.find((item) => item.inline)
                       : undefined;
                     const inlineJump = inlineTarget
                       ? buildCellJump(inlineTarget, (col) => {
@@ -1068,18 +1121,18 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                       : null;
                     return (
                       <td
-                        key={cellIndex}
+                        key={origIndex}
                         className={clsx(
                           'relative border-r border-line font-mono text-[13px]',
                           !isEditing && 'select-none',
                           densityClass,
-                          alignments[cellIndex] === 'right' && 'text-right',
+                          alignments[origIndex] === 'right' && 'text-right',
                           inlineJump && 'group/cell',
-                          findMatchSet.has(`${rowIndex}:${cellIndex}`) && !cells.isSelected(rowIndex, cellIndex) && 'bg-warning-soft',
-                          activeFindMatch?.row === rowIndex && activeFindMatch?.column === cellIndex && 'ring-2 ring-inset ring-warning',
-                          cells.isSelected(rowIndex, cellIndex) && 'bg-accent-soft',
-                          cells.isFocused(rowIndex, cellIndex) && 'outline outline-1 -outline-offset-1 outline-accent',
-                          canEdit && !isEditing && !generatedColumns.has(result.columns[cellIndex]) && 'cursor-pointer'
+                          findMatchSet.has(`${rowIndex}:${displayIndex}`) && !cells.isSelected(rowIndex, displayIndex) && 'bg-warning-soft',
+                          activeFindMatch?.row === rowIndex && activeFindMatch?.column === displayIndex && 'ring-2 ring-inset ring-warning',
+                          cells.isSelected(rowIndex, displayIndex) && 'bg-accent-soft',
+                          cells.isFocused(rowIndex, displayIndex) && 'outline outline-1 -outline-offset-1 outline-accent',
+                          canEdit && !isEditing && !generatedColumns.has(columnName) && 'cursor-pointer'
                         )}
                         onMouseDown={(event) => {
                           if (isEditing || event.button !== 0) {
@@ -1095,11 +1148,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                             event.preventDefault();
                           }
                           event.currentTarget.closest<HTMLElement>('[tabindex="0"]')?.focus({ preventScroll: true });
-                          cells.beginDragSelection(rowIndex, cellIndex, event.shiftKey);
+                          cells.beginDragSelection(rowIndex, displayIndex, event.shiftKey);
                         }}
                         onMouseEnter={(event) => {
                           if (!isEditing) {
-                            cells.updateDragSelection(rowIndex, cellIndex, (event.buttons & 1) === 1);
+                            cells.updateDragSelection(rowIndex, displayIndex, (event.buttons & 1) === 1);
                           }
                         }}
                         onClick={(event) => {
@@ -1108,23 +1161,23 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                             handleJump(inlineJump);
                             return;
                           }
-                          cells.handleCellClick(rowIndex, cellIndex, event.shiftKey);
+                          cells.handleCellClick(rowIndex, displayIndex, event.shiftKey);
                         }}
                         onContextMenu={(event) => {
                           event.preventDefault();
                           // 右击选区外的格子先选上它：菜单里那几条都作用于选区
-                          if (!cells.isSelected(rowIndex, cellIndex)) {
-                            cells.selectCell(rowIndex, cellIndex);
+                          if (!cells.isSelected(rowIndex, displayIndex)) {
+                            cells.selectCell(rowIndex, displayIndex);
                           }
                           setContextTarget({
                             row: rowIndex,
-                            column: cellIndex,
+                            column: displayIndex,
                             x: event.clientX,
                             y: event.clientY
                           });
                         }}
                         onDoubleClick={() => canEdit && !isEditing
-                          && startEditing(rowIndex, cellIndex, cell)}
+                          && startEditing(rowIndex, origIndex, cell)}
                       >
                         {isEditing ? (
                           <CellInputEditor
@@ -1132,16 +1185,16 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                             onChange={setEditValue}
                             // SQLite 的 UPDATE 没有 `SET 列 = DEFAULT`
                             allowDefault={dialect !== 'sqlite'}
-                            dataType={columnType(cellIndex)}
+                            dataType={columnType(origIndex)}
                             dialect={dialect}
                             autoFocus
                             onCommit={saveEdit}
                             onCancel={cancelEditing}
                           />
                         ) : inlineJump ? (
-                          <div className={clsx('flex min-w-0 items-center gap-1', alignments[cellIndex] === 'right' && 'justify-end')}>
+                          <div className={clsx('flex min-w-0 items-center gap-1', alignments[origIndex] === 'right' && 'justify-end')}>
                             <div className="min-w-0 flex-1 truncate">
-                              <StagedCellValue value={cell} pending={pending} column={result.columns[cellIndex]} />
+                              <StagedCellValue value={cell} pending={pending} column={columnName} />
                             </div>
                             <button
                               type="button"
@@ -1159,7 +1212,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                         ) : (
                           // 每格再挂一个类型标签是重复——表头已经写了 BIGINT · NOT NULL，
                           // 而且标签会占掉列宽，让本来放得下的值反而被截断
-                          <StagedCellValue value={cell} pending={pending} column={result.columns[cellIndex]} />
+                          <StagedCellValue value={cell} pending={pending} column={columnName} />
                         )}
                       </td>
                     );
@@ -1195,36 +1248,35 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       </div>
 
       {inspectorState && (
-        <div style={{ maxHeight: `${tableHeight}px` }} className="flex shrink-0">
-          <GridRowInspector
-            columns={result.columns.map((name, index) => ({
-              name,
-              dataType: columnType(index) || null
-            }))}
-            rowA={currentRows[inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA] ?? []}
-            rowALabel={`#${startIndex + (inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA) + 1}`}
-            rowB={inspectorState.mode === 'compare' ? (currentRows[inspectorState.rowB] ?? []) : undefined}
-            rowBLabel={inspectorState.mode === 'compare'
-              ? `#${startIndex + inspectorState.rowB + 1}`
-              : undefined}
-            onCopyText={(text) => cells.copyText(text)}
-            onPrevRow={inspectorState.mode === 'single'
-              ? () => setInspectorState({
-                  mode: 'single',
-                  rowIndex: Math.max(0, inspectorState.rowIndex - 1)
-                })
-              : undefined}
-            onNextRow={inspectorState.mode === 'single'
-              ? () => setInspectorState({
-                  mode: 'single',
-                  rowIndex: Math.min(currentRows.length - 1, inspectorState.rowIndex + 1)
-                })
-              : undefined}
-            canPrevRow={inspectorState.mode === 'single' && inspectorState.rowIndex > 0}
-            canNextRow={inspectorState.mode === 'single' && inspectorState.rowIndex < currentRows.length - 1}
-            onClose={() => setInspectorState(null)}
-          />
-        </div>
+        <GridRowInspector
+          maxHeight={tableHeight}
+          columns={normalizedColumnOrder.map((origIndex) => ({
+            name: result.columns[origIndex] ?? '',
+            dataType: columnType(origIndex) || null
+          }))}
+          rowA={orderedCurrentRows[inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA] ?? []}
+          rowALabel={`#${startIndex + (inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA) + 1}`}
+          rowB={inspectorState.mode === 'compare' ? (orderedCurrentRows[inspectorState.rowB] ?? []) : undefined}
+          rowBLabel={inspectorState.mode === 'compare'
+            ? `#${startIndex + inspectorState.rowB + 1}`
+            : undefined}
+          onCopyText={(text) => cells.copyText(text)}
+          onPrevRow={inspectorState.mode === 'single'
+            ? () => setInspectorState({
+                mode: 'single',
+                rowIndex: Math.max(0, inspectorState.rowIndex - 1)
+              })
+            : undefined}
+          onNextRow={inspectorState.mode === 'single'
+            ? () => setInspectorState({
+                mode: 'single',
+                rowIndex: Math.min(currentRows.length - 1, inspectorState.rowIndex + 1)
+              })
+            : undefined}
+          canPrevRow={inspectorState.mode === 'single' && inspectorState.rowIndex > 0}
+          canNextRow={inspectorState.mode === 'single' && inspectorState.rowIndex < currentRows.length - 1}
+          onClose={() => setInspectorState(null)}
+        />
       )}
       
     </div>
@@ -1304,48 +1356,50 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       </div>
 
       {contextTarget && (() => {
+        const origColIndex = normalizedColumnOrder[contextTarget.column] ?? contextTarget.column;
         const cellValue = contextTarget.row !== null
-          ? (currentRows[contextTarget.row]?.[contextTarget.column] ?? null)
+          ? (orderedCurrentRows[contextTarget.row]?.[contextTarget.column] ?? null)
           : null;
         const twoRows = selectedTwoRows(cells.selection);
         return (
         <GridContextMenu
           target={contextTarget}
-          columnName={result.columns[contextTarget.column]}
+          columnName={orderedColumns[contextTarget.column]}
           cellPreview={contextTarget.row !== null && cellValue !== null ? formatFilterPreview(cellValue) : undefined}
           onFilterEquals={
             contextTarget.row !== null && cellValue !== null
-              ? () => applyQuickResultFilter(contextTarget.column, 'eq', formatResultValue(cellValue))
+              ? () => applyQuickResultFilter(origColIndex, 'eq', formatResultValue(cellValue))
               : undefined
           }
           onFilterNotEquals={
             contextTarget.row !== null && cellValue !== null
-              ? () => applyQuickResultFilter(contextTarget.column, 'ne', formatResultValue(cellValue))
+              ? () => applyQuickResultFilter(origColIndex, 'ne', formatResultValue(cellValue))
               : undefined
           }
           onFilterIsNull={
             contextTarget.row !== null && cellValue === null
-              ? () => applyQuickResultFilter(contextTarget.column, 'is-null')
+              ? () => applyQuickResultFilter(origColIndex, 'is-null')
               : undefined
           }
           onFilterIsNotNull={
             contextTarget.row !== null && cellValue === null
-              ? () => applyQuickResultFilter(contextTarget.column, 'is-not-null')
+              ? () => applyQuickResultFilter(origColIndex, 'is-not-null')
               : undefined
           }
           onSelectColumn={(column) => cells.selectColumn(column)}
+          onResetColumnOrder={hasCustomColumnOrder ? () => setColumnOrder([]) : undefined}
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
           onCopyColumnValues={(column) => cells.copyColumn(column, false)}
           onCopyColumn={(column) => cells.copyColumn(column, true)}
           onCopyColumnSqlIn={(column) => {
-            const sqlIn = columnToSqlInList(currentRows, column, dialect);
+            const sqlIn = columnToSqlInList(orderedCurrentRows, column, dialect);
             if (sqlIn) {
               cells.selectColumn(column);
               cells.copyText(sqlIn);
             }
           }}
-          copyColumnSqlInDisabled={!hasNonNullColumnValue(currentRows, contextTarget.column)}
+          copyColumnSqlInDisabled={!hasNonNullColumnValue(orderedCurrentRows, contextTarget.column)}
           onExportColumn={
             totalRows > 0 ? (column) => setExportIntent({ columnIndex: column }) : undefined
           }
@@ -1357,7 +1411,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           }
           jumpTargets={
             contextTarget.row !== null && currentRows[contextTarget.row]
-              ? resolveCellJumps(currentRows[contextTarget.row], contextTarget.column)
+              ? resolveCellJumps(currentRows[contextTarget.row], origColIndex)
               : []
           }
           onJump={handleJump}
