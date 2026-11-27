@@ -162,3 +162,54 @@ describe('外键与来源表点击跳转', () => {
     ]);
   });
 });
+
+describe('单列复制与单列导出', () => {
+  it('右键表头可复制整列纯值、SQL IN，单列导出默认只选该列且覆盖全部已加载行', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    });
+
+    // 30 行超过默认每页 25 行，验证单列导出覆盖全部 30 行而不只是当前页
+    const rows = Array.from({ length: 30 }, (_, index) => [
+      index + 1,
+      `u_${index % 2}`
+    ]);
+    await render({
+      columns: ['id', 'user_id'],
+      rows,
+      affected_rows: 30,
+      execution_time: 3
+    });
+
+    const userHeader = [...container.querySelectorAll('th')].find((th) => th.textContent?.includes('user_id'));
+    if (!userHeader) throw new Error('没有 user_id 列头');
+
+    await act(async () => {
+      userHeader.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 15, clientY: 15 }));
+    });
+    const findMenu = (label: string) => {
+      const btn = [...document.querySelectorAll<HTMLButtonElement>('div.fixed button')]
+        .find((button) => button.firstElementChild?.textContent === label);
+      if (!btn) throw new Error(`没有菜单项 ${label}`);
+      return btn;
+    };
+
+    await act(async () => {
+      findMenu('Copy column as SQL IN (…)').click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith("('u_0', 'u_1')");
+
+    await act(async () => {
+      userHeader.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 15, clientY: 15 }));
+    });
+    await act(async () => {
+      findMenu('Export column user_id…').click();
+    });
+
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('user_id only (1 of 2)');
+    expect(dialog?.textContent).toContain('Rows: 30 · columns: 1');
+  });
+});

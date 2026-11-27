@@ -103,4 +103,27 @@ describe('整表导出的 SQL', () => {
     expect(buildTableExportQuery(request({ visibleColumns: [] }))).toBeNull();
     expect(buildTableExportQuery(request({ visibleColumns: [''] }))).toBeNull();
   });
+
+  it('开启 distinct 时用 SELECT DISTINCT 且 ORDER BY 只引用已投影的列', () => {
+    // 导出单列 name 时，主键 id 不在 SELECT DISTINCT 列表里——如果继续 ORDER BY id，
+    // PostgreSQL / MySQL ONLY_FULL_GROUP_BY / Oracle / SQL Server 都会直接报错
+    const sql = buildTableExportQuery(request({ visibleColumns: ['name'], distinct: true }));
+    expect(sql).toBe('SELECT DISTINCT "name" FROM "public"."orders" ORDER BY "name"');
+
+    // 用户正好按导出列倒序排时，保留倒序方向
+    const sorted = buildTableExportQuery(request({
+      visibleColumns: ['name', 'secret'],
+      sort: { column: 'secret', direction: 'desc' },
+      distinct: true
+    }));
+    expect(sorted).toBe('SELECT DISTINCT "name", "secret" FROM "public"."orders" ORDER BY "secret" DESC, "name"');
+
+    // 用户按未导出的 id 排序时，不把 id 带进 DISTINCT 的 ORDER BY
+    const unprojectedSort = buildTableExportQuery(request({
+      visibleColumns: ['name'],
+      sort: { column: 'id', direction: 'desc' },
+      distinct: true
+    }));
+    expect(unprojectedSort).toBe('SELECT DISTINCT "name" FROM "public"."orders" ORDER BY "name"');
+  });
 });

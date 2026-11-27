@@ -20,6 +20,29 @@ export interface TableExportQuery {
   paginationOrder: TablePaginationOrder | null;
   sort: ColumnSort | null;
   dialect: SqlIdentifierDialect;
+  /**
+   * 按导出的列去重（`SELECT DISTINCT`）。
+   *
+   * 开了去重之后，`ORDER BY` 只能引用投影里的列——PostgreSQL、MySQL `ONLY_FULL_GROUP_BY`、
+   * Oracle 与 SQL Server 都会拒绝按未投影的主键排序。
+   */
+  distinct?: boolean;
+}
+
+function createDistinctOrderClause(
+  selectedNames: readonly string[],
+  sort: ColumnSort | null,
+  dialect: SqlIdentifierDialect
+): string {
+  const ordered = sort && selectedNames.includes(sort.column)
+    ? [
+        `${quoteSqlIdentifier(sort.column, dialect)} ${sort.direction === 'desc' ? 'DESC' : 'ASC'}`,
+        ...selectedNames
+          .filter((name) => name !== sort.column)
+          .map((name) => quoteSqlIdentifier(name, dialect))
+      ]
+    : selectedNames.map((name) => quoteSqlIdentifier(name, dialect));
+  return ordered.length > 0 ? `ORDER BY ${ordered.join(', ')}` : '';
 }
 
 /**
@@ -46,12 +69,11 @@ export function buildTableExportQuery(request: TableExportQuery): string | null 
     return null;
   }
 
-  const projection = request.visibleColumns
-    .filter((name) => name.length > 0)
-    .map((name) => {
-      const column = request.columns.find((candidate) => candidate.name === name);
-      return column ? projectedColumn(column, request.dialect) : quoteSqlIdentifier(name, request.dialect);
-    });
+  const selectedNames = request.visibleColumns.filter((name) => name.length > 0);
+  const projection = selectedNames.map((name) => {
+    const column = request.columns.find((candidate) => candidate.name === name);
+    return column ? projectedColumn(column, request.dialect) : quoteSqlIdentifier(name, request.dialect);
+  });
   if (projection.length === 0) {
     return null;
   }
@@ -61,9 +83,12 @@ export function buildTableExportQuery(request: TableExportQuery): string | null 
     request.dialect
   );
   const whereClause = buildFilterClause(request.filters, request.columns, request.dialect);
-  const orderClause = createSortedOrderClause(request.paginationOrder, request.sort, request.dialect);
+  const orderClause = request.distinct
+    ? createDistinctOrderClause(selectedNames, request.sort, request.dialect)
+    : createSortedOrderClause(request.paginationOrder, request.sort, request.dialect);
+  const selectKeyword = request.distinct ? 'SELECT DISTINCT' : 'SELECT';
 
-  return [`SELECT ${projection.join(', ')}`, `FROM ${tableReference}`, whereClause, orderClause]
+  return [`${selectKeyword} ${projection.join(', ')}`, `FROM ${tableReference}`, whereClause, orderClause]
     .filter((part) => part.trim().length > 0)
     .join(' ');
 }

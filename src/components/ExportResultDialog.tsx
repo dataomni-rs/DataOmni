@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import clsx from 'clsx';
 import { HighlightedCode } from './HighlightedCode';
-import { Download, Loader2 } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Download, Loader2 } from 'lucide-react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import type { SqlDialect } from '../contracts/queryExecution';
 import type { SerializedResultValue } from '../contracts/resultSet';
 import {
   DEFAULT_EXPORT_OPTIONS,
+  projectExportColumns,
   serializeExport,
   suggestExportFileName,
+  suggestExportSourceName,
   toCsv,
   type CsvDelimiter,
   type ExportFormat,
@@ -34,7 +37,13 @@ export interface ExportScope {
   label: string;
   /** 范围说明：是哪一页、少了哪些列、会不会重新执行一遍查询 */
   note?: string;
+  /** 固定 SQL 的流式导出（如被截断的任意查询「完整结果」）；不支持再裁剪列 */
   sql?: string;
+  /**
+   * 按当前勾选的列与去重选项动态生成流式导出 SQL（表数据视图的「整张表」）。
+   * 返回 null 时说明当前组合无法生成合法 SQL，导出按钮随之下灰。
+   */
+  buildSql?: (selectedColumns: readonly string[], options: { distinct: boolean }) => string | null;
   /**
    * 这个范围自己的那份数据。不给就用对话框的 `columns` / `rows`。
    *
@@ -50,6 +59,8 @@ interface ExportResultDialogProps {
   rows: ReadonlyArray<readonly SerializedResultValue[]>;
   /** 用来起默认文件名：表名，或者标签页名 */
   sourceName: string;
+  /** 初始勾选的列下标（默认全部勾选；右键「导出这一列…」进入时只勾那一列） */
+  initialColumnIndexes?: readonly number[];
   /** 结果被行数/字节上限截断过——导出的是截断后的那份，必须说清楚 */
   truncated?: boolean;
   /** 服务端分页时，这里只有当前页的数据 */
@@ -93,10 +104,24 @@ const NULL_TEXTS: Array<{ value: string; labelKey?: TranslationKey; label?: stri
 
 const PREVIEW_ROWS = 3;
 
+function normalizeInitialColumnIndexes(
+  totalColumns: number,
+  initial?: readonly number[]
+): number[] {
+  const valid = (initial ?? []).filter(
+    (index) => Number.isInteger(index) && index >= 0 && index < totalColumns
+  );
+  if (valid.length > 0) {
+    return [...new Set(valid)].sort((a, b) => a - b);
+  }
+  return Array.from({ length: totalColumns }, (_, index) => index);
+}
+
 export function ExportResultDialog({
   columns,
   rows,
   sourceName,
+  initialColumnIndexes,
   truncated,
   scopeNote,
   scopes,
@@ -118,6 +143,11 @@ export function ExportResultDialog({
     sqlSequenceColumns
   });
   const [scopeId, setScopeId] = useState(scopes?.[0]?.id ?? '');
+  const [selectedIndexes, setSelectedIndexes] = useState<number[]>(() =>
+    normalizeInitialColumnIndexes(columns.length, initialColumnIndexes)
+  );
+  const [columnPickerOpen, setColumnPickerOpen] = useState(false);
+  const [distinct, setDistinct] = useState(false);
   const [writing, setWriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [written, setWritten] = useState<ExportSummary | null>(null);
@@ -130,10 +160,31 @@ export function ExportResultDialog({
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   const scope = scopes?.find((candidate) => candidate.id === scopeId) ?? scopes?.[0];
-  const streaming = Boolean(scope?.sql);
-  // 范围自带数据时一切都跟着它走：预览、右上角的行列数、写出去的内容
-  const activeColumns = scope?.columns ?? columns;
-  const activeRows = scope?.rows ?? rows;
+  const fixedSqlScope = Boolean(scope?.sql && !scope.buildSql);
+  const baseColumns = scope?.columns ?? columns;
+  const baseRows = scope?.rows ?? rows;
+  const canPickColumns = !fixedSqlScope && !scope?.columns && baseColumns.length > 1;
+  const canDistinct = !fixedSqlScope;
+  const effectiveDistinct = canDistinct && distinct;
+
+  const selectedSet = useMemo(() => new Set(selectedIndexes), [selectedIndexes]);
+  const projected = useMemo(() => {
+    const indexes = canPickColumns
+      ? selectedIndexes
+      : Array.from({ length: baseColumns.length }, (_, index) => index);
+    return projectExportColumns(baseColumns, baseRows, indexes, { distinct: effectiveDistinct });
+  }, [baseColumns, baseRows, canPickColumns, effectiveDistinct, selectedIndexes]);
+
+  const activeColumns = projected.columns;
+  const activeRows = projected.rows;
+  const resolvedSql = useMemo(() => {
+    if (scope?.buildSql) {
+      return scope.buildSql(activeColumns, { distinct: effectiveDistinct });
+    }
+    return scope?.sql ?? null;
+  }, [activeColumns, effectiveDistinct, scope]);
+  const streaming = Boolean(scope?.sql || scope?.buildSql);
+  const effectiveSourceName = suggestExportSourceName(sourceName, activeColumns, baseColumns.length);
   // 没有表名的 INSERT 是一句语法错误，别让它写进文件
   const missingTable = options.format === 'sql' && options.sqlTable.trim() === '';
 
@@ -171,6 +222,32 @@ export function ExportResultDialog({
     setError(null);
   };
 
+  const toggleColumn = (index: number) => {
+    setSelectedIndexes((current) => {
+      if (current.includes(index)) {
+        if (current.length <= 1) {
+          return current;
+        }
+        return current.filter((item) => item !== index);
+      }
+      return [...current, index].sort((a, b) => a - b);
+    });
+    setWritten(null);
+    setError(null);
+  };
+
+  const selectOnlyColumn = (index: number) => {
+    setSelectedIndexes([index]);
+    setWritten(null);
+    setError(null);
+  };
+
+  const selectAllColumns = () => {
+    setSelectedIndexes(Array.from({ length: baseColumns.length }, (_, index) => index));
+    setWritten(null);
+    setError(null);
+  };
+
   const runExport = async (path: string) => {
     setError(null);
     setWritten(null);
@@ -178,13 +255,16 @@ export function ExportResultDialog({
     setLastPath(path);
 
     try {
-      if (scope?.sql) {
+      if (streaming) {
+        if (!resolvedSql) {
+          return;
+        }
         // 整个范围的导出可能要跑几分钟，交给后台任务：进度、取消与重试都在那边，
         // 这个框关掉也不会打断它
         startTask({
           kind: 'export',
-          ...taskTitleFields('task.title.export', { name: sourceName }),
-          payload: { connectionId: connectionId ?? '', sql: scope.sql, path, options }
+          ...taskTitleFields('task.title.export', { name: effectiveSourceName }),
+          payload: { connectionId: connectionId ?? '', sql: resolvedSql, path, options }
         });
         onClose();
         return;
@@ -204,7 +284,7 @@ export function ExportResultDialog({
 
   const handleExport = async () => {
     const path = await save({
-      defaultPath: suggestExportFileName(sourceName, options.format),
+      defaultPath: suggestExportFileName(effectiveSourceName, options.format),
       filters: [
         options.format === 'csv'
           ? { name: 'CSV', extensions: ['csv'] }
@@ -250,11 +330,15 @@ export function ExportResultDialog({
         </div>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
-          {(truncated || scope?.note || scopeNote) && (
+          {(truncated || scope?.note || scopeNote || (streaming && effectiveDistinct)) && (
             <p className="rounded-control border border-warning-line bg-warning-soft px-3 py-2 text-xs text-warning">
-              {truncated && t('export.truncated')}
-              {truncated && (scope?.note ?? scopeNote) && ' '}
-              {scope?.note ?? scopeNote}
+              {[
+                truncated ? t('export.truncated') : null,
+                scope?.note ?? scopeNote ?? null,
+                streaming && effectiveDistinct ? t('export.distinctStreamNote') : null
+              ]
+                .filter((part): part is string => Boolean(part))
+                .join(' ')}
             </p>
           )}
 
@@ -271,6 +355,108 @@ export function ExportResultDialog({
                   setWritten(null);
                   setError(null);
                 }}
+              />
+            </Field>
+          )}
+
+          {canPickColumns && (
+            <Field label={t('export.columns')}>
+              <div className="rounded-control border border-line-strong bg-surface">
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setColumnPickerOpen((open) => !open)}
+                    aria-expanded={columnPickerOpen}
+                    aria-label={t('export.columnsToggle')}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-xs text-fg"
+                  >
+                    {columnPickerOpen ? (
+                      <ChevronDown size={13} className="shrink-0 text-fg-muted" />
+                    ) : (
+                      <ChevronRight size={13} className="shrink-0 text-fg-muted" />
+                    )}
+                    <span className="truncate">
+                      {activeColumns.length === baseColumns.length
+                        ? t('export.columnsAll', { count: baseColumns.length })
+                        : activeColumns.length === 1
+                          ? t('export.columnsSingle', {
+                              column: activeColumns[0] ?? '',
+                              total: baseColumns.length
+                            })
+                          : t('export.columnsSelected', {
+                              selected: activeColumns.length,
+                              total: baseColumns.length
+                            })}
+                    </span>
+                  </button>
+                  {activeColumns.length < baseColumns.length && (
+                    <button
+                      type="button"
+                      onClick={selectAllColumns}
+                      className="shrink-0 rounded-control px-1.5 py-0.5 text-xs text-accent hover:bg-accent-soft"
+                    >
+                      {t('export.columnsSelectAll')}
+                    </button>
+                  )}
+                </div>
+
+                {columnPickerOpen && (
+                  <div className="max-h-40 overflow-y-auto border-t border-line py-1">
+                    {baseColumns.map((name, index) => {
+                      const checked = selectedSet.has(index);
+                      const isLast = checked && activeColumns.length <= 1;
+                      return (
+                        <div
+                          key={`${name}-${index}`}
+                          className="flex items-center justify-between gap-2 px-2.5 py-1 hover:bg-surface-hover"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleColumn(index)}
+                            disabled={isLast}
+                            title={isLast ? t('columns.lastVisible') : name}
+                            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs text-fg disabled:opacity-50"
+                          >
+                            <span
+                              className={clsx(
+                                'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border',
+                                checked
+                                  ? 'border-accent bg-accent-soft text-accent'
+                                  : 'border-line-strong'
+                              )}
+                            >
+                              {checked && <Check size={10} />}
+                            </span>
+                            <span className="truncate font-mono">{name}</span>
+                          </button>
+                          {!(checked && activeColumns.length === 1) && (
+                            <button
+                              type="button"
+                              onClick={() => selectOnlyColumn(index)}
+                              className="shrink-0 rounded-control px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-accent-soft hover:text-accent"
+                            >
+                              {t('export.columnsOnly')}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </Field>
+          )}
+
+          {canDistinct && (
+            <Field label={t('export.distinct')}>
+              <Checkbox
+                checked={distinct}
+                onChange={(next) => {
+                  setDistinct(next);
+                  setWritten(null);
+                  setError(null);
+                }}
+                label={t('export.distinctLabel')}
               />
             </Field>
           )}
@@ -415,7 +601,7 @@ export function ExportResultDialog({
           <button
             type="button"
             onClick={handleExport}
-            disabled={writing || missingTable || (!streaming && rows.length === 0)}
+            disabled={writing || missingTable || (streaming ? !resolvedSql : activeRows.length === 0)}
             className="flex shrink-0 items-center gap-1.5 rounded-control bg-accent px-3 py-1.5 text-sm text-fg-on-accent hover:opacity-90 disabled:opacity-50"
           >
             {writing && <Loader2 size={14} className="animate-spin" />}

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   columnSelection,
+  columnToSqlInList,
+  hasNonNullColumnValue,
   isCellMoveKey,
   isWithinSelection,
   moveSelection,
@@ -304,5 +306,33 @@ describe('selectionSubset', () => {
       focus: { row: 2, column: 0 }
     });
     expect(subset.rows).toEqual([[1]]);
+  });
+});
+
+describe('columnToSqlInList / hasNonNullColumnValue', () => {
+  it('字符串按方言转义、去重并跳过 NULL，保持首次出现次序', () => {
+    const rows = [
+      ['u1', { type: 'bigint' as const, value: '65237956096425' }],
+      [null, { type: 'bigint' as const, value: '65237956448747' }],
+      ["O'Brien", { type: 'bigint' as const, value: '65237956096425' }],
+      ['u1', null]
+    ];
+    expect(columnToSqlInList(rows, 0, 'mysql')).toBe("('u1', 'O''Brien')");
+    expect(columnToSqlInList(rows, 1, 'mysql')).toBe('(65237956096425, 65237956448747)');
+  });
+
+  it('布尔列按不同方言生成对应字面量', () => {
+    const rows = [[true], [false], [true]];
+    expect(columnToSqlInList(rows, 0, 'postgresql')).toBe('(TRUE, FALSE)');
+    expect(columnToSqlInList(rows, 0, 'sqlserver')).toBe('(1, 0)');
+  });
+
+  it('整列全为 NULL 或越界时返回 null，hasNonNullColumnValue 为 false', () => {
+    const rows = [[null], [null]];
+    expect(hasNonNullColumnValue(rows, 0)).toBe(false);
+    expect(hasNonNullColumnValue(rows, -1)).toBe(false);
+    expect(columnToSqlInList(rows, 0, 'postgresql')).toBeNull();
+    expect(columnToSqlInList([], 0, 'postgresql')).toBeNull();
+    expect(columnToSqlInList([[1]], -1, 'postgresql')).toBeNull();
   });
 });

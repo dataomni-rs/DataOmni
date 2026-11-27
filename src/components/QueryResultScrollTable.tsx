@@ -50,7 +50,7 @@ import { GridContextMenu, type GridContextTarget } from './GridContextMenu';
 import { ColumnSortButton } from './ColumnSortButton';
 import { nextColumnSort, sortRowsByColumn, type ColumnSort } from '../utils/resultSorting';
 import { useCellSelection } from '../hooks/useCellSelection';
-import { selectionSubset } from '../utils/cellSelection';
+import { columnToSqlInList, hasNonNullColumnValue, selectionSubset } from '../utils/cellSelection';
 import { supportsFeature } from '../contracts/databaseSupport';
 import { useLanguageStore } from '../stores/languageStore';
 import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
@@ -125,7 +125,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   // 新增行状态
   const [showAddForm, setShowAddForm] = useState(false);
   const [newRowData, setNewRowData] = useState<Record<string, CellInput>>({});
-  const [showExport, setShowExport] = useState(false);
+  const [exportIntent, setExportIntent] = useState<{ columnIndex?: number } | null>(null);
   const [showChart, setShowChart] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showAnalyze, setShowAnalyze] = useState(false);
@@ -244,7 +244,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
         sql: resultSql
       });
     }
-    if (cells.selection) {
+    if (exportIntent?.columnIndex === undefined && cells.selection) {
       const subset = selectionSubset(currentRows, result.columns, cells.selection);
       list.unshift({
         id: 'selection',
@@ -258,7 +258,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       });
     }
     return list;
-  }, [cells.selection, currentRows, dialect, result.columns, result.truncated, resultSql, t]);
+  }, [cells.selection, currentRows, dialect, exportIntent?.columnIndex, result.columns, result.truncated, resultSql, t]);
 
   const profileSource = useMemo<DataProfileSource>(
     () => ({
@@ -601,7 +601,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                 <span>{t('result.chart')}</span>
               </button>
               <button
-                onClick={() => setShowExport(true)}
+                onClick={() => setExportIntent({})}
                 disabled={totalRows === 0}
                 className="flex items-center gap-1 rounded-control border border-line-strong px-3 py-1.5 text-sm text-fg hover:bg-surface-hover disabled:opacity-50"
                 title={t('result.exportCurrent')}
@@ -644,11 +644,14 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       )}
 
       {/* 导出的是排序后的整份结果，不是当前这一页——用户看到的次序就是文件里的次序 */}
-      {showExport && (
+      {exportIntent && (
         <ExportResultDialog
           columns={result.columns}
           rows={sortedRows}
           sourceName={editability?.editable ? editability.table : t('result.queryResult')}
+          initialColumnIndexes={
+            exportIntent.columnIndex !== undefined ? [exportIntent.columnIndex] : undefined
+          }
           truncated={result.truncated}
           connectionId={connectionId ?? undefined}
           sqlDialect={dialect}
@@ -659,7 +662,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           // 只在结果真被截断时才给「完整结果」这一档。没截断时内存里的就是全部，
           // 再跑一遍数据库只是白付一次查询的代价。
           scopes={exportScopes}
-          onClose={() => setShowExport(false)}
+          onClose={() => setExportIntent(null)}
         />
       )}
 
@@ -718,6 +721,15 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                 {result.columns.map((column, index) => (
                   <th
                     key={index}
+                    onContextMenu={totalRows > 0 ? (event) => {
+                      event.preventDefault();
+                      setContextTarget({
+                        row: null,
+                        column: index,
+                        x: event.clientX,
+                        y: event.clientY
+                      });
+                    } : undefined}
                     className={clsx(
                       'relative border-r border-line text-left text-xs font-medium text-fg',
                       densityClass
@@ -1019,11 +1031,25 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       {contextTarget && (
         <GridContextMenu
           target={contextTarget}
+          columnName={result.columns[contextTarget.column]}
+          onSelectColumn={(column) => cells.selectColumn(column)}
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
+          onCopyColumnValues={(column) => cells.copyColumn(column, false)}
           onCopyColumn={(column) => cells.copyColumn(column, true)}
+          onCopyColumnSqlIn={(column) => {
+            const sqlIn = columnToSqlInList(currentRows, column, dialect);
+            if (sqlIn) {
+              cells.selectColumn(column);
+              cells.copyText(sqlIn);
+            }
+          }}
+          copyColumnSqlInDisabled={!hasNonNullColumnValue(currentRows, contextTarget.column)}
+          onExportColumn={
+            totalRows > 0 ? (column) => setExportIntent({ columnIndex: column }) : undefined
+          }
           jumpTargets={
-            currentRows[contextTarget.row]
+            contextTarget.row !== null && currentRows[contextTarget.row]
               ? resolveCellJumps(currentRows[contextTarget.row], contextTarget.column)
               : []
           }

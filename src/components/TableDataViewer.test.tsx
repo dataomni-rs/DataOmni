@@ -366,3 +366,66 @@ describe('TableDataViewer（外键跳转预填筛选）', () => {
     expect(sent.join('\n')).toContain('"id" = 42');
   });
 });
+
+describe('TableDataViewer（单列复制与单列导出）', () => {
+  it('右键表头只显示整列动作，并支持复制纯值、SQL IN 与单列导出', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    });
+    readQuery.mockImplementation(async (sql: string) => (
+      sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 3 }]
+        : [
+            { id: 1, fs: 'a', note: 'alpha' },
+            { id: 2, fs: 'b', note: 'beta' },
+            { id: 3, fs: 'c', note: 'alpha' }
+          ]
+    ));
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    const noteHeader = [...container.querySelectorAll('th')].find((th) => th.textContent?.includes('note'));
+    if (!noteHeader) throw new Error('没有 note 列头');
+
+    await act(async () => {
+      noteHeader.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    expect(menuLabels()).toEqual([
+      'Select column',
+      'Copy column values',
+      'Copy column with its name',
+      'Copy column as SQL IN (…)',
+      'Export column note…'
+    ]);
+
+    // 复制整列（仅值）：不带列名表头
+    await act(async () => {
+      menuItem('Copy column values').click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith('alpha\nbeta\nalpha');
+
+    // 复制为 SQL IN (...)：去重并按方言加引号
+    await act(async () => {
+      noteHeader.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      menuItem('Copy column as SQL IN (…)').click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith("('alpha', 'beta')");
+
+    // 右键列头导出这一列：打开导出对话框且预选为仅 note 列
+    await act(async () => {
+      noteHeader.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      menuItem('Export column note…').click();
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('note only (1 of 3)');
+    expect(dialog?.querySelector('pre')?.textContent).toBe('note\nalpha\nbeta\nalpha');
+  });
+});
