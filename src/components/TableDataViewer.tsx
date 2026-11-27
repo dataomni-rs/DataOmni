@@ -59,7 +59,7 @@ import { buildTableSampleQuery } from '../utils/tableSampleQuery';
 import { nextColumnSort, type ColumnSort } from '../utils/resultSorting';
 import { ColumnSortButton } from './ColumnSortButton';
 import { useCellSelection } from '../hooks/useCellSelection';
-import { selectionSubset } from '../utils/cellSelection';
+import { columnToSqlInList, hasNonNullColumnValue, selectionSubset } from '../utils/cellSelection';
 import { editColumnWidth, headerBadgeWidth, toPositionalRows } from '../utils/columnWidths';
 import { columnEditorKind } from '../utils/columnEditors';
 import { useResizableColumns } from '../hooks/useResizableColumns';
@@ -230,7 +230,7 @@ export default function TableDataViewer({
   // 不在渲染体里用 appliedFilters 覆盖它——外部 store（如跳转消费）先触发一次渲染时，
   // 旧的 appliedFilters 会把刚写进 ref 的筛选条件冲回空数组。所有改动都在 setAppliedFilters 旁同步更新。
   const appliedFiltersRef = useRef<ColumnFilter[]>([]);
-  const [showExport, setShowExport] = useState(false);
+  const [exportIntent, setExportIntent] = useState<{ columnIndex?: number } | null>(null);
   const [showChart, setShowChart] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showAnalyze, setShowAnalyze] = useState(false);
@@ -883,34 +883,13 @@ export default function TableDataViewer({
   const hiddenColumnsNote =
     hiddenColumns.size > 0 ? ` ${t('export.scopeHiddenColumns', { count: hiddenColumns.size })}` : '';
 
-  /** 整表导出用的 SQL。与网格取数同源，只是不分页——见 buildTableExportQuery。 */
-  const wholeTableExportSql = React.useMemo(() => {
-    if (!tableSchema || tableSchemaKey !== currentTableKey) {
-      return null;
-    }
-    return buildTableExportQuery({
-      schema,
-      table: tableName,
-      columns: tableSchema.columns,
-      visibleColumns: visibleIndexes.map((index) => columnNames[index] ?? ''),
-      filters: appliedFilters,
-      paginationOrder,
-      sort,
-      dialect
-    });
-  }, [
-    tableSchema,
-    tableSchemaKey,
-    currentTableKey,
-    schema,
-    tableName,
-    dialect,
-    visibleIndexes,
-    columnNames,
-    appliedFilters,
-    paginationOrder,
-    sort
-  ]);
+  const canStreamWholeTable = Boolean(
+    tableSchema
+      && tableSchemaKey === currentTableKey
+      && paginationOrder
+      && visibleIndexes.length > 0
+      && supportsFeature(dialect, 'streamingExport')
+  );
   const frozenOffsets = frozenLeftOffsets(visibleWidths, frozenCount);
   // 冻结区的最后一列画一道粗边：没有分界线时，滚过去的内容看上去是凭空消失的，
   // 而不是被压在冻住的列下面
@@ -988,7 +967,8 @@ export default function TableDataViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importFinishedAt]);
 
-  // 选中的部分排在最前面：框选之后再点导出，想导的就是它
+  // 选中的部分排在最前面：框选之后再点导出，想导的就是它；
+  // 右键「导出这一列…」进入时不塞入旧选区，避免用户本想导整列却被单格选区劫持
   const exportScopes = React.useMemo(() => {
     const list: ExportScope[] = [
       {
@@ -1002,15 +982,25 @@ export default function TableDataViewer({
           }) + hiddenColumnsNote
       }
     ];
-    if (wholeTableExportSql && supportsFeature(dialect, 'streamingExport')) {
+    if (canStreamWholeTable && tableSchema) {
       list.push({
         id: 'table',
         label: t('export.scope.wholeTable'),
         note: t('export.scope.wholeTableNote', { count: totalRows }) + hiddenColumnsNote,
-        sql: wholeTableExportSql
+        buildSql: (selectedColumns, { distinct }) => buildTableExportQuery({
+          schema,
+          table: tableName,
+          columns: tableSchema.columns,
+          visibleColumns: selectedColumns,
+          filters: appliedFilters,
+          paginationOrder,
+          sort,
+          dialect,
+          distinct
+        })
       });
     }
-    if (cells.selection) {
+    if (exportIntent?.columnIndex === undefined && cells.selection) {
       const subset = selectionSubset(visibleRows, visibleColumnNames, cells.selection);
       list.unshift({
         id: 'selection',
@@ -1025,16 +1015,23 @@ export default function TableDataViewer({
     }
     return list;
   }, [
+    appliedFilters,
+    canStreamWholeTable,
     cells.selection,
     currentPage,
     dialect,
+    exportIntent?.columnIndex,
     hiddenColumnsNote,
+    paginationOrder,
+    schema,
+    sort,
     t,
     tableData.length,
+    tableName,
+    tableSchema,
     totalRows,
     visibleColumnNames,
-    visibleRows,
-    wholeTableExportSql
+    visibleRows
   ]);
 
 
@@ -1686,7 +1683,7 @@ export default function TableDataViewer({
                     </button>
 
                     <button
-                      onClick={() => setShowExport(true)}
+                      onClick={() => setExportIntent({})}
                       disabled={tableData.length === 0}
                       className="flex items-center space-x-1 px-3 py-1.5 text-sm text-fg border border-line-strong rounded-control hover:bg-surface-hover transition-colors disabled:opacity-50"
                       title={t('export.exportCurrentPage')}
@@ -1908,6 +1905,15 @@ export default function TableDataViewer({
                                 // 冻结列自己接管 sticky：thead 的 sticky top 只管纵向，
                                 // 横向要在每个 th 上单独钉住，并压过后面滚过来的列
                                 style={frozenLeft === null ? undefined : { left: `${frozenLeft}px` }}
+                                onContextMenu={(event) => {
+                                  event.preventDefault();
+                                  setContextTarget({
+                                    row: null,
+                                    column: visiblePosition,
+                                    x: event.clientX,
+                                    y: event.clientY
+                                  });
+                                }}
                                 className={clsx(
                                   'relative border-r border-line px-2 py-1 text-left text-xs font-medium text-fg',
                                   frozenLeft !== null && 'sticky top-0 z-30 bg-surface-sunken',
@@ -2151,16 +2157,34 @@ export default function TableDataViewer({
       {contextTarget && (
         <GridContextMenu
           target={contextTarget}
+          columnName={visibleColumnNames[contextTarget.column]}
+          onSelectColumn={(column) => cells.selectColumn(column)}
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
+          onCopyColumnValues={(column) => cells.copyColumn(column, false)}
           onCopyColumn={(column) => cells.copyColumn(column, true)}
+          onCopyColumnSqlIn={(column) => {
+            const sqlIn = columnToSqlInList(visibleRows, column, dialect);
+            if (sqlIn) {
+              cells.selectColumn(column);
+              cells.copyText(sqlIn);
+            }
+          }}
+          copyColumnSqlInDisabled={!hasNonNullColumnValue(visibleRows, contextTarget.column)}
+          onExportColumn={(column) => setExportIntent({ columnIndex: column })}
           // 与操作列给「编辑」按钮的条件相同：排了队的行只能撤销
           onEditRow={
-            editable && editState.mode === 'view' && !pendingFor(tableData[contextTarget.row] ?? {})
+            contextTarget.row !== null
+              && editable
+              && editState.mode === 'view'
+              && !pendingFor(tableData[contextTarget.row] ?? {})
               ? startEditRow
               : undefined
           }
           jumpTargets={(() => {
+            if (contextTarget.row === null) {
+              return [];
+            }
             const colName = visibleColumnNames[contextTarget.column];
             const row = tableData[contextTarget.row];
             return colName && row ? resolveRowCellJumps(row, colName) : [];
@@ -2202,11 +2226,14 @@ export default function TableDataViewer({
         />
       )}
 
-      {showExport && (
+      {exportIntent && (
         <ExportResultDialog
-          columns={visibleIndexes.map((index) => columnNames[index] ?? '')}
+          columns={visibleColumnNames}
           rows={visibleRows}
           sourceName={tableName}
+          initialColumnIndexes={
+            exportIntent.columnIndex !== undefined ? [exportIntent.columnIndex] : undefined
+          }
           connectionId={connection.id}
           sqlDialect={dialect}
           sqlTable={tableName}
@@ -2216,7 +2243,7 @@ export default function TableDataViewer({
           // 导出跟着可见列走，否则藏起来的列会在文件里冒出来。两个范围各自把
           // 话说全：少了哪几列、是这一页还是整张表，用户不该打开文件才发现
           scopes={exportScopes}
-          onClose={() => setShowExport(false)}
+          onClose={() => setExportIntent(null)}
         />
       )}
 

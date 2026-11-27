@@ -1,4 +1,6 @@
+import type { SqlDialect } from '../contracts/queryExecution';
 import type { SerializedResultValue } from '../contracts/resultSet';
+import { sqlLiteral } from './exportResult';
 import { formatResultValue } from './resultValues';
 
 export interface CellPosition {
@@ -288,4 +290,46 @@ export function selectionSubset(
   }
 
   return { columns: picked, rows: picks };
+}
+
+/** 这一列里是否至少有一个非 NULL 值：用来决定「复制为 SQL IN (...)」能不能点 */
+export function hasNonNullColumnValue(
+  rows: readonly (readonly SerializedResultValue[])[],
+  columnIndex: number
+): boolean {
+  if (columnIndex < 0) {
+    return false;
+  }
+  return rows.some((row) => (row[columnIndex] ?? null) !== null);
+}
+
+/**
+ * 把一列的值拼成 SQL `IN` 子句右侧的列表，例如 `('a', 'b')` 或 `(1, 2)`。
+ *
+ * - 跳过 `NULL`：`col IN (..., NULL)` 永远匹配不到 `NULL`，在 `NOT IN` 里还会让整条条件恒假。
+ * - 按首次出现次序去重：同一页里重复的 `user_id` 贴进查询只会制造噪音。
+ * - 全为 `NULL` 或空列返回 `null`，调用方禁用动作，不把剪贴板覆写成无意义的 `()`。
+ */
+export function columnToSqlInList(
+  rows: readonly (readonly SerializedResultValue[])[],
+  columnIndex: number,
+  dialect: SqlDialect
+): string | null {
+  if (columnIndex < 0) {
+    return null;
+  }
+  const seen = new Set<string>();
+  const literals: string[] = [];
+  for (const row of rows) {
+    const value = row[columnIndex] ?? null;
+    if (value === null) {
+      continue;
+    }
+    const literal = sqlLiteral(value, dialect);
+    if (!seen.has(literal)) {
+      seen.add(literal);
+      literals.push(literal);
+    }
+  }
+  return literals.length > 0 ? `(${literals.join(', ')})` : null;
 }

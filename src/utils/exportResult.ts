@@ -290,6 +290,59 @@ export function suggestExportFileName(
   return `${base}-${stamp}.${format}`;
 }
 
+/**
+ * 从整份结果里切出选中的列；开了 `distinct` 时按投影后的整行去重（保首次出现次序）。
+ *
+ * 按列下标而不是列名切：SQL 查询结果允许出现重名列（如 `SELECT a.id, b.id`），
+ * 按下标切两列互不干扰。
+ */
+export function projectExportColumns(
+  columns: readonly string[],
+  rows: ReadonlyArray<readonly SerializedResultValue[]>,
+  selectedIndexes: readonly number[],
+  options: { distinct?: boolean } = {}
+): { columns: string[]; rows: SerializedResultValue[][] } {
+  const validIndexes = [...new Set(selectedIndexes)]
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < columns.length)
+    .sort((a, b) => a - b);
+
+  const projectedColumns = validIndexes.map((index) => columns[index] ?? '');
+  const projectedRows: SerializedResultValue[][] = [];
+  const seen = options.distinct ? new Set<string>() : null;
+
+  for (const row of rows) {
+    const picked = validIndexes.map((index) => row[index] ?? null);
+    if (seen) {
+      const key = JSON.stringify(picked);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+    }
+    projectedRows.push(picked);
+  }
+
+  return { columns: projectedColumns, rows: projectedRows };
+}
+
+/**
+ * 仅导出多列表里的单列时把列名拼进默认文件名前缀（如 `claw_user-user_id`），
+ * 连续导出几列时文件彼此区分得开。本来就只有一列的结果不再重复拼一次。
+ */
+export function suggestExportSourceName(
+  source: string,
+  selectedColumns: readonly string[],
+  totalColumns: number
+): string {
+  if (selectedColumns.length === 1 && totalColumns > 1) {
+    const column = selectedColumns[0]?.trim() ?? '';
+    if (column.length > 0) {
+      return `${source}-${column}`;
+    }
+  }
+  return source;
+}
+
 function csvField(value: SerializedResultValue, nullText: string): string {
   if (value === null) {
     return nullText;

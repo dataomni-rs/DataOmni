@@ -29,8 +29,12 @@ export interface CellSelectionController {
   /** 焦点格：方向键从它出发，视觉上描一圈边框 */
   isFocused: (row: number, column: number) => boolean;
   selectCell: (row: number, column: number, extend?: boolean) => void;
+  /** 选中整列（例如表头右键「选中整列」） */
+  selectColumn: (column: number) => void;
   /** 复制当前选区；`withHeaders` 在最前面加一行列名 */
   copy: (withHeaders?: boolean) => void;
+  /** 把任意格式化好的文本写入剪贴板，共用同一套失败提示（如整列 SQL IN 列表） */
+  copyText: (text: string) => void;
   /**
    * 选中并复制整行 / 整列。
    *
@@ -85,13 +89,7 @@ export function useCellSelection(
   const columnsRef = useRef(columns);
   columnsRef.current = columns;
 
-  const copySelection = useCallback(async (current: CellSelection, withHeaders = false) => {
-    const text = selectionToClipboardText(
-      rowsRef.current,
-      current,
-      withHeaders ? { headers: columnsRef.current } : {}
-    );
-
+  const writeClipboard = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
       setCopyError(null);
@@ -100,6 +98,15 @@ export function useCellSelection(
       setCopyError(describeError(cause, translateNow('common.copyFailed')));
     }
   }, []);
+
+  const copySelection = useCallback(async (current: CellSelection, withHeaders = false) => {
+    const text = selectionToClipboardText(
+      rowsRef.current,
+      current,
+      withHeaders ? { headers: columnsRef.current } : {}
+    );
+    await writeClipboard(text);
+  }, [writeClipboard]);
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
     // 格子里正开着编辑框时，按键归编辑框：方向键挪光标、⌘A 全选文字、⌘C 复制
@@ -179,11 +186,20 @@ export function useCellSelection(
         focus: { row, column }
       }));
     }, []),
+    selectColumn: useCallback((column) => {
+      const next = columnSelection(column, { rowCount, columnCount });
+      if (next) {
+        setSelection(next);
+      }
+    }, [rowCount, columnCount]),
     copy: useCallback((withHeaders = false) => {
       if (selection) {
         void copySelection(selection, withHeaders);
       }
     }, [selection, copySelection]),
+    copyText: useCallback((text) => {
+      void writeClipboard(text);
+    }, [writeClipboard]),
     copyRow: useCallback((row, withHeaders = false) => {
       const next = rowSelection(row, { rowCount, columnCount });
       if (next) {

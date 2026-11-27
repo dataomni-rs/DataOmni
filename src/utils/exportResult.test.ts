@@ -5,9 +5,11 @@ import {
   DEFAULT_EXPORT_OPTIONS,
   computedColumnNames,
   alwaysIdentityColumnNames,
+  projectExportColumns,
   sequenceColumnNames,
   serializeExport,
   suggestExportFileName,
+  suggestExportSourceName,
   toCsv,
   toJson,
   uniqueColumnNames
@@ -217,5 +219,40 @@ describe('computedColumnNames', () => {
       column('rowid', { default_value: 'unique_rowid()' }),
       column('twice', { is_generated: true })
     ])).toEqual(['id', 'legacy']);
+  });
+});
+
+describe('projectExportColumns / suggestExportSourceName', () => {
+  const columns = ['id', 'user_id', 'id'];
+  const rows: SerializedResultValue[][] = [
+    [1, 'u1', 100],
+    [2, 'u2', 200],
+    [3, 'u1', 300],
+    [4, null, 400],
+    [5, '', 500],
+    [6, null, 600]
+  ];
+
+  it('按列下标切出单列或多列，重名列互不干扰', () => {
+    const thirdOnly = projectExportColumns(columns, rows, [2]);
+    expect(thirdOnly.columns).toEqual(['id']);
+    expect(thirdOnly.rows).toEqual([[100], [200], [300], [400], [500], [600]]);
+
+    // 传入乱序、重复与越界下标时归一为升序有效列
+    const multi = projectExportColumns(columns, rows, [2, 0, 2, 99, -1]);
+    expect(multi.columns).toEqual(['id', 'id']);
+    expect(multi.rows[0]).toEqual([1, 100]);
+  });
+
+  it('开启 distinct 时按投影后的行去重，区分 null 与空串并保序', () => {
+    const projected = projectExportColumns(columns, rows, [1], { distinct: true });
+    expect(projected.columns).toEqual(['user_id']);
+    expect(projected.rows).toEqual([['u1'], ['u2'], [null], ['']]);
+  });
+
+  it('从多列表导出单列时把列名拼进默认文件名前缀，单列表不重复拼', () => {
+    expect(suggestExportSourceName('claw_user', ['user_id'], 3)).toBe('claw_user-user_id');
+    expect(suggestExportSourceName('claw_user', ['id', 'user_id'], 3)).toBe('claw_user');
+    expect(suggestExportSourceName('claw_user', ['user_id'], 1)).toBe('claw_user');
   });
 });
