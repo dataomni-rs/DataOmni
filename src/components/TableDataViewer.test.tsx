@@ -216,14 +216,14 @@ describe('TableDataViewer（ClickHouse）', () => {
       root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
     });
     await act(async () => {
-      byTitle('note: click to sort ascending').click();
+      byTitle('note: click to sort ascending (Shift+click to add secondary sort)').click();
     });
 
     expect(container.textContent).toContain('not allowed in ORDER BY keys');
     expect(container.textContent).toContain('note');
     // 行回来了，表头还在、排序已取消
     expect([...container.querySelectorAll('input, td')].some((cell) => cell.textContent === 'x')).toBe(true);
-    byTitle('note: click to sort ascending');
+    byTitle('note: click to sort ascending (Shift+click to add secondary sort)');
     const dataQueries = readQuery.mock.calls.map(([sql]) => sql as string).filter((sql) => !sql.startsWith('SELECT COUNT(*)'));
     expect(dataQueries[dataQueries.length - 1]).not.toContain('ORDER BY `note`');
   });
@@ -244,7 +244,7 @@ describe('TableDataViewer（ClickHouse）', () => {
     expect(container.textContent).toContain('Committed 1 change.');
 
     await act(async () => {
-      byTitle('note: click to sort ascending').click();
+      byTitle('note: click to sort ascending (Shift+click to add secondary sort)').click();
     });
     expect(container.textContent).not.toContain('Committed 1 change.');
   });
@@ -427,5 +427,71 @@ describe('TableDataViewer（单列复制与单列导出）', () => {
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain('note only (1 of 3)');
     expect(dialog?.querySelector('pre')?.textContent).toBe('note\nalpha\nbeta\nalpha');
+  });
+
+  it('支持右键按单元格快速筛选、选区统计条、多列排序与双行对比侧栏', async () => {
+    const sent: string[] = [];
+    readQuery.mockImplementation(async (sql: string) => {
+      sent.push(sql);
+      return sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 3 }]
+        : [
+            { id: 10, fs: 'a', note: 'alpha' },
+            { id: 20, fs: 'b', note: 'beta' },
+            { id: 30, fs: 'c', note: 'alpha' }
+          ];
+    });
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    // 1. 选区实时统计（框选 id 列的 10 与 20）
+    const rows = [...container.querySelectorAll('tbody tr')];
+    const idCell0 = rows[0]?.querySelectorAll('td')[0];
+    const idCell1 = rows[1]?.querySelectorAll('td')[0];
+    if (!idCell0 || !idCell1) throw new Error('没有找到 id 单元格');
+    await act(async () => {
+      idCell0.click();
+    });
+    await act(async () => {
+      idCell1.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    });
+    const statsBar = container.querySelector('[data-testid="grid-selection-stats"]');
+    expect(statsBar?.textContent).toContain('2 cells');
+    expect(statsBar?.textContent).toContain('Sum: 30');
+    expect(statsBar?.textContent).toContain('Avg: 15');
+
+    // 2. 选中 2 行后右键对比两行差异
+    await act(async () => {
+      idCell1.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      menuItem('Compare selected 2 rows').click();
+    });
+    const inspector = container.querySelector('[data-testid="grid-row-inspector"]');
+    expect(inspector?.textContent).toContain('Compare #1 vs #2');
+    expect(inspector?.textContent).toContain('3 differing fields');
+
+    // 3. 右键单元格「按当前值快速筛选」直接发服务端 WHERE
+    const noteCell0 = rows[0]?.querySelectorAll('td')[2];
+    if (!noteCell0) throw new Error('没有 note 单元格');
+    await act(async () => {
+      noteCell0.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      menuItem('Filter = alpha').click();
+    });
+    expect(sent.some((sql) => sql.includes("WHERE `note` = 'alpha'"))).toBe(true);
+
+    // 4. Shift+点击第二列实现多列组合排序
+    await act(async () => {
+      byTitle('note: click to sort ascending (Shift+click to add secondary sort)').click();
+    });
+    await act(async () => {
+      byTitle('fs: click to sort ascending (Shift+click to add secondary sort)')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    });
+    expect(sent.some((sql) => sql.includes('ORDER BY `note` ASC, `fs` ASC'))).toBe(true);
   });
 });

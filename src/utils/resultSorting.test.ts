@@ -4,7 +4,9 @@ import {
   compareDecimalStrings,
   compareResultValues,
   nextColumnSort,
-  sortRowsByColumn
+  nextColumnSorts,
+  sortRowsByColumn,
+  sortRowsByColumns
 } from './resultSorting';
 
 const bigint = (value: string) => ({ type: 'bigint' as const, value });
@@ -201,5 +203,46 @@ describe('表头点击三态', () => {
   it('点击另一列从该列的升序重新开始', () => {
     expect(nextColumnSort({ column: 'id', direction: 'desc' }, 'name'))
       .toEqual({ column: 'name', direction: 'asc' });
+  });
+});
+
+describe('多列组合排序（Shift+点击）', () => {
+  it('普通点击单列循环，Shift+点击追加并单独循环次级列', () => {
+    let sorts = nextColumnSorts([], 'status', false);
+    expect(sorts).toEqual([{ column: 'status', direction: 'asc' }]);
+
+    sorts = nextColumnSorts(sorts, 'id', true);
+    expect(sorts).toEqual([
+      { column: 'status', direction: 'asc' },
+      { column: 'id', direction: 'asc' }
+    ]);
+
+    sorts = nextColumnSorts(sorts, 'id', true);
+    expect(sorts).toEqual([
+      { column: 'status', direction: 'asc' },
+      { column: 'id', direction: 'desc' }
+    ]);
+
+    sorts = nextColumnSorts(sorts, 'id', true);
+    expect(sorts).toEqual([{ column: 'status', direction: 'asc' }]);
+  });
+
+  it('按主次列依次比较并保持 NULL 在末尾', () => {
+    const columns = ['group', 'score'];
+    const rows: SerializedResultValue[][] = [
+      ['b', 1],
+      ['a', 10],
+      ['a', null],
+      ['a', 20]
+    ];
+    expect(sortRowsByColumns(columns, rows, [
+      { column: 'group', direction: 'asc' },
+      { column: 'score', direction: 'desc' }
+    ])).toEqual([
+      ['a', 20],
+      ['a', 10],
+      ['a', null],
+      ['b', 1]
+    ]);
   });
 });

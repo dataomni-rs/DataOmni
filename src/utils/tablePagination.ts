@@ -167,19 +167,28 @@ function createOrder(
  */
 export function createSortedOrderClause(
   paginationOrder: TablePaginationOrder,
-  sort: ColumnSort | null,
+  sort: ColumnSort | readonly ColumnSort[] | null,
   dialect: SqlIdentifierDialect
 ): string {
-  if (!sort) {
+  const sorts = sort === null ? [] : (Array.isArray(sort) ? sort : [sort]);
+  if (sorts.length === 0) {
     return paginationOrder.clause;
   }
 
-  const direction = sort.direction === 'asc' ? 'ASC' : 'DESC';
-  const terms = [`${quoteSqlIdentifier(sort.column, dialect)} ${direction}`];
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const item of sorts) {
+    if (seen.has(item.column)) {
+      continue;
+    }
+    seen.add(item.column);
+    const direction = item.direction === 'asc' ? 'ASC' : 'DESC';
+    terms.push(`${quoteSqlIdentifier(item.column, dialect)} ${direction}`);
+  }
 
   for (const column of paginationOrder.columns) {
-    // 排序列已经在最前面了，不重复追加
-    if (column === sort.column) {
+    // 排序列已经在前面了，不重复追加
+    if (seen.has(column)) {
       continue;
     }
     // rowid / ctid / ROWID 是伪列，createTablePaginationOrder 生成时就没加引号

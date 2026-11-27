@@ -212,4 +212,86 @@ describe('单列复制与单列导出', () => {
     expect(dialog?.textContent).toContain('user_id only (1 of 2)');
     expect(dialog?.textContent).toContain('Rows: 30 · columns: 1');
   });
+
+  it('支持查询结果右键快速筛选、即时查找过滤、选区聚合与行详情对比', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    });
+
+    await render({
+      columns: ['id', 'status', 'amount'],
+      rows: [
+        [1, 'paid', 10.5],
+        [2, 'failed', 20.5],
+        [3, 'paid', 30]
+      ],
+      affected_rows: 3,
+      execution_time: 2
+    });
+
+    // 1. 选区实时统计（框选 amount 列 3 行）
+    const amountHeader = [...container.querySelectorAll('th')].find((th) => th.textContent?.includes('amount'));
+    if (!amountHeader) throw new Error('没有 amount 列头');
+    await act(async () => {
+      amountHeader.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    const findMenu = (label: string) => {
+      const btn = [...document.querySelectorAll<HTMLButtonElement>('div.fixed button')]
+        .find((button) => button.firstElementChild?.textContent === label);
+      if (!btn) throw new Error(`没有菜单项 ${label}`);
+      return btn;
+    };
+    await act(async () => {
+      findMenu('Select column').click();
+    });
+    const statsBar = container.querySelector('[data-testid="grid-selection-stats"]');
+    expect(statsBar?.textContent).toContain('3 cells');
+    expect(statsBar?.textContent).toContain('Sum: 61');
+
+    // 点击求和即可复制数值
+    const sumBtn = [...(statsBar?.querySelectorAll('button') ?? [])]
+      .find((btn) => btn.textContent?.includes('Sum: 61'));
+    if (!sumBtn) throw new Error('没有求和按钮');
+    await act(async () => {
+      sumBtn.click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith('61');
+
+    // 2. 右键单元格「筛选 = paid」即时筛选加载结果并展示筛选标签
+    const paidCell = container.querySelectorAll('tbody tr')[0]?.querySelectorAll('td')[1];
+    if (!paidCell) throw new Error('没有 status 单元格');
+    await act(async () => {
+      paidCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      findMenu('Filter = paid').click();
+    });
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(2);
+    expect(container.querySelector('[data-testid="result-quick-filters"]')?.textContent).toContain('Filtered 2 / 3');
+
+    // 3. 点「Clear filters」恢复全部 3 行，再打开 Find 栏按关键词过滤
+    const clearBtn = [...container.querySelectorAll('button')].find((btn) => btn.textContent === 'Clear filters');
+    if (!clearBtn) throw new Error('没有 Clear filters 按钮');
+    await act(async () => {
+      clearBtn.click();
+    });
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(3);
+
+    const findBtn = [...container.querySelectorAll('button')].find((btn) => btn.textContent === 'Find');
+    if (!findBtn) throw new Error('没有 Find 按钮');
+    await act(async () => {
+      findBtn.click();
+    });
+    const findInput = container.querySelector<HTMLInputElement>('[data-testid="grid-find-bar"] input');
+    if (!findInput) throw new Error('没有查找输入框');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    await act(async () => {
+      setter?.call(findInput, 'failed');
+      findInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="grid-find-bar"]')?.textContent).toContain('1 / 3 matched');
+  });
 });

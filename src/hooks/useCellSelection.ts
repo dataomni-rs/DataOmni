@@ -66,14 +66,22 @@ export interface CellSelectionController {
  * @param datasetKey 标识「这是哪一份数据」。刷新时保持不变，翻页 / 改排序 /
  *   改筛选 / 换表时必须变——选区的去留全看它，见 `retainSelection`
  */
+export interface CellSelectionShortcuts {
+  onFind?: () => void;
+  onFillDown?: () => void;
+}
+
 export function useCellSelection(
   rows: readonly (readonly SerializedResultValue[])[],
   columns: readonly string[],
-  datasetKey: string
+  datasetKey: string,
+  extraShortcuts?: CellSelectionShortcuts
 ): CellSelectionController {
   const columnCount = columns.length;
   const [selection, setSelection] = useState<CellSelection | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const extraShortcutsRef = useRef(extraShortcuts);
+  extraShortcutsRef.current = extraShortcuts;
 
   const rowCount = rows.length;
 
@@ -150,6 +158,18 @@ export function useCellSelection(
     if (matchesShortcut(event, SHORTCUTS.selectAll)) {
       event.preventDefault();
       setSelection(selectAllCells({ rowCount, columnCount }));
+      return;
+    }
+
+    if (matchesShortcut(event, SHORTCUTS.findInGrid) && extraShortcutsRef.current?.onFind) {
+      event.preventDefault();
+      extraShortcutsRef.current.onFind();
+      return;
+    }
+
+    if (matchesShortcut(event, SHORTCUTS.fillDown) && extraShortcutsRef.current?.onFillDown) {
+      event.preventDefault();
+      extraShortcutsRef.current.onFillDown();
       return;
     }
 

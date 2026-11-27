@@ -171,6 +171,8 @@ export const SHORTCUTS = {
   saveToFile: { key: 's', mod: true },
   saveAsFile: { key: 's', mod: true, shift: true },
   formatSql: { key: 'f', mod: true, shift: true },
+  findInGrid: { key: 'f', mod: true },
+  fillDown: { key: 'd', mod: true },
   copySelection: { key: 'c', mod: true },
   copyWithHeaders: { key: 'c', mod: true, shift: true },
   selectAll: { key: 'a', mod: true },
