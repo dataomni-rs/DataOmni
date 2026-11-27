@@ -1485,6 +1485,22 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-3-2",
+    toc_label: "v1.3.2 (2026-11-27)",
+    heading: "v1.3.2 — 2026-11-27",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Adds single-column copy, dialect-aware SQL IN list generation, and multi-column / DISTINCT export across table and query result grids, alongside RustSec security updates.",
+      ),
+      DocBlock::Bullets(&[
+        "Single-column copy & SQL IN (…) shortcuts: right-clicking any column header or cell in Table Data or SQL Query Results now offers Select column, Copy column values (values only or with header), Copy column as SQL IN (…) (dialect-aware literal quoting, skipping NULL and preserving first-seen deduplicated order), and Export column….",
+        "Column picker & DISTINCT export: the export dialog now includes a collapsible column picker (arbitrary multi-select, one-click Only / Select all, and index-based projection safe for duplicate SQL column names) plus a DISTINCT toggle; single-column exports automatically append the column name to default filenames and background task labels.",
+        "Dialect-safe whole-table DISTINCT streaming: whole-table streaming exports dynamically rebuild SQL from the chosen columns and DISTINCT toggle, narrowing ORDER BY to projected columns when DISTINCT is enabled so PostgreSQL, MySQL ONLY_FULL_GROUP_BY, Oracle, and SQL Server all execute cleanly.",
+        "Security & engineering fixes: upgraded Rust dependencies url to 2.5.9 (RUSTSEC-2026-0592) and cookie to 0.18.3 (RUSTSEC-2026-0594), hardened CI clippy -D warnings and opt-in odbc gates, and synchronized user manuals and installation checklists.",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-3-1",
     toc_label: "v1.3.1 (2026-11-22)",
     heading: "v1.3.1 — 2026-11-22",
@@ -1616,7 +1632,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.1 through v1.0.0 across macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.2 through v1.0.0 across macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1625,6 +1641,22 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-3-2",
+    toc_label: "v1.3.2（2026-11-27）",
+    heading: "v1.3.2 — 2026-11-27",
+    blocks: &[
+      DocBlock::Paragraph(
+        "增强表格与查询结果网格的单列复制、SQL IN 列表提取及按列 / DISTINCT 去重导出能力，并同步修复 Rust 依赖安全公告与工程门禁。",
+      ),
+      DocBlock::Bullets(&[
+        "单列快捷复制与 SQL IN (…) 提取：表数据视图与 SQL 查询结果的列头及单元格右键菜单新增「选中整列」「复制整列（仅值 / 含列名）」「复制整列为 SQL IN (…)」（按当前数据库方言转义字面量、跳过 NULL 并保序去重）以及「导出列…」直达入口。",
+        "导出对话框选列与 DISTINCT 去重：新增折叠式「导出列」选择器（支持任意勾选、一键「仅此列」与「全选」，按列下标投影兼容重名 SQL 列）及 DISTINCT 去重开关；仅导出单列时默认文件名与后台任务名自动附带列名。",
+        "跨方言整表流式去重导出：表数据「整张表」流式导出按所选列与 DISTINCT 动态生成 SQL，开启去重时 ORDER BY 自动收敛至已投影列，完整兼容 PostgreSQL、MySQL ONLY_FULL_GROUP_BY、Oracle 与 SQL Server 等关系库方言。",
+        "依赖安全与工程修复：升级 Rust 依赖 url 至 2.5.9（修复 RUSTSEC-2026-0592）与 cookie 至 0.18.3（修复 RUSTSEC-2026-0594），加固 CI clippy -D warnings 与可选 odbc 特性门禁，并同步用户手册与安装检查清单。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-3-1",
     toc_label: "v1.3.1（2026-11-22）",
@@ -1757,7 +1789,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.3.1、v1.3.0 与 v1.2.x 至 v1.0.0 正式版能力更新、国产库与真库回归覆盖、安全加固细节与配置文件前后向兼容说明。",
+  meta_description: "DataOmni v1.3.2、v1.3.1 与 v1.3.0 至 v1.0.0 正式版能力更新、单列导出与真库回归覆盖、安全加固细节与配置文件前后向兼容说明。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
