@@ -166,6 +166,8 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   /** 表格本身的高度。量它而不是量滚动容器的 scrollHeight——后者会被我们
       刚设上去的高度影响，自己量自己就成了循环 */
   const tableContentRef = useRef<HTMLDivElement>(null);
+  /** 底部区域（选区聚合状态栏 + 分页条），扣除其高度避免把统计条挤出可视区 */
+  const footerRef = useRef<HTMLDivElement>(null);
   const [tableHeight, setTableHeight] = useState(FALLBACK_RESULT_TABLE_HEIGHT);
   
   // 换一条结果集时清掉旧的客户端筛选、排序与详情抽屉，避免列下标错位
@@ -602,8 +604,10 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     }
 
     const measure = () => {
+      const footerHeight = footerRef.current?.offsetHeight ?? 0;
       const available = pane.getBoundingClientRect().bottom
         - scroller.getBoundingClientRect().top
+        - footerHeight
         - RESULT_PANE_BOTTOM_GAP;
       setTableHeight(resultTableHeight(available, content.offsetHeight));
     };
@@ -612,6 +616,9 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     const observer = new ResizeObserver(measure);
     observer.observe(pane);
     observer.observe(content);
+    if (footerRef.current) {
+      observer.observe(footerRef.current);
+    }
     return () => observer.disconnect();
     // 换一份结果、翻页、改列宽都会让内容高度变，ResizeObserver 会跟着报，
     // 这里只需要在组件换了结果时重新挂一次。
@@ -626,7 +633,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const returnsRows = result.columns.length > 0;
 
   return (
-    <div className="border rounded-panel overflow-hidden bg-surface relative">
+    <div className="border rounded-panel overflow-clip bg-surface relative">
       {/* 头部信息栏 */}
       <div className="px-4 py-3 bg-surface-sunken border-b flex items-center justify-between">
         {/* 窄窗口（半屏笔记本）里：行数、耗时这类事实不许折行，提示文字截成一行、
@@ -911,7 +918,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
               ))}
               {canEdit && <col style={{ width: `${ACTION_COLUMN_WIDTH}px` }} />}
             </colgroup>
-            <thead>
+            <thead className="sticky top-0 z-20 bg-surface-sunken">
               <tr className="bg-surface-sunken border-b border-line">
                 {result.columns.map((column, index) => (
                   <th
@@ -926,7 +933,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                       });
                     } : undefined}
                     className={clsx(
-                      'relative border-r border-line text-left text-xs font-medium text-fg',
+                      'relative select-none border-r border-line text-left text-xs font-medium text-fg',
                       densityClass
                     )}
                   >
@@ -944,35 +951,36 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                               setSorts((current) => nextColumnSorts(current, column, append));
                               setCurrentPage(1);
                             }}
-                          />
+                          >
+                            <div className="flex min-w-0 flex-1 flex-col">
+                              <span className="truncate">{column}</span>
+                              {result.column_metadata?.[index] && (
+                                // 去掉逐格类型标签后这里是唯一显示类型的地方，
+                                // 窄列会截断，所以挂个 title 让悬停能看全
+                                <span
+                                  className="truncate text-[10px] font-normal text-fg-subtle"
+                                  title={`${columnType(index)} · ${
+                                    result.column_metadata[index].nullable === null
+                                      ? t('result.nullUnknown')
+                                      : result.column_metadata[index].nullable ? 'NULL' : 'NOT NULL'
+                                  }`}
+                                >
+                                  {columnType(index)}
+                                  {' · '}
+                                  {result.column_metadata[index].nullable === null
+                                    ? t('result.nullUnknown')
+                                    : result.column_metadata[index].nullable
+                                      ? 'NULL'
+                                      : 'NOT NULL'}
+                                </span>
+                              )}
+                            </div>
+                            {keyColumns.has(column) && (
+                              <span className="shrink-0 text-warning" title={t('schema.primaryKey')}>🔑</span>
+                            )}
+                          </ColumnSortButton>
                         );
                       })()}
-                      <div className="flex min-w-0 flex-col">
-                        <span className="truncate" title={column}>{column}</span>
-                        {result.column_metadata?.[index] && (
-                          // 去掉逐格类型标签后这里是唯一显示类型的地方，
-                          // 窄列会截断，所以挂个 title 让悬停能看全
-                          <span
-                            className="truncate text-[10px] font-normal text-fg-subtle"
-                            title={`${columnType(index)} · ${
-                              result.column_metadata[index].nullable === null
-                                ? t('result.nullUnknown')
-                                : result.column_metadata[index].nullable ? 'NULL' : 'NOT NULL'
-                            }`}
-                          >
-                            {columnType(index)}
-                            {' · '}
-                            {result.column_metadata[index].nullable === null
-                              ? t('result.nullUnknown')
-                              : result.column_metadata[index].nullable
-                                ? 'NULL'
-                                : 'NOT NULL'}
-                          </span>
-                        )}
-                      </div>
-                      {keyColumns.has(column) && (
-                        <span className="shrink-0 text-warning" title={t('schema.primaryKey')}>🔑</span>
-                      )}
                     </div>
                     <ColumnResizeHandle
                       active={resizingIndex === index}
@@ -1063,6 +1071,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                         key={cellIndex}
                         className={clsx(
                           'relative border-r border-line font-mono text-[13px]',
+                          !isEditing && 'select-none',
                           densityClass,
                           alignments[cellIndex] === 'right' && 'text-right',
                           inlineJump && 'group/cell',
@@ -1072,13 +1081,34 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                           cells.isFocused(rowIndex, cellIndex) && 'outline outline-1 -outline-offset-1 outline-accent',
                           canEdit && !isEditing && !generatedColumns.has(result.columns[cellIndex]) && 'cursor-pointer'
                         )}
+                        onMouseDown={(event) => {
+                          if (isEditing || event.button !== 0) {
+                            return;
+                          }
+                          if (event.target instanceof HTMLElement && event.target.closest('button, a, input, textarea, select')) {
+                            return;
+                          }
+                          if (hasCommandModifier(event) && inlineJump) {
+                            return;
+                          }
+                          if (event.shiftKey) {
+                            event.preventDefault();
+                          }
+                          event.currentTarget.closest<HTMLElement>('[tabindex="0"]')?.focus({ preventScroll: true });
+                          cells.beginDragSelection(rowIndex, cellIndex, event.shiftKey);
+                        }}
+                        onMouseEnter={(event) => {
+                          if (!isEditing) {
+                            cells.updateDragSelection(rowIndex, cellIndex, (event.buttons & 1) === 1);
+                          }
+                        }}
                         onClick={(event) => {
                           if (hasCommandModifier(event) && inlineJump) {
                             event.preventDefault();
                             handleJump(inlineJump);
                             return;
                           }
-                          cells.selectCell(rowIndex, cellIndex, event.shiftKey);
+                          cells.handleCellClick(rowIndex, cellIndex, event.shiftKey);
                         }}
                         onContextMenu={(event) => {
                           event.preventDefault();
@@ -1199,18 +1229,17 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       
     </div>
 
-      {selectionSummary && (
-        <GridSelectionStatsBar
-          summary={selectionSummary}
-          onCopyValue={(value) => cells.copyText(value)}
-        />
-      )}
-      
+      <div ref={footerRef} className="sticky bottom-0 z-20 bg-surface">
+        {selectionSummary && (
+          <GridSelectionStatsBar
+            summary={selectionSummary}
+            onCopyValue={(value) => cells.copyText(value)}
+          />
+        )}
 
-      
-      {/* 分页控件 */}
-      {totalPages > 1 && (
-        <div className="px-4 py-3 bg-surface-sunken border-t flex items-center justify-between">
+        {/* 分页控件 */}
+        {totalPages > 1 && (
+          <div className="px-4 py-3 bg-surface-sunken border-t flex items-center justify-between">
           <div className="flex items-center space-x-2">
             <span className="text-sm text-fg">
               {t('result.range', { from: startIndex + 1, to: endIndex, total: totalRows })}
@@ -1272,6 +1301,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           </div>
         </div>
       )}
+      </div>
 
       {contextTarget && (() => {
         const cellValue = contextTarget.row !== null

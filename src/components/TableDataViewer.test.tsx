@@ -494,4 +494,54 @@ describe('TableDataViewer（单列复制与单列导出）', () => {
     });
     expect(sent.some((sql) => sql.includes('ORDER BY `note` ASC, `fs` ASC'))).toBe(true);
   });
+
+  it('鼠标拖拽可选中任意连续矩形选区，且右键复制选区保留整块选区内容', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    });
+    readQuery.mockImplementation(async (sql: string) => (
+      sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 3 }]
+        : [
+            { id: 10, fs: 'a1', note: 'n1' },
+            { id: 20, fs: 'b2', note: 'n2' },
+            { id: 30, fs: 'c3', note: 'n3' }
+          ]
+    ));
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    const rows = [...container.querySelectorAll('tbody tr')];
+    const startCell = rows[0]?.querySelectorAll('td')[1]; // (row 0, col 1: fs = a1)
+    const endCell = rows[1]?.querySelectorAll('td')[2];   // (row 1, col 2: note = n2)
+    if (!startCell || !endCell) throw new Error('未找到拖拽起止单元格');
+
+    await act(async () => {
+      startCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 }));
+    });
+    await act(async () => {
+      // React 的 onMouseEnter 监听的是 mouseover（或 mouseenter），在 happy-dom 中派发 mouseover
+      endCell.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, buttons: 1 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0 }));
+    });
+
+    // 选区应为 2x2（4 格），且不能把第 0 行的 id 列卷进去
+    const statsBar = container.querySelector('[data-testid="grid-selection-stats"]');
+    expect(statsBar?.textContent).toContain('4 cells');
+
+    // 右键选区内部格并点「Copy selection」，应复制 2x2 矩形而非单格
+    await act(async () => {
+      endCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    await act(async () => {
+      menuItem('Copy selection').click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith('a1\tn1\nb2\tn2');
+  });
 });

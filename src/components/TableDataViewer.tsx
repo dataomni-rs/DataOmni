@@ -271,8 +271,8 @@ export default function TableDataViewer({
    * 那样发的是原子的一条，TiDB 上被整条拒绝、什么都不改
    */
   const [serverVersion, setServerVersion] = useState<string | null>(null);
+  // 与 appliedFiltersRef 同理：不在渲染体里用 sorts 覆盖它，避免并发重渲染把刚写入的多列排序冲回旧值
   const sortsRef = useRef<ColumnSort[]>([]);
-  sortsRef.current = sorts;
   const [totalRows, setTotalRows] = useState(0);
   const [paginationOrder, setPaginationOrder] = useState<TablePaginationOrder | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'data');
@@ -535,7 +535,8 @@ export default function TableDataViewer({
   const loadTableData = async (
     page: number = 1,
     requestedPageSize: number = pageSize,
-    freshSchema?: TableSchema
+    freshSchema?: TableSchema,
+    requestedSorts?: readonly ColumnSort[]
   ) => {
     if (!await ensureDatabaseConnection()) return;
     
@@ -607,7 +608,7 @@ export default function TableDataViewer({
           + pageClause(createSortedOrderClause(order, columnSorts, dialect), limitValue, offsetValue, dialect)
       );
 
-      const failedSorts = sortsRef.current;
+      const failedSorts = requestedSorts ?? sortsRef.current;
       try {
         setTableData(takeRowPositions(await runReadQuery(dataQuery(failedSorts))));
       } catch (sortError) {
@@ -1416,6 +1417,8 @@ export default function TableDataViewer({
     searchMatched = false,
     searchActive = false,
     onSelect,
+    onBeginDrag,
+    onDragEnter,
     onContextMenu,
     inlineJump = null,
     onJump
@@ -1445,6 +1448,8 @@ export default function TableDataViewer({
     searchMatched?: boolean;
     searchActive?: boolean;
     onSelect?: (extend: boolean) => void;
+    onBeginDrag?: (extend: boolean) => void;
+    onDragEnter?: (primaryButtonDown: boolean) => void;
     onContextMenu?: (event: React.MouseEvent) => void;
     inlineJump?: ResolvedCellJump | null;
     onJump?: (jump: ResolvedCellJump) => void;
@@ -1455,6 +1460,25 @@ export default function TableDataViewer({
       // 显示时统一交给 formatResultValue 还原成人能读的形式
       return (
         <td
+          onMouseDown={(event) => {
+            if (event.button !== 0) {
+              return;
+            }
+            if (event.target instanceof HTMLElement && event.target.closest('button, a, input, textarea, select')) {
+              return;
+            }
+            if (hasCommandModifier(event) && inlineJump && onJump) {
+              return;
+            }
+            if (event.shiftKey) {
+              event.preventDefault();
+            }
+            event.currentTarget.closest<HTMLElement>('[tabindex="0"]')?.focus({ preventScroll: true });
+            onBeginDrag?.(event.shiftKey);
+          }}
+          onMouseEnter={(event) => {
+            onDragEnter?.((event.buttons & 1) === 1);
+          }}
           onClick={(event) => {
             if (hasCommandModifier(event) && inlineJump && onJump) {
               event.preventDefault();
@@ -1466,7 +1490,7 @@ export default function TableDataViewer({
           onContextMenu={onContextMenu}
           style={frozenLeft === null ? undefined : { left: `${frozenLeft}px` }}
           className={clsx(
-            'border-r border-line font-mono text-[13px] text-fg',
+            'select-none border-r border-line font-mono text-[13px] text-fg',
             densityClass,
             align === 'right' && 'text-right',
             inlineJump && 'group/cell',
@@ -2086,7 +2110,7 @@ export default function TableDataViewer({
                                   });
                                 }}
                                 className={clsx(
-                                  'relative border-r border-line px-2 py-1 text-left text-xs font-medium text-fg',
+                                  'relative select-none border-r border-line px-2 py-1 text-left text-xs font-medium text-fg',
                                   frozenLeft !== null && 'sticky top-0 z-30 bg-surface-sunken',
                                   visiblePosition === lastFrozenPosition && 'border-r-2 border-r-line-strong'
                                 )}
@@ -2106,24 +2130,26 @@ export default function TableDataViewer({
                                           setSorts(next);
                                           sortsRef.current = next;
                                           setCurrentPage(1);
-                                          void loadTableData(1);
+                                          void loadTableData(1, pageSize, undefined, next);
                                         }}
-                                      />
+                                      >
+                                        <div className="flex min-w-0 flex-1 flex-col">
+                                          <div className="flex min-w-0 items-center gap-1">
+                                            <span className="truncate">{column.name}</span>
+                                            {column.is_primary_key && (
+                                              <span className="shrink-0 text-warning" title={t('table.column.primaryKey')}>🔑</span>
+                                            )}
+                                            {!column.is_nullable && (
+                                              <span className="shrink-0 text-danger" title={t('table.notNull')}>*</span>
+                                            )}
+                                          </div>
+                                          <span className="truncate text-[10px] font-normal text-fg-subtle">
+                                            {column.data_type}
+                                          </span>
+                                        </div>
+                                      </ColumnSortButton>
                                     );
                                   })()}
-                                  <span className="truncate" title={column.name}>{column.name}</span>
-                                  {column.is_primary_key && (
-                                    <span className="shrink-0 text-warning" title={t('table.column.primaryKey')}>🔑</span>
-                                  )}
-                                  {!column.is_nullable && (
-                                    <span className="shrink-0 text-danger" title={t('table.notNull')}>*</span>
-                                  )}
-                                </div>
-                                <div
-                                  className="truncate text-[10px] font-normal text-fg-subtle"
-                                  title={column.data_type}
-                                >
-                                  {column.data_type}
                                 </div>
                                 <ColumnResizeHandle
                                   active={resizingIndex === index}
@@ -2186,7 +2212,9 @@ export default function TableDataViewer({
                                   searchActive:
                                     activeFindMatch?.row === rowIndex
                                     && activeFindMatch?.column === visiblePosition,
-                                  onSelect: (extend) => cells.selectCell(rowIndex, visiblePosition, extend),
+                                  onSelect: (extend) => cells.handleCellClick(rowIndex, visiblePosition, extend),
+                                  onBeginDrag: (extend) => cells.beginDragSelection(rowIndex, visiblePosition, extend),
+                                  onDragEnter: (primaryButtonDown) => cells.updateDragSelection(rowIndex, visiblePosition, primaryButtonDown),
                                   inlineJump,
                                   onJump: handleJump,
                                   onContextMenu: (event) => {

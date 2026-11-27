@@ -259,6 +259,29 @@ describe('单列复制与单列导出', () => {
     });
     expect(writeText).toHaveBeenLastCalledWith('61');
 
+    // 1b. 鼠标拖拽矩形选区（status + amount 两列的前两行）并右键复制选区
+    const bodyRows = [...container.querySelectorAll('tbody tr')];
+    const dragStart = bodyRows[0]?.querySelectorAll('td')[1];
+    const dragEnd = bodyRows[1]?.querySelectorAll('td')[2];
+    if (!dragStart || !dragEnd) throw new Error('未找到拖拽单元格');
+    await act(async () => {
+      dragStart.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 }));
+    });
+    await act(async () => {
+      dragEnd.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, buttons: 1 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0 }));
+    });
+    expect(container.querySelector('[data-testid="grid-selection-stats"]')?.textContent).toContain('4 cells');
+    await act(async () => {
+      dragEnd.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      findMenu('Copy selection').click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith('paid\t10.5\nfailed\t20.5');
+
     // 2. 右键单元格「筛选 = paid」即时筛选加载结果并展示筛选标签
     const paidCell = container.querySelectorAll('tbody tr')[0]?.querySelectorAll('td')[1];
     if (!paidCell) throw new Error('没有 status 单元格');

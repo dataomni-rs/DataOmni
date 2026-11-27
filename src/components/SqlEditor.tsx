@@ -1120,7 +1120,7 @@ const SqlStatementCard: React.FC<SqlStatementCardProps> = ({
   const extraResultSets = statement.result?.extra_result_sets ?? [];
 
   return (
-    <div className="border border-line rounded-panel overflow-hidden">
+    <div className="border border-line rounded-panel overflow-clip">
       {/* 语句头部 */}
       <div className="flex items-center justify-between gap-2 border-b border-line bg-surface-sunken px-2.5 py-1">
         <div className="flex min-w-0 items-center gap-2">

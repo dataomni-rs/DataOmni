@@ -59,24 +59,43 @@ export function GridSelectionStatsBar({ summary, onCopyValue }: GridSelectionSta
 
   return (
     <div
-      className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 border-t border-line bg-surface-sunken px-3 py-1 text-xs text-fg-muted"
+      className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-accent-line/50 bg-accent-soft/40 px-3 py-1 text-xs text-fg"
       data-testid="grid-selection-stats"
     >
-      {chips.map((chip) => (
-        <button
-          key={chip.key}
-          type="button"
-          onClick={() => {
-            onCopyValue(chip.copyValue);
-            setCopiedKey(chip.key);
-          }}
-          title={t('grid.stats.clickToCopy', { value: chip.copyValue })}
-          className="inline-flex items-center gap-1 rounded-control px-1.5 py-0.5 font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface-hover hover:text-fg"
-        >
-          <span>{chip.label}</span>
-          {copiedKey === chip.key && <Check size={11} className="text-success" />}
-        </button>
-      ))}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        {chips.slice(0, 1).map((chip) => (
+          <button
+            key={chip.key}
+            type="button"
+            onClick={() => {
+              onCopyValue(chip.copyValue);
+              setCopiedKey(chip.key);
+            }}
+            title={t('grid.stats.clickToCopy', { value: chip.copyValue })}
+            className="inline-flex items-center gap-1 rounded-control bg-accent-soft px-1.5 py-0.5 font-mono text-[11px] font-medium text-accent transition-colors hover:bg-surface-hover"
+          >
+            <span>{chip.label}</span>
+            {copiedKey === chip.key && <Check size={11} className="text-success" />}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
+        {chips.slice(1).map((chip) => (
+          <button
+            key={chip.key}
+            type="button"
+            onClick={() => {
+              onCopyValue(chip.copyValue);
+              setCopiedKey(chip.key);
+            }}
+            title={t('grid.stats.clickToCopy', { value: chip.copyValue })}
+            className="inline-flex items-center gap-1 rounded-control px-1.5 py-0.5 font-mono text-[11px] text-fg-muted transition-colors hover:bg-surface-hover hover:text-fg"
+          >
+            <span>{chip.label}</span>
+            {copiedKey === chip.key && <Check size={11} className="text-success" />}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
