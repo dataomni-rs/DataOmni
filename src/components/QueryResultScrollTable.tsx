@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useMemo, useState, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,7 +13,9 @@ import {
   Database,
   Lock,
   Undo2,
-  ArrowUpRight
+  ArrowUpRight,
+  Search,
+  X
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
@@ -48,16 +50,36 @@ import { headerBadgeWidth } from '../utils/columnWidths';
 import { StagedCellValue } from './GridCellValue';
 import { GridContextMenu, type GridContextTarget } from './GridContextMenu';
 import { ColumnSortButton } from './ColumnSortButton';
-import { nextColumnSort, sortRowsByColumn, type ColumnSort } from '../utils/resultSorting';
+import { nextColumnSorts, sortRowsByColumns, type ColumnSort } from '../utils/resultSorting';
 import { useCellSelection } from '../hooks/useCellSelection';
 import { columnToSqlInList, hasNonNullColumnValue, selectionSubset } from '../utils/cellSelection';
+import { summarizeSelection } from '../utils/selectionStats';
+import {
+  filterResultRows,
+  findGridMatches,
+  formatFilterPreview,
+  upsertResultCellFilter,
+  type ResultCellFilter,
+  type ResultCellFilterOperator
+} from '../utils/gridSearch';
+import { selectedTwoRows } from '../utils/rowInspector';
+import { formatResultValue } from '../utils/resultValues';
+import { GridSelectionStatsBar } from './GridSelectionStatsBar';
+import { GridFindBar } from './GridFindBar';
+import { GridRowInspector } from './GridRowInspector';
 import { supportsFeature } from '../contracts/databaseSupport';
 import { useLanguageStore } from '../stores/languageStore';
 import { ExportResultDialog, type ExportScope } from './ExportResultDialog';
 import { ResultChartDialog } from './ResultChartDialog';
 import { DataProfileDialog, type DataProfileSource } from './DataProfileDialog';
 import { LocalAnalyticsDialog, type LocalAnalyticsSource } from './LocalAnalyticsDialog';
-import { DENSITY_CELL_CLASS } from '../utils/gridColumns';
+import {
+  DENSITY_CELL_CLASS,
+  isCustomColumnOrder,
+  normalizeColumnOrder,
+  reorderColumnOrder
+} from '../utils/gridColumns';
+import { useColumnReorder } from '../hooks/useColumnReorder';
 import { useSettingsStore } from '../stores/settingsStore';
 import { SHORTCUTS, commandModifierLabel, formatShortcut, hasCommandModifier } from '../utils/shortcuts';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
@@ -110,10 +132,21 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const tableStructures = useAppStore((state) => state.tableStructures);
   const jumpToTableData = useWorkspaceStore((state) => state.jumpToTableData);
   
-  // 分页状态
+  // 分页、多列排序与客户端即时筛选状态
   const [currentPage, setCurrentPage] = useState(1);
-  const [sort, setSort] = useState<ColumnSort | null>(null);
+  const [sorts, setSorts] = useState<ColumnSort[]>([]);
   const [pageSize, setPageSize] = useState(25);
+  const [showFindBar, setShowFindBar] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [filterByQuery, setFilterByQuery] = useState(true);
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const [cellFilters, setCellFilters] = useState<ResultCellFilter[]>([]);
+  const [columnOrder, setColumnOrder] = useState<number[]>([]);
+  const [inspectorState, setInspectorState] = useState<
+    | { mode: 'single'; rowIndex: number }
+    | { mode: 'compare'; rowA: number; rowB: number }
+    | null
+  >(null);
   
   // 编辑状态
   const [editingCell, setEditingCell] = useState<{
@@ -140,27 +173,135 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   /** 表格本身的高度。量它而不是量滚动容器的 scrollHeight——后者会被我们
       刚设上去的高度影响，自己量自己就成了循环 */
   const tableContentRef = useRef<HTMLDivElement>(null);
+  /** 底部区域（选区聚合状态栏 + 分页条），扣除其高度避免把统计条挤出可视区 */
+  const footerRef = useRef<HTMLDivElement>(null);
   const [tableHeight, setTableHeight] = useState(FALLBACK_RESULT_TABLE_HEIGHT);
   
-  // 计算分页数据
-  const totalRows = result.rows.length;
-  // 先对整份结果排序再切页：只排当前页得到的是「这一页内部的次序」，
+  // 换一条结果集时清掉旧的客户端筛选、排序、自定义列序与详情抽屉，避免列下标错位
+  useEffect(() => {
+    setCellFilters([]);
+    setColumnOrder([]);
+    setSorts([]);
+    setFindQuery('');
+    setShowFindBar(false);
+    setActiveMatchIndex(0);
+    setInspectorState(null);
+    setCurrentPage(1);
+  }, [statementId, result]);
+
+  const rawTotalRows = result.rows.length;
+  const filteredRows = React.useMemo(
+    () => filterResultRows(result.rows, {
+      query: findQuery,
+      filterByQuery: showFindBar && filterByQuery,
+      cellFilters
+    }),
+    [result.rows, findQuery, showFindBar, filterByQuery, cellFilters]
+  );
+  // 先对筛选后的整份结果多列排序再切页：只排当前页得到的是「这一页内部的次序」，
   // 不是用户想要的「整份结果按这列排」
   const sortedRows = React.useMemo(
-    () => sortRowsByColumn(result.columns, result.rows, sort),
-    [result.columns, result.rows, sort]
+    () => sortRowsByColumns(result.columns, filteredRows, sorts),
+    [result.columns, filteredRows, sorts]
   );
+  const totalRows = sortedRows.length;
   const totalPages = Math.ceil(totalRows / pageSize);
-  const startIndex = (currentPage - 1) * pageSize;
+  const safePage = totalPages > 0 ? Math.min(currentPage, totalPages) : 1;
+  const startIndex = (safePage - 1) * pageSize;
   const endIndex = Math.min(startIndex + pageSize, totalRows);
   const currentRows = React.useMemo(
     () => sortedRows.slice(startIndex, endIndex),
     [sortedRows, startIndex, endIndex]
   );
-  // 翻页、改排序、换一条语句的结果都换了数据集，选区必须跟着清掉；
+  const normalizedColumnOrder = useMemo(
+    () => normalizeColumnOrder(result.columns.length, columnOrder),
+    [result.columns.length, columnOrder]
+  );
+  const hasCustomColumnOrder = isCustomColumnOrder(normalizedColumnOrder);
+  const columnReorder = useColumnReorder((fromOriginalIndex, toOriginalIndex) => {
+    setColumnOrder((current) =>
+      reorderColumnOrder(normalizeColumnOrder(result.columns.length, current), fromOriginalIndex, toOriginalIndex)
+    );
+  });
+  const orderedColumns = useMemo(
+    () => normalizedColumnOrder.map((index) => result.columns[index] ?? ''),
+    [normalizedColumnOrder, result.columns]
+  );
+  const orderedCurrentRows = useMemo(
+    () => currentRows.map((row) => normalizedColumnOrder.map((index) => row[index] ?? null)),
+    [currentRows, normalizedColumnOrder]
+  );
+  const orderedSortedRows = useMemo(
+    () => (hasCustomColumnOrder
+      ? sortedRows.map((row) => normalizedColumnOrder.map((index) => row[index] ?? null))
+      : sortedRows),
+    [hasCustomColumnOrder, sortedRows, normalizedColumnOrder]
+  );
+  // 翻页、改排序、改筛选、重排列、换一条语句的结果都换了视觉坐标，选区必须跟着清掉；
   // 同一页重新渲染则留着
-  const datasetKey = `${statementId}|${sort?.column ?? ''}:${sort?.direction ?? ''}|${currentPage}|${pageSize}`;
-  const cells = useCellSelection(currentRows, result.columns, datasetKey);
+  const filterKey = cellFilters.map((f) => `${f.columnIndex}:${f.operator}:${f.value}`).join(',');
+  const sortKey = sorts.map((s) => `${s.column}:${s.direction}`).join(',');
+  const datasetKey = `${statementId}|${filterKey}|${showFindBar && filterByQuery ? findQuery : ''}|${sortKey}|${normalizedColumnOrder.join(',')}|${safePage}|${pageSize}`;
+  const cells = useCellSelection(orderedCurrentRows, orderedColumns, datasetKey, {
+    onFind: () => setShowFindBar(true)
+  });
+  const selectionSummary = useMemo(
+    () => summarizeSelection(orderedCurrentRows, cells.selection),
+    [orderedCurrentRows, cells.selection]
+  );
+  const findMatches = useMemo(
+    () => (showFindBar ? findGridMatches(orderedCurrentRows, findQuery) : []),
+    [showFindBar, orderedCurrentRows, findQuery]
+  );
+  const findMatchSet = useMemo(
+    () => new Set(findMatches.map((match) => `${match.row}:${match.column}`)),
+    [findMatches]
+  );
+  const activeFindMatch = findMatches.length > 0
+    ? findMatches[activeMatchIndex % findMatches.length]
+    : null;
+  useEffect(() => {
+    setActiveMatchIndex(0);
+  }, [findQuery, currentRows]);
+  useEffect(() => {
+    setInspectorState((current) => {
+      if (!current) {
+        return null;
+      }
+      if (current.mode === 'single') {
+        return current.rowIndex < currentRows.length ? current : null;
+      }
+      return current.rowA < currentRows.length && current.rowB < currentRows.length ? current : null;
+    });
+  }, [currentRows.length]);
+
+  const jumpToFindMatch = (delta: 1 | -1) => {
+    if (findMatches.length === 0) {
+      return;
+    }
+    const next = (activeMatchIndex + delta + findMatches.length) % findMatches.length;
+    setActiveMatchIndex(next);
+    const target = findMatches[next];
+    if (target) {
+      cells.selectCell(target.row, target.column);
+    }
+  };
+
+  const applyQuickResultFilter = (
+    columnIndex: number,
+    operator: ResultCellFilterOperator,
+    value = ''
+  ) => {
+    const columnName = result.columns[columnIndex] ?? '';
+    setCellFilters((current) => upsertResultCellFilter(current, {
+      id: `rf-${columnIndex}-${operator}-${Date.now()}`,
+      columnIndex,
+      columnName,
+      operator,
+      value
+    }));
+    setCurrentPage(1);
+  };
   const [contextTarget, setContextTarget] = useState<GridContextTarget | null>(null);
 
   const columnJumpMap = useMemo(() => {
@@ -245,7 +386,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       });
     }
     if (exportIntent?.columnIndex === undefined && cells.selection) {
-      const subset = selectionSubset(currentRows, result.columns, cells.selection);
+      const subset = selectionSubset(orderedCurrentRows, orderedColumns, cells.selection);
       list.unshift({
         id: 'selection',
         label: t('export.scope.selection'),
@@ -258,28 +399,28 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
       });
     }
     return list;
-  }, [cells.selection, currentRows, dialect, exportIntent?.columnIndex, result.columns, result.truncated, resultSql, t]);
+  }, [cells.selection, orderedCurrentRows, orderedColumns, dialect, exportIntent?.columnIndex, result.truncated, resultSql, t]);
 
   const profileSource = useMemo<DataProfileSource>(
     () => ({
       kind: 'resultSet',
-      columns: result.columns.map((name, index) => ({
-        name,
-        logicalType: result.column_metadata?.[index]?.logical_type ?? null,
-        databaseType: result.column_metadata?.[index]?.database_type ?? null
+      columns: normalizedColumnOrder.map((origIndex) => ({
+        name: result.columns[origIndex] ?? '',
+        logicalType: result.column_metadata?.[origIndex]?.logical_type ?? null,
+        databaseType: result.column_metadata?.[origIndex]?.database_type ?? null
       })),
-      rows: sortedRows
+      rows: orderedSortedRows
     }),
-    [result.column_metadata, result.columns, sortedRows]
+    [normalizedColumnOrder, result.column_metadata, result.columns, orderedSortedRows]
   );
   const analyticsSource = useMemo<LocalAnalyticsSource>(
     () => ({
       kind: 'resultSet',
       title: result.editability?.editable ? result.editability.table : t('result.queryResult'),
       columns: profileSource.kind === 'resultSet' ? profileSource.columns : [],
-      rows: sortedRows
+      rows: orderedSortedRows
     }),
-    [profileSource, result.editability, sortedRows, t]
+    [profileSource, result.editability, orderedSortedRows, t]
   );
   
   // 能不能改由 `describeResultEditability` 证明过：认得出是单表 SELECT，
@@ -495,8 +636,10 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     }
 
     const measure = () => {
+      const footerHeight = footerRef.current?.offsetHeight ?? 0;
       const available = pane.getBoundingClientRect().bottom
         - scroller.getBoundingClientRect().top
+        - footerHeight
         - RESULT_PANE_BOTTOM_GAP;
       setTableHeight(resultTableHeight(available, content.offsetHeight));
     };
@@ -505,6 +648,9 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     const observer = new ResizeObserver(measure);
     observer.observe(pane);
     observer.observe(content);
+    if (footerRef.current) {
+      observer.observe(footerRef.current);
+    }
     return () => observer.disconnect();
     // 换一份结果、翻页、改列宽都会让内容高度变，ResizeObserver 会跟着报，
     // 这里只需要在组件换了结果时重新挂一次。
@@ -519,7 +665,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const returnsRows = result.columns.length > 0;
 
   return (
-    <div className="border rounded-panel overflow-hidden bg-surface relative">
+    <div className="border rounded-panel overflow-clip bg-surface relative">
       {/* 头部信息栏 */}
       <div className="px-4 py-3 bg-surface-sunken border-b flex items-center justify-between">
         {/* 窄窗口（半屏笔记本）里：行数、耗时这类事实不许折行，提示文字截成一行、
@@ -573,6 +719,20 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           )}
           {returnsRows && (
             <>
+              <button
+                onClick={() => setShowFindBar((open) => !open)}
+                disabled={rawTotalRows === 0}
+                className={clsx(
+                  'flex items-center gap-1 rounded-control border px-3 py-1.5 text-sm disabled:opacity-50',
+                  showFindBar
+                    ? 'border-accent-line bg-accent-soft text-accent'
+                    : 'border-line-strong text-fg hover:bg-surface-hover'
+                )}
+                title={t('grid.findButtonTitle', { shortcut: formatShortcut(SHORTCUTS.findInGrid) })}
+              >
+                <Search size={14} />
+                <span>{t('grid.findButton')}</span>
+              </button>
               <button
                 onClick={() => setShowProfile(true)}
                 disabled={totalRows === 0}
@@ -643,11 +803,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
         />
       )}
 
-      {/* 导出的是排序后的整份结果，不是当前这一页——用户看到的次序就是文件里的次序 */}
+      {/* 导出的是排序与列重排后的整份结果，不是当前这一页——用户看到的次序就是文件里的次序 */}
       {exportIntent && (
         <ExportResultDialog
-          columns={result.columns}
-          rows={sortedRows}
+          columns={orderedColumns}
+          rows={orderedSortedRows}
           sourceName={editability?.editable ? editability.table : t('result.queryResult')}
           initialColumnIndexes={
             exportIntent.columnIndex !== undefined ? [exportIntent.columnIndex] : undefined
@@ -666,11 +826,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
         />
       )}
 
-      {/* 画的也是排序后的整份结果，和导出同一份：图上的次序就是表上的次序 */}
+      {/* 画的也是排序与列重排后的整份结果，和导出同一份：图上的次序就是表上的次序 */}
       {showChart && (
         <ResultChartDialog
-          columns={result.columns}
-          rows={sortedRows}
+          columns={orderedColumns}
+          rows={orderedSortedRows}
           onClose={() => setShowChart(false)}
         />
       )}
@@ -695,15 +855,89 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
         </div>
       )}
 
-      {/* 表格滚动容器 */}
-      <div className="relative">
+      {showFindBar && returnsRows && (
+        <GridFindBar
+          query={findQuery}
+          onQueryChange={(next) => {
+            setFindQuery(next);
+            setCurrentPage(1);
+          }}
+          matchCount={findMatches.length}
+          activeMatchIndex={activeMatchIndex}
+          onPrev={() => jumpToFindMatch(-1)}
+          onNext={() => jumpToFindMatch(1)}
+          onClose={() => {
+            setShowFindBar(false);
+            setFindQuery('');
+          }}
+          scopeHint={t('grid.findScopeLoadedRows')}
+          filterRows={filterByQuery}
+          onToggleFilterRows={() => {
+            setFilterByQuery((current) => !current);
+            setCurrentPage(1);
+          }}
+          filteredRowCount={filteredRows.length}
+          totalRowCount={rawTotalRows}
+        />
+      )}
+
+      {cellFilters.length > 0 && (
+        <div
+          className="flex flex-wrap items-center gap-1.5 border-b border-line bg-surface-sunken px-3 py-1.5 text-xs"
+          data-testid="result-quick-filters"
+        >
+          <span className="text-fg-muted">
+            {t('grid.resultFilterSummary', { matched: totalRows, total: rawTotalRows })}
+          </span>
+          {cellFilters.map((filter) => {
+            const label = filter.operator === 'is-null'
+              ? `${filter.columnName} IS NULL`
+              : filter.operator === 'is-not-null'
+                ? `${filter.columnName} IS NOT NULL`
+                : filter.operator === 'eq'
+                  ? `${filter.columnName} = ${formatFilterPreview(filter.value)}`
+                  : `${filter.columnName} ≠ ${formatFilterPreview(filter.value)}`;
+            return (
+              <span
+                key={filter.id}
+                className="inline-flex items-center gap-1 rounded-control border border-accent-line bg-accent-soft px-2 py-0.5 font-mono text-[11px] text-accent"
+              >
+                <span>{label}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCellFilters((current) => current.filter((item) => item.id !== filter.id));
+                    setCurrentPage(1);
+                  }}
+                  aria-label={t('filter.remove')}
+                  className="rounded hover:bg-surface-hover"
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => {
+              setCellFilters([]);
+              setCurrentPage(1);
+            }}
+            className="ml-auto rounded-control px-1.5 py-0.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg"
+          >
+            {t('grid.resultFilterClear')}
+          </button>
+        </div>
+      )}
+
+      {/* 表格滚动容器 + 可选右侧行详情/对比抽屉 */}
+      <div className="relative flex min-w-0">
         <div
           ref={scrollContainerRef}
           {...cells.gridProps}
-          className="overflow-auto query-result-scroll focus:outline-none"
+          className="min-w-0 flex-1 overflow-auto query-result-scroll focus:outline-none"
           style={{
-            maxHeight: `${tableHeight}px`,
-            width: '100%'
+            maxHeight: `${tableHeight}px`
           }}
         >
         <div ref={tableContentRef} style={{ width: `${tableWidth}px`, minWidth: '100%' }}>
@@ -711,73 +945,98 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
               各列，量出来的列宽就失去意义了 */}
           <table className="table-fixed border-collapse" style={{ width: `${tableWidth}px` }}>
             <colgroup>
-              {widths.map((width, index) => (
-                <col key={index} style={{ width: `${width}px` }} />
+              {normalizedColumnOrder.map((origIndex) => (
+                <col key={origIndex} style={{ width: `${widths[origIndex]}px` }} />
               ))}
               {canEdit && <col style={{ width: `${ACTION_COLUMN_WIDTH}px` }} />}
             </colgroup>
-            <thead>
+            <thead className="sticky top-0 z-20 bg-surface-sunken">
               <tr className="bg-surface-sunken border-b border-line">
-                {result.columns.map((column, index) => (
+                {normalizedColumnOrder.map((origIndex, displayIndex) => {
+                  const column = result.columns[origIndex] ?? '';
+                  return (
                   <th
-                    key={index}
+                    key={origIndex}
+                    data-col-orig-index={origIndex}
+                    data-col-display-index={displayIndex}
+                    onMouseDown={(event) => columnReorder.startColumnDrag(origIndex, displayIndex, event)}
                     onContextMenu={totalRows > 0 ? (event) => {
                       event.preventDefault();
                       setContextTarget({
                         row: null,
-                        column: index,
+                        column: displayIndex,
                         x: event.clientX,
                         y: event.clientY
                       });
                     } : undefined}
                     className={clsx(
-                      'relative border-r border-line text-left text-xs font-medium text-fg',
-                      densityClass
+                      'relative select-none border-r border-line text-left text-xs font-medium text-fg',
+                      densityClass,
+                      columnReorder.draggingIndex === origIndex && 'opacity-50'
                     )}
                   >
-                    <div className="flex items-center gap-1">
-                      <ColumnSortButton
-                        columnLabel={column}
-                        direction={sort?.column === column ? sort.direction : null}
-                        onToggle={() => {
-                          setSort((current) => nextColumnSort(current, column));
-                          setCurrentPage(1);
-                        }}
-                      />
-                      <div className="flex min-w-0 flex-col">
-                        <span className="truncate" title={column}>{column}</span>
-                        {result.column_metadata?.[index] && (
-                          // 去掉逐格类型标签后这里是唯一显示类型的地方，
-                          // 窄列会截断，所以挂个 title 让悬停能看全
-                          <span
-                            className="truncate text-[10px] font-normal text-fg-subtle"
-                            title={`${columnType(index)} · ${
-                              result.column_metadata[index].nullable === null
-                                ? t('result.nullUnknown')
-                                : result.column_metadata[index].nullable ? 'NULL' : 'NOT NULL'
-                            }`}
-                          >
-                            {columnType(index)}
-                            {' · '}
-                            {result.column_metadata[index].nullable === null
-                              ? t('result.nullUnknown')
-                              : result.column_metadata[index].nullable
-                                ? 'NULL'
-                                : 'NOT NULL'}
-                          </span>
+                    {columnReorder.overIndex === origIndex && columnReorder.dropSide && (
+                      <span
+                        aria-hidden="true"
+                        className={clsx(
+                          'pointer-events-none absolute inset-y-0 z-40 w-0.5 bg-accent',
+                          columnReorder.dropSide === 'left' ? 'left-0' : 'right-0'
                         )}
-                      </div>
-                      {keyColumns.has(column) && (
-                        <span className="shrink-0 text-warning" title={t('schema.primaryKey')}>🔑</span>
-                      )}
+                      />
+                    )}
+                    <div className="flex items-center gap-1">
+                      {(() => {
+                        const sortIndex = sorts.findIndex((item) => item.column === column);
+                        const direction = sortIndex >= 0 ? sorts[sortIndex].direction : null;
+                        const priority = sorts.length > 1 && sortIndex >= 0 ? sortIndex + 1 : undefined;
+                        return (
+                          <ColumnSortButton
+                            columnLabel={column}
+                            direction={direction}
+                            priority={priority}
+                            onToggle={(append) => {
+                              setSorts((current) => nextColumnSorts(current, column, append));
+                              setCurrentPage(1);
+                            }}
+                          >
+                            <div className="flex min-w-0 flex-1 flex-col">
+                              <span className="truncate">{column}</span>
+                              {result.column_metadata?.[origIndex] && (
+                                // 去掉逐格类型标签后这里是唯一显示类型的地方，
+                                // 窄列会截断，所以挂个 title 让悬停能看全
+                                <span
+                                  className="truncate text-[10px] font-normal text-fg-subtle"
+                                  title={`${columnType(origIndex)} · ${
+                                    result.column_metadata[origIndex].nullable === null
+                                      ? t('result.nullUnknown')
+                                      : result.column_metadata[origIndex].nullable ? 'NULL' : 'NOT NULL'
+                                  }`}
+                                >
+                                  {columnType(origIndex)}
+                                  {' · '}
+                                  {result.column_metadata[origIndex].nullable === null
+                                    ? t('result.nullUnknown')
+                                    : result.column_metadata[origIndex].nullable
+                                      ? 'NULL'
+                                      : 'NOT NULL'}
+                                </span>
+                              )}
+                            </div>
+                            {keyColumns.has(column) && (
+                              <span className="shrink-0 text-warning" title={t('schema.primaryKey')}>🔑</span>
+                            )}
+                          </ColumnSortButton>
+                        );
+                      })()}
                     </div>
                     <ColumnResizeHandle
-                      active={resizingIndex === index}
-                      onPointerDown={(event) => startResize(index, event)}
-                      onDoubleClick={() => autoFitColumn(index)}
+                      active={resizingIndex === origIndex}
+                      onPointerDown={(event) => startResize(origIndex, event)}
+                      onDoubleClick={() => autoFitColumn(origIndex)}
                     />
                   </th>
-                ))}
+                  );
+                })}
                 {canEdit && (
                   <th className={clsx('text-left text-xs font-medium text-fg', densityClass)}>
                     {t('result.actions')}
@@ -790,9 +1049,11 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
               {/* 新增行表单 */}
               {showAddForm && (
                 <tr className="bg-success-soft">
-                  {result.columns.map((column, columnIndex) => (
+                  {normalizedColumnOrder.map((origIndex) => {
+                    const column = result.columns[origIndex] ?? '';
+                    return (
                     <td 
-                      key={columnIndex} 
+                      key={origIndex} 
                       className={clsx('border-r border-line', densityClass)}
                     >
                       {keyColumns.has(column) || generatedColumns.has(column) ? (
@@ -801,12 +1062,13 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                         <CellInputEditor
                           value={newRowData[column] ?? { kind: 'unset' }}
                           onChange={(next) => updateNewRowData(column, next)}
-                          dataType={columnType(columnIndex)}
+                          dataType={columnType(origIndex)}
                           dialect={dialect}
                         />
                       )}
                     </td>
-                  ))}
+                    );
+                  })}
                   {canEdit && (
                     <td className={densityClass}>
                       <div className="flex items-center gap-1">
@@ -841,10 +1103,12 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                     pending?.kind === 'update' && 'bg-accent-soft'
                   )}
                 >
-                  {row.map((cell, cellIndex) => {
-                    const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.columnIndex === cellIndex;
+                  {normalizedColumnOrder.map((origIndex, displayIndex) => {
+                    const cell = row[origIndex] ?? null;
+                    const columnName = result.columns[origIndex] ?? '';
+                    const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.columnIndex === origIndex;
                     const inlineTarget = !isEditing
-                      ? columnJumpMap.get(cellIndex)?.find((item) => item.inline)
+                      ? columnJumpMap.get(origIndex)?.find((item) => item.inline)
                       : undefined;
                     const inlineJump = inlineTarget
                       ? buildCellJump(inlineTarget, (col) => {
@@ -857,39 +1121,63 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                       : null;
                     return (
                       <td
-                        key={cellIndex}
+                        key={origIndex}
                         className={clsx(
                           'relative border-r border-line font-mono text-[13px]',
+                          !isEditing && 'select-none',
                           densityClass,
-                          alignments[cellIndex] === 'right' && 'text-right',
+                          alignments[origIndex] === 'right' && 'text-right',
                           inlineJump && 'group/cell',
-                          cells.isSelected(rowIndex, cellIndex) && 'bg-accent-soft',
-                          cells.isFocused(rowIndex, cellIndex) && 'outline outline-1 -outline-offset-1 outline-accent',
-                          canEdit && !isEditing && !generatedColumns.has(result.columns[cellIndex]) && 'cursor-pointer'
+                          findMatchSet.has(`${rowIndex}:${displayIndex}`) && !cells.isSelected(rowIndex, displayIndex) && 'bg-warning-soft',
+                          activeFindMatch?.row === rowIndex && activeFindMatch?.column === displayIndex && 'ring-2 ring-inset ring-warning',
+                          cells.isSelected(rowIndex, displayIndex) && 'bg-accent-soft',
+                          cells.isFocused(rowIndex, displayIndex) && 'outline outline-1 -outline-offset-1 outline-accent',
+                          canEdit && !isEditing && !generatedColumns.has(columnName) && 'cursor-pointer'
                         )}
+                        onMouseDown={(event) => {
+                          if (isEditing || event.button !== 0) {
+                            return;
+                          }
+                          if (event.target instanceof HTMLElement && event.target.closest('button, a, input, textarea, select')) {
+                            return;
+                          }
+                          if (hasCommandModifier(event) && inlineJump) {
+                            return;
+                          }
+                          if (event.shiftKey) {
+                            event.preventDefault();
+                          }
+                          event.currentTarget.closest<HTMLElement>('[tabindex="0"]')?.focus({ preventScroll: true });
+                          cells.beginDragSelection(rowIndex, displayIndex, event.shiftKey);
+                        }}
+                        onMouseEnter={(event) => {
+                          if (!isEditing) {
+                            cells.updateDragSelection(rowIndex, displayIndex, (event.buttons & 1) === 1);
+                          }
+                        }}
                         onClick={(event) => {
                           if (hasCommandModifier(event) && inlineJump) {
                             event.preventDefault();
                             handleJump(inlineJump);
                             return;
                           }
-                          cells.selectCell(rowIndex, cellIndex, event.shiftKey);
+                          cells.handleCellClick(rowIndex, displayIndex, event.shiftKey);
                         }}
                         onContextMenu={(event) => {
                           event.preventDefault();
                           // 右击选区外的格子先选上它：菜单里那几条都作用于选区
-                          if (!cells.isSelected(rowIndex, cellIndex)) {
-                            cells.selectCell(rowIndex, cellIndex);
+                          if (!cells.isSelected(rowIndex, displayIndex)) {
+                            cells.selectCell(rowIndex, displayIndex);
                           }
                           setContextTarget({
                             row: rowIndex,
-                            column: cellIndex,
+                            column: displayIndex,
                             x: event.clientX,
                             y: event.clientY
                           });
                         }}
                         onDoubleClick={() => canEdit && !isEditing
-                          && startEditing(rowIndex, cellIndex, cell)}
+                          && startEditing(rowIndex, origIndex, cell)}
                       >
                         {isEditing ? (
                           <CellInputEditor
@@ -897,16 +1185,16 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                             onChange={setEditValue}
                             // SQLite 的 UPDATE 没有 `SET 列 = DEFAULT`
                             allowDefault={dialect !== 'sqlite'}
-                            dataType={columnType(cellIndex)}
+                            dataType={columnType(origIndex)}
                             dialect={dialect}
                             autoFocus
                             onCommit={saveEdit}
                             onCancel={cancelEditing}
                           />
                         ) : inlineJump ? (
-                          <div className={clsx('flex min-w-0 items-center gap-1', alignments[cellIndex] === 'right' && 'justify-end')}>
+                          <div className={clsx('flex min-w-0 items-center gap-1', alignments[origIndex] === 'right' && 'justify-end')}>
                             <div className="min-w-0 flex-1 truncate">
-                              <StagedCellValue value={cell} pending={pending} column={result.columns[cellIndex]} />
+                              <StagedCellValue value={cell} pending={pending} column={columnName} />
                             </div>
                             <button
                               type="button"
@@ -924,7 +1212,7 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
                         ) : (
                           // 每格再挂一个类型标签是重复——表头已经写了 BIGINT · NOT NULL，
                           // 而且标签会占掉列宽，让本来放得下的值反而被截断
-                          <StagedCellValue value={cell} pending={pending} column={result.columns[cellIndex]} />
+                          <StagedCellValue value={cell} pending={pending} column={columnName} />
                         )}
                       </td>
                     );
@@ -958,14 +1246,52 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           </table>
         </div>
       </div>
+
+      {inspectorState && (
+        <GridRowInspector
+          maxHeight={tableHeight}
+          columns={normalizedColumnOrder.map((origIndex) => ({
+            name: result.columns[origIndex] ?? '',
+            dataType: columnType(origIndex) || null
+          }))}
+          rowA={orderedCurrentRows[inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA] ?? []}
+          rowALabel={`#${startIndex + (inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA) + 1}`}
+          rowB={inspectorState.mode === 'compare' ? (orderedCurrentRows[inspectorState.rowB] ?? []) : undefined}
+          rowBLabel={inspectorState.mode === 'compare'
+            ? `#${startIndex + inspectorState.rowB + 1}`
+            : undefined}
+          onCopyText={(text) => cells.copyText(text)}
+          onPrevRow={inspectorState.mode === 'single'
+            ? () => setInspectorState({
+                mode: 'single',
+                rowIndex: Math.max(0, inspectorState.rowIndex - 1)
+              })
+            : undefined}
+          onNextRow={inspectorState.mode === 'single'
+            ? () => setInspectorState({
+                mode: 'single',
+                rowIndex: Math.min(currentRows.length - 1, inspectorState.rowIndex + 1)
+              })
+            : undefined}
+          canPrevRow={inspectorState.mode === 'single' && inspectorState.rowIndex > 0}
+          canNextRow={inspectorState.mode === 'single' && inspectorState.rowIndex < currentRows.length - 1}
+          onClose={() => setInspectorState(null)}
+        />
+      )}
       
     </div>
-      
 
-      
-      {/* 分页控件 */}
-      {totalPages > 1 && (
-        <div className="px-4 py-3 bg-surface-sunken border-t flex items-center justify-between">
+      <div ref={footerRef} className="sticky bottom-0 z-20 bg-surface">
+        {selectionSummary && (
+          <GridSelectionStatsBar
+            summary={selectionSummary}
+            onCopyValue={(value) => cells.copyText(value)}
+          />
+        )}
+
+        {/* 分页控件 */}
+        {totalPages > 1 && (
+          <div className="px-4 py-3 bg-surface-sunken border-t flex items-center justify-between">
           <div className="flex items-center space-x-2">
             <span className="text-sm text-fg">
               {t('result.range', { from: startIndex + 1, to: endIndex, total: totalRows })}
@@ -1027,36 +1353,72 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
           </div>
         </div>
       )}
+      </div>
 
-      {contextTarget && (
+      {contextTarget && (() => {
+        const origColIndex = normalizedColumnOrder[contextTarget.column] ?? contextTarget.column;
+        const cellValue = contextTarget.row !== null
+          ? (orderedCurrentRows[contextTarget.row]?.[contextTarget.column] ?? null)
+          : null;
+        const twoRows = selectedTwoRows(cells.selection);
+        return (
         <GridContextMenu
           target={contextTarget}
-          columnName={result.columns[contextTarget.column]}
+          columnName={orderedColumns[contextTarget.column]}
+          cellPreview={contextTarget.row !== null && cellValue !== null ? formatFilterPreview(cellValue) : undefined}
+          onFilterEquals={
+            contextTarget.row !== null && cellValue !== null
+              ? () => applyQuickResultFilter(origColIndex, 'eq', formatResultValue(cellValue))
+              : undefined
+          }
+          onFilterNotEquals={
+            contextTarget.row !== null && cellValue !== null
+              ? () => applyQuickResultFilter(origColIndex, 'ne', formatResultValue(cellValue))
+              : undefined
+          }
+          onFilterIsNull={
+            contextTarget.row !== null && cellValue === null
+              ? () => applyQuickResultFilter(origColIndex, 'is-null')
+              : undefined
+          }
+          onFilterIsNotNull={
+            contextTarget.row !== null && cellValue === null
+              ? () => applyQuickResultFilter(origColIndex, 'is-not-null')
+              : undefined
+          }
           onSelectColumn={(column) => cells.selectColumn(column)}
+          onResetColumnOrder={hasCustomColumnOrder ? () => setColumnOrder([]) : undefined}
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
           onCopyColumnValues={(column) => cells.copyColumn(column, false)}
           onCopyColumn={(column) => cells.copyColumn(column, true)}
           onCopyColumnSqlIn={(column) => {
-            const sqlIn = columnToSqlInList(currentRows, column, dialect);
+            const sqlIn = columnToSqlInList(orderedCurrentRows, column, dialect);
             if (sqlIn) {
               cells.selectColumn(column);
               cells.copyText(sqlIn);
             }
           }}
-          copyColumnSqlInDisabled={!hasNonNullColumnValue(currentRows, contextTarget.column)}
+          copyColumnSqlInDisabled={!hasNonNullColumnValue(orderedCurrentRows, contextTarget.column)}
           onExportColumn={
             totalRows > 0 ? (column) => setExportIntent({ columnIndex: column }) : undefined
           }
+          onInspectRow={(row) => setInspectorState({ mode: 'single', rowIndex: row })}
+          onCompareSelectedRows={
+            twoRows
+              ? () => setInspectorState({ mode: 'compare', rowA: twoRows[0], rowB: twoRows[1] })
+              : undefined
+          }
           jumpTargets={
             contextTarget.row !== null && currentRows[contextTarget.row]
-              ? resolveCellJumps(currentRows[contextTarget.row], contextTarget.column)
+              ? resolveCellJumps(currentRows[contextTarget.row], origColIndex)
               : []
           }
           onJump={handleJump}
           onClose={() => setContextTarget(null)}
         />
-      )}
+        );
+      })()}
     </div>
   );
 }; 

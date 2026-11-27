@@ -29,6 +29,12 @@ export interface CellSelectionController {
   /** 焦点格：方向键从它出发，视觉上描一圈边框 */
   isFocused: (row: number, column: number) => boolean;
   selectCell: (row: number, column: number, extend?: boolean) => void;
+  /** 左键按下起点：开启矩形拖拽选区，Shift+按下从原锚点延伸 */
+  beginDragSelection: (row: number, column: number, extend?: boolean) => void;
+  /** 拖拽经过单元格时只更新焦点端，保持矩形选区而不触发跨列文本高亮 */
+  updateDragSelection: (row: number, column: number, primaryButtonDown: boolean) => void;
+  /** 点击兜底：真实指针事件已在 mousedown 处理，合成 click 测试仍照常选格 */
+  handleCellClick: (row: number, column: number, extend?: boolean) => void;
   /** 选中整列（例如表头右键「选中整列」） */
   selectColumn: (column: number) => void;
   /** 复制当前选区；`withHeaders` 在最前面加一行列名 */
@@ -66,14 +72,43 @@ export interface CellSelectionController {
  * @param datasetKey 标识「这是哪一份数据」。刷新时保持不变，翻页 / 改排序 /
  *   改筛选 / 换表时必须变——选区的去留全看它，见 `retainSelection`
  */
+export interface CellSelectionShortcuts {
+  onFind?: () => void;
+  onFillDown?: () => void;
+}
+
 export function useCellSelection(
   rows: readonly (readonly SerializedResultValue[])[],
   columns: readonly string[],
-  datasetKey: string
+  datasetKey: string,
+  extraShortcuts?: CellSelectionShortcuts
 ): CellSelectionController {
   const columnCount = columns.length;
   const [selection, setSelection] = useState<CellSelection | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const extraShortcutsRef = useRef(extraShortcuts);
+  extraShortcutsRef.current = extraShortcuts;
+  const draggingRef = useRef(false);
+  const dragMovedRef = useRef(false);
+  const pointerDownCellRef = useRef<{ row: number; column: number } | null>(null);
+
+  useEffect(() => {
+    const endDrag = () => {
+      if (!draggingRef.current) {
+        return;
+      }
+      draggingRef.current = false;
+      if (dragMovedRef.current) {
+        pointerDownCellRef.current = null;
+      }
+    };
+    window.addEventListener('mouseup', endDrag);
+    window.addEventListener('blur', endDrag);
+    return () => {
+      window.removeEventListener('mouseup', endDrag);
+      window.removeEventListener('blur', endDrag);
+    };
+  }, []);
 
   const rowCount = rows.length;
 
@@ -153,6 +188,18 @@ export function useCellSelection(
       return;
     }
 
+    if (matchesShortcut(event, SHORTCUTS.findInGrid) && extraShortcutsRef.current?.onFind) {
+      event.preventDefault();
+      extraShortcutsRef.current.onFind();
+      return;
+    }
+
+    if (matchesShortcut(event, SHORTCUTS.fillDown) && extraShortcutsRef.current?.onFillDown) {
+      event.preventDefault();
+      extraShortcutsRef.current.onFillDown();
+      return;
+    }
+
     if (event.key === 'Escape' && !isImeKeyEvent(event.nativeEvent)) {
       setSelection(null);
       return;
@@ -181,6 +228,50 @@ export function useCellSelection(
       [selection]
     ),
     selectCell: useCallback((row, column, extend = false) => {
+      setSelection((current) => ({
+        anchor: extend && current ? current.anchor : { row, column },
+        focus: { row, column }
+      }));
+    }, []),
+    beginDragSelection: useCallback((row, column, extend = false) => {
+      draggingRef.current = true;
+      dragMovedRef.current = false;
+      pointerDownCellRef.current = { row, column };
+      setSelection((current) => ({
+        anchor: extend && current ? current.anchor : { row, column },
+        focus: { row, column }
+      }));
+    }, []),
+    updateDragSelection: useCallback((row, column, primaryButtonDown) => {
+      if (!draggingRef.current) {
+        return;
+      }
+      if (!primaryButtonDown) {
+        draggingRef.current = false;
+        return;
+      }
+      setSelection((current) => {
+        if (!current) {
+          return { anchor: { row, column }, focus: { row, column } };
+        }
+        if (current.focus.row === row && current.focus.column === column) {
+          return current;
+        }
+        dragMovedRef.current = true;
+        return { anchor: current.anchor, focus: { row, column } };
+      });
+    }, []),
+    handleCellClick: useCallback((row, column, extend = false) => {
+      const handled = pointerDownCellRef.current;
+      if (handled && handled.row === row && handled.column === column) {
+        pointerDownCellRef.current = null;
+        return;
+      }
+      if (dragMovedRef.current) {
+        dragMovedRef.current = false;
+        pointerDownCellRef.current = null;
+        return;
+      }
       setSelection((current) => ({
         anchor: extend && current ? current.anchor : { row, column },
         focus: { row, column }

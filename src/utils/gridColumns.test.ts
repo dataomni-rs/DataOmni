@@ -4,8 +4,11 @@ import {
   DENSITY_CELL_CLASS,
   GRID_DENSITIES,
   frozenLeftOffsets,
+  isCustomColumnOrder,
   isGridDensity,
   loadGridDensity,
+  normalizeColumnOrder,
+  reorderColumnOrder,
   saveGridDensity,
   toggleHiddenColumn,
   visibleColumnIndexes
@@ -31,6 +34,34 @@ describe('visibleColumnIndexes', () => {
   it('藏一个不存在的列名不影响结果', () => {
     // 换表后旧的隐藏集还在，里面是另一张表的列名
     expect(visibleColumnIndexes(COLUMNS, new Set(['gone']))).toEqual([0, 1, 2]);
+  });
+
+  it('按自定义列顺序返回可见列下标并过滤隐藏列', () => {
+    expect(visibleColumnIndexes(COLUMNS, new Set(['name']), [2, 1, 0])).toEqual([2, 0]);
+  });
+});
+
+describe('列顺序归一化与拖动重排', () => {
+  it('normalizeColumnOrder 丢弃越界与重复下标并补齐缺失列', () => {
+    expect(normalizeColumnOrder(4, [2, 99, 2, -1, 0])).toEqual([2, 0, 1, 3]);
+    expect(normalizeColumnOrder(3, [])).toEqual([0, 1, 2]);
+  });
+
+  it('isCustomColumnOrder 判断是否偏离原始顺序', () => {
+    expect(isCustomColumnOrder([0, 1, 2])).toBe(false);
+    expect(isCustomColumnOrder([0, 2, 1])).toBe(true);
+  });
+
+  it('reorderColumnOrder 支持相邻交换、跨列移动与保留隐藏列位置', () => {
+    // 相邻两列直接交换
+    expect(reorderColumnOrder([0, 1, 2, 3], 0, 1)).toEqual([1, 0, 2, 3]);
+    // 向右跨列拖到目标列右侧
+    expect(reorderColumnOrder([0, 1, 2, 3], 0, 2)).toEqual([1, 2, 0, 3]);
+    // 向左跨列拖到目标列左侧
+    expect(reorderColumnOrder([0, 1, 2, 3], 3, 1)).toEqual([0, 3, 1, 2]);
+    // 同列或无效下标保持不变
+    expect(reorderColumnOrder([0, 1, 2], 1, 1)).toEqual([0, 1, 2]);
+    expect(reorderColumnOrder([0, 1, 2], 1, 9)).toEqual([0, 1, 2]);
   });
 });
 

@@ -216,14 +216,14 @@ describe('TableDataViewer（ClickHouse）', () => {
       root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
     });
     await act(async () => {
-      byTitle('note: click to sort ascending').click();
+      byTitle('note: click to sort ascending (Shift+click to add secondary sort)').click();
     });
 
     expect(container.textContent).toContain('not allowed in ORDER BY keys');
     expect(container.textContent).toContain('note');
     // 行回来了，表头还在、排序已取消
     expect([...container.querySelectorAll('input, td')].some((cell) => cell.textContent === 'x')).toBe(true);
-    byTitle('note: click to sort ascending');
+    byTitle('note: click to sort ascending (Shift+click to add secondary sort)');
     const dataQueries = readQuery.mock.calls.map(([sql]) => sql as string).filter((sql) => !sql.startsWith('SELECT COUNT(*)'));
     expect(dataQueries[dataQueries.length - 1]).not.toContain('ORDER BY `note`');
   });
@@ -244,7 +244,7 @@ describe('TableDataViewer（ClickHouse）', () => {
     expect(container.textContent).toContain('Committed 1 change.');
 
     await act(async () => {
-      byTitle('note: click to sort ascending').click();
+      byTitle('note: click to sort ascending (Shift+click to add secondary sort)').click();
     });
     expect(container.textContent).not.toContain('Committed 1 change.');
   });
@@ -427,5 +427,185 @@ describe('TableDataViewer（单列复制与单列导出）', () => {
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain('note only (1 of 3)');
     expect(dialog?.querySelector('pre')?.textContent).toBe('note\nalpha\nbeta\nalpha');
+  });
+
+  it('支持右键按单元格快速筛选、选区统计条、多列排序与双行对比侧栏', async () => {
+    const sent: string[] = [];
+    readQuery.mockImplementation(async (sql: string) => {
+      sent.push(sql);
+      return sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 3 }]
+        : [
+            { id: 10, fs: 'a', note: 'alpha' },
+            { id: 20, fs: 'b', note: 'beta' },
+            { id: 30, fs: 'c', note: 'alpha' }
+          ];
+    });
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    // 1. 选区实时统计（框选 id 列的 10 与 20）
+    const rows = [...container.querySelectorAll('tbody tr')];
+    const idCell0 = rows[0]?.querySelectorAll('td')[0];
+    const idCell1 = rows[1]?.querySelectorAll('td')[0];
+    if (!idCell0 || !idCell1) throw new Error('没有找到 id 单元格');
+    await act(async () => {
+      idCell0.click();
+    });
+    await act(async () => {
+      idCell1.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    });
+    const statsBar = container.querySelector('[data-testid="grid-selection-stats"]');
+    expect(statsBar?.textContent).toContain('2 cells');
+    expect(statsBar?.textContent).toContain('Sum: 30');
+    expect(statsBar?.textContent).toContain('Avg: 15');
+
+    // 2. 选中 2 行后右键对比两行差异
+    await act(async () => {
+      idCell1.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      menuItem('Compare selected 2 rows').click();
+    });
+    const inspector = container.querySelector('[data-testid="grid-row-inspector"]');
+    expect(inspector?.textContent).toContain('Compare #1 vs #2');
+    expect(inspector?.textContent).toContain('3 differing fields');
+
+    // 3. 右键单元格「按当前值快速筛选」直接发服务端 WHERE
+    const noteCell0 = rows[0]?.querySelectorAll('td')[2];
+    if (!noteCell0) throw new Error('没有 note 单元格');
+    await act(async () => {
+      noteCell0.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 }));
+    });
+    await act(async () => {
+      menuItem('Filter = alpha').click();
+    });
+    expect(sent.some((sql) => sql.includes("WHERE `note` = 'alpha'"))).toBe(true);
+
+    // 4. Shift+点击第二列实现多列组合排序
+    await act(async () => {
+      byTitle('note: click to sort ascending (Shift+click to add secondary sort)').click();
+    });
+    await act(async () => {
+      byTitle('fs: click to sort ascending (Shift+click to add secondary sort)')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    });
+    expect(sent.some((sql) => sql.includes('ORDER BY `note` ASC, `fs` ASC'))).toBe(true);
+  });
+
+  it('鼠标拖拽可选中任意连续矩形选区，且右键复制选区保留整块选区内容', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    });
+    readQuery.mockImplementation(async (sql: string) => (
+      sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 3 }]
+        : [
+            { id: 10, fs: 'a1', note: 'n1' },
+            { id: 20, fs: 'b2', note: 'n2' },
+            { id: 30, fs: 'c3', note: 'n3' }
+          ]
+    ));
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    const rows = [...container.querySelectorAll('tbody tr')];
+    const startCell = rows[0]?.querySelectorAll('td')[1]; // (row 0, col 1: fs = a1)
+    const endCell = rows[1]?.querySelectorAll('td')[2];   // (row 1, col 2: note = n2)
+    if (!startCell || !endCell) throw new Error('未找到拖拽起止单元格');
+
+    await act(async () => {
+      startCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 }));
+    });
+    await act(async () => {
+      // React 的 onMouseEnter 监听的是 mouseover（或 mouseenter），在 happy-dom 中派发 mouseover
+      endCell.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, buttons: 1 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0 }));
+    });
+
+    // 选区应为 2x2（4 格），且不能把第 0 行的 id 列卷进去
+    const statsBar = container.querySelector('[data-testid="grid-selection-stats"]');
+    expect(statsBar?.textContent).toContain('4 cells');
+
+    // 右键选区内部格并点「Copy selection」，应复制 2x2 矩形而非单格
+    await act(async () => {
+      endCell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    await act(async () => {
+      menuItem('Copy selection').click();
+    });
+    expect(writeText).toHaveBeenLastCalledWith('a1\tn1\nb2\tn2');
+  });
+
+  it('拖动表头可交换列顺序并同步数据格与右键重置列顺序', async () => {
+    readQuery.mockImplementation(async (sql: string) => (
+      sql.startsWith('SELECT COUNT(*)')
+        ? [{ total: 2 }]
+        : [
+            { id: 10, fs: 'a1', note: 'n1' },
+            { id: 20, fs: 'b2', note: 'n2' }
+          ]
+    ));
+
+    await act(async () => {
+      root.render(<TableDataViewer connection={connection} tableName="t" schema="db" initialTab="data" />);
+    });
+
+    const headers = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')];
+    expect(headers).toHaveLength(3);
+    // 给三列表头稳定的几何矩形，供拖动命中检测使用
+    headers.forEach((th, idx) => {
+      vi.spyOn(th, 'getBoundingClientRect').mockReturnValue({
+        left: idx * 100,
+        right: (idx + 1) * 100,
+        top: 0,
+        bottom: 32,
+        width: 100,
+        height: 32,
+        x: idx * 100,
+        y: 0,
+        toJSON: () => ({})
+      });
+    });
+
+    // 把第 2 列（note）拖到第 0 列（id）位置
+    await act(async () => {
+      headers[2].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 250, clientY: 16 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 1, clientX: 40, clientY: 16 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, clientX: 40, clientY: 16 }));
+    });
+
+    const reorderedCols = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')]
+      .map((th) => th.dataset.colOrigIndex);
+    expect(reorderedCols).toEqual(['2', '0', '1']);
+    const firstRowTexts = [...container.querySelectorAll('tbody tr')[0].querySelectorAll('td')]
+      .slice(0, 3)
+      .map((td) => td.textContent?.trim());
+    expect(firstRowTexts).toEqual(['n1', '10', 'a1']);
+
+    // 右键列头可一键重置列顺序
+    await act(async () => {
+      container.querySelector('thead th[data-col-orig-index]')?.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 12, clientY: 12 })
+      );
+    });
+    await act(async () => {
+      menuItem('Reset order').click();
+    });
+    const resetCols = [...container.querySelectorAll<HTMLTableCellElement>('thead th[data-col-orig-index]')]
+      .map((th) => th.dataset.colOrigIndex);
+    expect(resetCols).toEqual(['0', '1', '2']);
   });
 });

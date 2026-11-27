@@ -38,7 +38,8 @@ import {
   Filter,
   Columns3,
   Undo2,
-  ArrowUpRight
+  ArrowUpRight,
+  Search
 } from 'lucide-react';
 import clsx from 'clsx';
 import type { ConnectionProfile, TableSchema } from '../contracts';
@@ -56,10 +57,17 @@ import {
 } from '../utils/tablePagination';
 import { buildTableExportQuery } from '../utils/tableExportQuery';
 import { buildTableSampleQuery } from '../utils/tableSampleQuery';
-import { nextColumnSort, type ColumnSort } from '../utils/resultSorting';
+import { nextColumnSorts, type ColumnSort } from '../utils/resultSorting';
 import { ColumnSortButton } from './ColumnSortButton';
 import { useCellSelection } from '../hooks/useCellSelection';
-import { columnToSqlInList, hasNonNullColumnValue, selectionSubset } from '../utils/cellSelection';
+import { columnToSqlInList, hasNonNullColumnValue, selectionRect, selectionSubset } from '../utils/cellSelection';
+import { summarizeSelection } from '../utils/selectionStats';
+import { findGridMatches, formatFilterPreview } from '../utils/gridSearch';
+import { selectedTwoRows } from '../utils/rowInspector';
+import { planBatchCellFill, type BatchFillMode } from '../utils/batchCellFill';
+import { GridSelectionStatsBar } from './GridSelectionStatsBar';
+import { GridFindBar } from './GridFindBar';
+import { GridRowInspector } from './GridRowInspector';
 import { editColumnWidth, headerBadgeWidth, toPositionalRows } from '../utils/columnWidths';
 import { columnEditorKind } from '../utils/columnEditors';
 import { useResizableColumns } from '../hooks/useResizableColumns';
@@ -134,9 +142,13 @@ import { GridContextMenu, type GridContextTarget } from './GridContextMenu';
 import {
   DENSITY_CELL_CLASS,
   frozenLeftOffsets,
+  isCustomColumnOrder,
+  normalizeColumnOrder,
+  reorderColumnOrder,
   toggleHiddenColumn,
   visibleColumnIndexes
 } from '../utils/gridColumns';
+import { useColumnReorder } from '../hooks/useColumnReorder';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useTableEditStore, tableEditKey } from '../stores/tableEditStore';
 import { selectTableStructure, useAppStore } from '../stores/appStore';
@@ -147,8 +159,15 @@ import {
   resolveTableColumnJumps,
   type ResolvedCellJump
 } from '../utils/foreignKeyJump';
-import { commandModifierLabel, hasCommandModifier } from '../utils/shortcuts';
-import { buildFilterClause, isCompleteFilter, type ColumnFilter } from '../utils/tableFilters';
+import { SHORTCUTS, commandModifierLabel, formatShortcut, hasCommandModifier } from '../utils/shortcuts';
+import {
+  buildFilterClause,
+  cellValueToFilterText,
+  isCompleteFilter,
+  upsertQuickFilter,
+  type ColumnFilter,
+  type FilterOperator
+} from '../utils/tableFilters';
 import { serverLabel } from '../utils/serverPresets';
 import { alwaysIdentityColumnNames, computedColumnNames, sequenceColumnNames } from '../utils/exportResult';
 
@@ -213,20 +232,29 @@ export default function TableDataViewer({
   const [error, setError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  // 排序在数据库里做：只排当前页得到的是「这一页内部的次序」
-  const [sort, setSort] = useState<ColumnSort | null>(null);
+  // 排序在数据库里做：只排当前页得到的是「这一页内部的次序」；支持 Shift+点击多列组合排序
+  const [sorts, setSorts] = useState<ColumnSort[]>([]);
   // 草稿与已应用分开：每敲一个字符就查一次库，在大表上等于连续的全表扫描
   const [filters, setFilters] = useState<ColumnFilter[]>([]);
   const [appliedFilters, setAppliedFilters] = useState<ColumnFilter[]>([]);
   const [showFilters, setShowFilters] = useState(false);
+  const [showFindBar, setShowFindBar] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const [inspectorState, setInspectorState] = useState<
+    | { mode: 'single'; rowIndex: number }
+    | { mode: 'compare'; rowA: number; rowB: number }
+    | null
+  >(null);
   const [hiddenColumns, setHiddenColumns] = useState<ReadonlySet<string>>(new Set());
+  const [columnOrder, setColumnOrder] = useState<number[]>([]);
   const [frozenCount, setFrozenCount] = useState(0);
   // 行高是应用级偏好：换张表、关掉标签再开，挑好的那档还在
   const density = useSettingsStore((state) => state.gridDensity);
   const setDensity = useSettingsStore((state) => state.setGridDensity);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [contextTarget, setContextTarget] = useState<GridContextTarget | null>(null);
-  // 与 sortRef 同理：loadTableData 的闭包里读不到刚 set 进去的新值。
+  // 与 sortsRef 同理：loadTableData 的闭包里读不到刚 set 进去的新值。
   // 不在渲染体里用 appliedFilters 覆盖它——外部 store（如跳转消费）先触发一次渲染时，
   // 旧的 appliedFilters 会把刚写进 ref 的筛选条件冲回空数组。所有改动都在 setAppliedFilters 旁同步更新。
   const appliedFiltersRef = useRef<ColumnFilter[]>([]);
@@ -248,8 +276,8 @@ export default function TableDataViewer({
    * 那样发的是原子的一条，TiDB 上被整条拒绝、什么都不改
    */
   const [serverVersion, setServerVersion] = useState<string | null>(null);
-  const sortRef = useRef<ColumnSort | null>(null);
-  sortRef.current = sort;
+  // 与 appliedFiltersRef 同理：不在渲染体里用 sorts 覆盖它，避免并发重渲染把刚写入的多列排序冲回旧值
+  const sortsRef = useRef<ColumnSort[]>([]);
   const [totalRows, setTotalRows] = useState(0);
   const [paginationOrder, setPaginationOrder] = useState<TablePaginationOrder | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'data');
@@ -512,7 +540,8 @@ export default function TableDataViewer({
   const loadTableData = async (
     page: number = 1,
     requestedPageSize: number = pageSize,
-    freshSchema?: TableSchema
+    freshSchema?: TableSchema,
+    requestedSorts?: readonly ColumnSort[]
   ) => {
     if (!await ensureDatabaseConnection()) return;
     
@@ -579,23 +608,24 @@ export default function TableDataViewer({
       const positions = dialect === 'clickhouse' && hasRowPositions(loadedSchema.columns)
         ? `, ${positionProjection()}`
         : '';
-      const dataQuery = (columnSort: ColumnSort | null) => (
+      const dataQuery = (columnSorts: readonly ColumnSort[]) => (
         `SELECT ${tableProjection(loadedSchema.columns, dialect)}${positions} FROM ${tableReference} ${whereClause} `
-          + pageClause(createSortedOrderClause(order, columnSort, dialect), limitValue, offsetValue, dialect)
+          + pageClause(createSortedOrderClause(order, columnSorts, dialect), limitValue, offsetValue, dialect)
       );
 
-      const failedSort = sortRef.current;
+      const failedSorts = requestedSorts ?? sortsRef.current;
       try {
-        setTableData(takeRowPositions(await runReadQuery(dataQuery(failedSort))));
+        setTableData(takeRowPositions(await runReadQuery(dataQuery(failedSorts))));
       } catch (sortError) {
         // 有的列不能排序（ClickHouse 的聚合状态、PG 的 json、SQL Server 的 xml、Oracle 的 CLOB……）。
         // 报错时行清空、表头跟着没了，而排序只能在表头上取消，刷新又带着它——只能关掉标签重开。
         // COUNT 刚读成功，这条只多了排序：取消排序再读一次，原因留在横幅里
-        if (!failedSort) throw sortError;
-        setSort(null);
-        sortRef.current = null;
-        setTableData(takeRowPositions(await runReadQuery(dataQuery(null))));
-        setError(t('table.sortFailed', { column: failedSort.column, reason: describeReadError(sortError) }));
+        if (failedSorts.length === 0) throw sortError;
+        setSorts([]);
+        sortsRef.current = [];
+        setTableData(takeRowPositions(await runReadQuery(dataQuery([]))));
+        const culprit = failedSorts[failedSorts.length - 1]?.column ?? '';
+        setError(t('table.sortFailed', { column: culprit, reason: describeReadError(sortError) }));
       }
     } catch (err) {
       console.error('加载表数据失败:', err);
@@ -618,11 +648,18 @@ export default function TableDataViewer({
       return;
     }
     prevTableKeyRef.current = currentTableKey;
+    setSorts([]);
+    sortsRef.current = [];
     setFilters([]);
     setAppliedFilters([]);
     appliedFiltersRef.current = [];
-    // 列偏好同理：隐藏集里存的是列名，换表后指的是另一张表的列
+    setShowFindBar(false);
+    setFindQuery('');
+    setActiveMatchIndex(0);
+    setInspectorState(null);
+    // 列偏好同理：隐藏集与自定义顺序属于旧表，换表后回到默认
     setHiddenColumns(new Set());
+    setColumnOrder([]);
     setFrozenCount(0);
     // 待提交的变更**不**在这里清：它们现在按表存在 store 里，换表就是换一个键，
     // 「键指着另一张表的行」这种状态已经不存在了。
@@ -708,6 +745,19 @@ export default function TableDataViewer({
     void loadTableData(1);
   };
 
+  const applyQuickFilter = (column: string, operator: FilterOperator, value = '') => {
+    const nextFilter: ColumnFilter = {
+      id: `quick-${column}-${Date.now()}`,
+      column,
+      operator,
+      value
+    };
+    const merged = upsertQuickFilter(appliedFiltersRef.current, nextFilter);
+    setShowFilters(true);
+    setFilters(merged);
+    applyFilters(merged);
+  };
+
   // 计算总页数
   const totalPages = Math.ceil(totalRows / pageSize);
 
@@ -784,9 +834,20 @@ export default function TableDataViewer({
     resizingIndex
   } = useResizableColumns(columnNames, positionalRows, headerBadges);
 
+  const normalizedColumnOrder = React.useMemo(
+    () => normalizeColumnOrder(columnNames.length, columnOrder),
+    [columnNames.length, columnOrder]
+  );
+  const hasCustomColumnOrder = isCustomColumnOrder(normalizedColumnOrder);
+  const columnReorder = useColumnReorder((fromOriginalIndex, toOriginalIndex) => {
+    setColumnOrder((current) =>
+      reorderColumnOrder(normalizeColumnOrder(columnNames.length, current), fromOriginalIndex, toOriginalIndex)
+    );
+  });
+
   const visibleIndexes = React.useMemo(
-    () => visibleColumnIndexes(columnNames, hiddenColumns),
-    [columnNames, hiddenColumns]
+    () => visibleColumnIndexes(columnNames, hiddenColumns, normalizedColumnOrder),
+    [columnNames, hiddenColumns, normalizedColumnOrder]
   );
   // 选区按**看得见的**列建立：用户框住的是他看到的那几格，复制出来的却混进
   // 藏起来的列，是这类网格最难自查的一种错
@@ -944,11 +1005,57 @@ export default function TableDataViewer({
   const datasetKey = [
     currentTableKey,
     filterSignature(appliedFilters),
-    `${sort?.column ?? ''}:${sort?.direction ?? ''}`,
+    sorts.map((item) => `${item.column}:${item.direction}`).join(','),
+    visibleIndexes.join(','),
     currentPage,
     pageSize
   ].join('|');
-  const cells = useCellSelection(visibleRows, visibleColumnNames, datasetKey);
+  const applyBatchFillRef = useRef<(mode: BatchFillMode) => void>(() => {});
+  const cells = useCellSelection(visibleRows, visibleColumnNames, datasetKey, {
+    onFind: () => setShowFindBar(true),
+    onFillDown: () => applyBatchFillRef.current('fill-down')
+  });
+  const selectionSummary = useMemo(
+    () => summarizeSelection(visibleRows, cells.selection),
+    [visibleRows, cells.selection]
+  );
+  const findMatches = useMemo(
+    () => (showFindBar ? findGridMatches(visibleRows, findQuery) : []),
+    [showFindBar, visibleRows, findQuery]
+  );
+  const findMatchSet = useMemo(
+    () => new Set(findMatches.map((match) => `${match.row}:${match.column}`)),
+    [findMatches]
+  );
+  const activeFindMatch = findMatches.length > 0
+    ? findMatches[activeMatchIndex % findMatches.length]
+    : null;
+  useEffect(() => {
+    setActiveMatchIndex(0);
+  }, [findQuery, visibleRows]);
+  useEffect(() => {
+    setInspectorState((current) => {
+      if (!current) {
+        return null;
+      }
+      if (current.mode === 'single') {
+        return current.rowIndex < tableData.length ? current : null;
+      }
+      return current.rowA < tableData.length && current.rowB < tableData.length ? current : null;
+    });
+  }, [tableData.length]);
+
+  const jumpToFindMatch = (delta: 1 | -1) => {
+    if (findMatches.length === 0) {
+      return;
+    }
+    const next = (activeMatchIndex + delta + findMatches.length) % findMatches.length;
+    setActiveMatchIndex(next);
+    const target = findMatches[next];
+    if (target) {
+      cells.selectCell(target.row, target.column);
+    }
+  };
 
   // 导入在后台跑，结束之后这一页看到的还是导入之前的样子。盯着那个任务
   // 而不是在向导关闭时就刷新——那一刻一行都还没写进去
@@ -994,7 +1101,7 @@ export default function TableDataViewer({
           visibleColumns: selectedColumns,
           filters: appliedFilters,
           paginationOrder,
-          sort,
+          sort: sorts,
           dialect,
           distinct
         })
@@ -1024,7 +1131,7 @@ export default function TableDataViewer({
     hiddenColumnsNote,
     paginationOrder,
     schema,
-    sort,
+    sorts,
     t,
     tableData.length,
     tableName,
@@ -1262,6 +1369,51 @@ export default function TableDataViewer({
     }
   };
 
+  /** 选区批量填充（向下填充 / 设为 NULL），全部落入暂存队列并在提交前审阅 SQL */
+  const applyBatchFill = (mode: BatchFillMode) => {
+    if (!editable || editState.mode !== 'view' || !cells.selection || !tableSchema) {
+      return;
+    }
+    setEditingError(null);
+    setCommitNotice(null);
+    try {
+      const planned = planBatchCellFill({
+        mode,
+        selection: cells.selection,
+        rows: tableData,
+        columns: tableSchema.columns,
+        visibleIndexes,
+        keyColumnSet,
+        dialect,
+        existingChanges: changes,
+        rowKeyFrom
+      });
+      if (planned.nextChanges !== changes) {
+        setChanges(planned.nextChanges);
+      }
+      const skipped = [...planned.skippedReadOnlyColumns, ...planned.skippedNotNullColumns];
+      if (planned.blockedBySingleRowLimit) {
+        setEditingError(t('changes.oneAtATime'));
+      } else if (planned.stagedCellCount === 0) {
+        setEditingError(
+          skipped.length > 0
+            ? t('grid.batchFillSkipped', { columns: skipped.join(', ') })
+            : t('grid.batchFillNothing')
+        );
+      } else {
+        const base = t('grid.batchFillStaged', { count: planned.stagedCellCount });
+        setCommitNotice(
+          skipped.length > 0
+            ? `${base} · ${t('grid.batchFillSkipped', { columns: skipped.join(', ') })}`
+            : base
+        );
+      }
+    } catch (caught) {
+      setEditingError(describeError(caught, t('table.saveFailed')));
+    }
+  };
+  applyBatchFillRef.current = applyBatchFill;
+
   // 可编辑单元格。**是函数调用，不是组件**：在组件体里声明、再写成 <EditableCell />，
   // 每次渲染都是一个新的组件类型，React 会把整行格子卸掉重挂——编辑时每敲一个字，
   // 所有格子的 autoFocus 重新触发一遍，焦点跳到这一行最后一个输入框，
@@ -1280,7 +1432,11 @@ export default function TableDataViewer({
     lastFrozen = false,
     selected = false,
     focused = false,
+    searchMatched = false,
+    searchActive = false,
     onSelect,
+    onBeginDrag,
+    onDragEnter,
     onContextMenu,
     inlineJump = null,
     onJump
@@ -1307,7 +1463,11 @@ export default function TableDataViewer({
     lastFrozen?: boolean;
     selected?: boolean;
     focused?: boolean;
+    searchMatched?: boolean;
+    searchActive?: boolean;
     onSelect?: (extend: boolean) => void;
+    onBeginDrag?: (extend: boolean) => void;
+    onDragEnter?: (primaryButtonDown: boolean) => void;
     onContextMenu?: (event: React.MouseEvent) => void;
     inlineJump?: ResolvedCellJump | null;
     onJump?: (jump: ResolvedCellJump) => void;
@@ -1318,6 +1478,25 @@ export default function TableDataViewer({
       // 显示时统一交给 formatResultValue 还原成人能读的形式
       return (
         <td
+          onMouseDown={(event) => {
+            if (event.button !== 0) {
+              return;
+            }
+            if (event.target instanceof HTMLElement && event.target.closest('button, a, input, textarea, select')) {
+              return;
+            }
+            if (hasCommandModifier(event) && inlineJump && onJump) {
+              return;
+            }
+            if (event.shiftKey) {
+              event.preventDefault();
+            }
+            event.currentTarget.closest<HTMLElement>('[tabindex="0"]')?.focus({ preventScroll: true });
+            onBeginDrag?.(event.shiftKey);
+          }}
+          onMouseEnter={(event) => {
+            onDragEnter?.((event.buttons & 1) === 1);
+          }}
           onClick={(event) => {
             if (hasCommandModifier(event) && inlineJump && onJump) {
               event.preventDefault();
@@ -1329,15 +1508,17 @@ export default function TableDataViewer({
           onContextMenu={onContextMenu}
           style={frozenLeft === null ? undefined : { left: `${frozenLeft}px` }}
           className={clsx(
-            'border-r border-line font-mono text-[13px] text-fg',
+            'select-none border-r border-line font-mono text-[13px] text-fg',
             densityClass,
             align === 'right' && 'text-right',
             inlineJump && 'group/cell',
             // 冻结列必须自带不透明底色，否则滚过来的内容会从它下面透出来。
             // 选中时让选区色盖过它——那才是此刻要表达的状态
             frozenLeft !== null && 'sticky z-10',
-            frozenLeft !== null && !selected && 'bg-surface',
+            frozenLeft !== null && !selected && !searchMatched && 'bg-surface',
             lastFrozen && 'border-r-2 border-r-line-strong',
+            searchMatched && !selected && 'bg-warning-soft',
+            searchActive && 'ring-2 ring-inset ring-warning',
             selected && 'bg-accent-soft',
             focused && 'outline outline-1 -outline-offset-1 outline-accent'
           )}
@@ -1623,12 +1804,14 @@ export default function TableDataViewer({
                       </button>
                       {showColumnMenu && (
                         <GridColumnMenu
-                          columns={columnNames}
+                          columns={normalizedColumnOrder.map((index) => columnNames[index] ?? '')}
                           hidden={hiddenColumns}
                           onToggle={(name) => (
                             setHiddenColumns((current) => toggleHiddenColumn(current, columnNames, name))
                           )}
                           onShowAll={() => setHiddenColumns(new Set())}
+                          hasCustomOrder={hasCustomColumnOrder}
+                          onResetOrder={() => setColumnOrder([])}
                           density={density}
                           onDensityChange={setDensity}
                           frozenCount={frozenCount}
@@ -1650,6 +1833,21 @@ export default function TableDataViewer({
                       <Filter size={14} />
                       <span>{t('filter.title')}</span>
                       {appliedFilterCount > 0 && <span>({appliedFilterCount})</span>}
+                    </button>
+
+                    <button
+                      onClick={() => setShowFindBar((open) => !open)}
+                      disabled={tableData.length === 0}
+                      className={clsx(
+                        'flex items-center space-x-1 rounded-control border px-3 py-1.5 text-sm transition-colors disabled:opacity-50',
+                        showFindBar
+                          ? 'border-accent-line bg-accent-soft text-accent'
+                          : 'border-line-strong text-fg hover:bg-surface-hover'
+                      )}
+                      title={t('grid.findButtonTitle', { shortcut: formatShortcut(SHORTCUTS.findInGrid) })}
+                    >
+                      <Search size={14} />
+                      <span>{t('grid.findButton')}</span>
                     </button>
 
                     <button
@@ -1877,7 +2075,24 @@ export default function TableDataViewer({
                     </div>
                   )}
 
-                  <div {...cells.gridProps} className="flex-1 overflow-auto focus:outline-none">
+                  {showFindBar && (
+                    <GridFindBar
+                      query={findQuery}
+                      onQueryChange={setFindQuery}
+                      matchCount={findMatches.length}
+                      activeMatchIndex={activeMatchIndex}
+                      onPrev={() => jumpToFindMatch(-1)}
+                      onNext={() => jumpToFindMatch(1)}
+                      onClose={() => {
+                        setShowFindBar(false);
+                        setFindQuery('');
+                      }}
+                      scopeHint={t('grid.findScopeCurrentPage')}
+                    />
+                  )}
+
+                  <div className="flex min-h-0 flex-1 overflow-hidden">
+                  <div {...cells.gridProps} className="min-w-0 flex-1 overflow-auto focus:outline-none">
                     <div style={{ width: `${gridWidth}px`, minWidth: '100%' }}>
                       {/* 按量出来的宽度铺，不用 w-full：w-full 会把富余宽度按比例
                           摊给各列，量出来的列宽就失去意义了 */}
@@ -1902,9 +2117,12 @@ export default function TableDataViewer({
                               return (
                               <th
                                 key={index}
+                                data-col-orig-index={index}
+                                data-col-display-index={visiblePosition}
                                 // 冻结列自己接管 sticky：thead 的 sticky top 只管纵向，
                                 // 横向要在每个 th 上单独钉住，并压过后面滚过来的列
                                 style={frozenLeft === null ? undefined : { left: `${frozenLeft}px` }}
+                                onMouseDown={(event) => columnReorder.startColumnDrag(index, visiblePosition, event)}
                                 onContextMenu={(event) => {
                                   event.preventDefault();
                                   setContextTarget({
@@ -1915,36 +2133,56 @@ export default function TableDataViewer({
                                   });
                                 }}
                                 className={clsx(
-                                  'relative border-r border-line px-2 py-1 text-left text-xs font-medium text-fg',
+                                  'relative select-none border-r border-line px-2 py-1 text-left text-xs font-medium text-fg',
                                   frozenLeft !== null && 'sticky top-0 z-30 bg-surface-sunken',
-                                  visiblePosition === lastFrozenPosition && 'border-r-2 border-r-line-strong'
+                                  visiblePosition === lastFrozenPosition && 'border-r-2 border-r-line-strong',
+                                  columnReorder.draggingIndex === index && 'opacity-50'
                                 )}
                               >
-                                <div className="flex items-center gap-1">
-                                  <ColumnSortButton
-                                    columnLabel={column.name}
-                                    direction={sort?.column === column.name ? sort.direction : null}
-                                    onToggle={() => {
-                                      const next = nextColumnSort(sortRef.current, column.name);
-                                      setSort(next);
-                                      sortRef.current = next;
-                                      setCurrentPage(1);
-                                      void loadTableData(1);
-                                    }}
+                                {columnReorder.overIndex === index && columnReorder.dropSide && (
+                                  <span
+                                    aria-hidden="true"
+                                    className={clsx(
+                                      'pointer-events-none absolute inset-y-0 z-40 w-0.5 bg-accent',
+                                      columnReorder.dropSide === 'left' ? 'left-0' : 'right-0'
+                                    )}
                                   />
-                                  <span className="truncate" title={column.name}>{column.name}</span>
-                                  {column.is_primary_key && (
-                                    <span className="shrink-0 text-warning" title={t('table.column.primaryKey')}>🔑</span>
-                                  )}
-                                  {!column.is_nullable && (
-                                    <span className="shrink-0 text-danger" title={t('table.notNull')}>*</span>
-                                  )}
-                                </div>
-                                <div
-                                  className="truncate text-[10px] font-normal text-fg-subtle"
-                                  title={column.data_type}
-                                >
-                                  {column.data_type}
+                                )}
+                                <div className="flex items-center gap-1">
+                                  {(() => {
+                                    const sortIndex = sorts.findIndex((item) => item.column === column.name);
+                                    const direction = sortIndex >= 0 ? sorts[sortIndex].direction : null;
+                                    const priority = sorts.length > 1 && sortIndex >= 0 ? sortIndex + 1 : undefined;
+                                    return (
+                                      <ColumnSortButton
+                                        columnLabel={column.name}
+                                        direction={direction}
+                                        priority={priority}
+                                        onToggle={(append) => {
+                                          const next = nextColumnSorts(sortsRef.current, column.name, append);
+                                          setSorts(next);
+                                          sortsRef.current = next;
+                                          setCurrentPage(1);
+                                          void loadTableData(1, pageSize, undefined, next);
+                                        }}
+                                      >
+                                        <div className="flex min-w-0 flex-1 flex-col">
+                                          <div className="flex min-w-0 items-center gap-1">
+                                            <span className="truncate">{column.name}</span>
+                                            {column.is_primary_key && (
+                                              <span className="shrink-0 text-warning" title={t('table.column.primaryKey')}>🔑</span>
+                                            )}
+                                            {!column.is_nullable && (
+                                              <span className="shrink-0 text-danger" title={t('table.notNull')}>*</span>
+                                            )}
+                                          </div>
+                                          <span className="truncate text-[10px] font-normal text-fg-subtle">
+                                            {column.data_type}
+                                          </span>
+                                        </div>
+                                      </ColumnSortButton>
+                                    );
+                                  })()}
                                 </div>
                                 <ColumnResizeHandle
                                   active={resizingIndex === index}
@@ -2003,7 +2241,13 @@ export default function TableDataViewer({
                                   lastFrozen: visiblePosition === lastFrozenPosition,
                                   selected: cells.isSelected(rowIndex, visiblePosition),
                                   focused: cells.isFocused(rowIndex, visiblePosition),
-                                  onSelect: (extend) => cells.selectCell(rowIndex, visiblePosition, extend),
+                                  searchMatched: findMatchSet.has(`${rowIndex}:${visiblePosition}`),
+                                  searchActive:
+                                    activeFindMatch?.row === rowIndex
+                                    && activeFindMatch?.column === visiblePosition,
+                                  onSelect: (extend) => cells.handleCellClick(rowIndex, visiblePosition, extend),
+                                  onBeginDrag: (extend) => cells.beginDragSelection(rowIndex, visiblePosition, extend),
+                                  onDragEnter: (primaryButtonDown) => cells.updateDragSelection(rowIndex, visiblePosition, primaryButtonDown),
                                   inlineJump,
                                   onJump: handleJump,
                                   onContextMenu: (event) => {
@@ -2091,6 +2335,49 @@ export default function TableDataViewer({
                       </table>
                     </div>
                   </div>
+                  {inspectorState && tableSchema && (
+                    <GridRowInspector
+                      columns={normalizedColumnOrder.map((origIndex) => ({
+                        name: tableSchema.columns[origIndex]?.name ?? '',
+                        dataType: tableSchema.columns[origIndex]?.data_type ?? null
+                      }))}
+                      rowA={normalizedColumnOrder.map(
+                        (origIndex) =>
+                          positionalRows[inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA]?.[origIndex] ?? null
+                      )}
+                      rowALabel={`#${(currentPage - 1) * pageSize + (inspectorState.mode === 'single' ? inspectorState.rowIndex : inspectorState.rowA) + 1}`}
+                      rowB={inspectorState.mode === 'compare'
+                        ? normalizedColumnOrder.map((origIndex) => positionalRows[inspectorState.rowB]?.[origIndex] ?? null)
+                        : undefined}
+                      rowBLabel={inspectorState.mode === 'compare'
+                        ? `#${(currentPage - 1) * pageSize + inspectorState.rowB + 1}`
+                        : undefined}
+                      onCopyText={(text) => cells.copyText(text)}
+                      onPrevRow={inspectorState.mode === 'single'
+                        ? () => setInspectorState({
+                            mode: 'single',
+                            rowIndex: Math.max(0, inspectorState.rowIndex - 1)
+                          })
+                        : undefined}
+                      onNextRow={inspectorState.mode === 'single'
+                        ? () => setInspectorState({
+                            mode: 'single',
+                            rowIndex: Math.min(tableData.length - 1, inspectorState.rowIndex + 1)
+                          })
+                        : undefined}
+                      canPrevRow={inspectorState.mode === 'single' && inspectorState.rowIndex > 0}
+                      canNextRow={inspectorState.mode === 'single' && inspectorState.rowIndex < tableData.length - 1}
+                      onClose={() => setInspectorState(null)}
+                    />
+                  )}
+                  </div>
+
+                  {selectionSummary && (
+                    <GridSelectionStatsBar
+                      summary={selectionSummary}
+                      onCopyValue={(value) => cells.copyText(value)}
+                    />
+                  )}
                   
                   {/* 分页控件 */}
                   {totalPages > 1 && (
@@ -2154,11 +2441,42 @@ export default function TableDataViewer({
       </div>
 
       {/* 表数据是服务端分页的，内存里只有当前这一页——导出必须如实说明范围 */}
-      {contextTarget && (
+      {contextTarget && (() => {
+        const colName = visibleColumnNames[contextTarget.column];
+        const cellValue = contextTarget.row !== null
+          ? (visibleRows[contextTarget.row]?.[contextTarget.column] ?? null)
+          : null;
+        const filterText = contextTarget.row !== null ? cellValueToFilterText(cellValue) : null;
+        const twoRows = selectedTwoRows(cells.selection);
+        const selectionBounds = cells.selection ? selectionRect(cells.selection) : null;
+        const canBatchEdit = editable && editState.mode === 'view' && cells.selection !== null;
+        return (
         <GridContextMenu
           target={contextTarget}
-          columnName={visibleColumnNames[contextTarget.column]}
+          columnName={colName}
+          cellPreview={contextTarget.row !== null && filterText !== null ? formatFilterPreview(cellValue) : undefined}
+          onFilterEquals={
+            contextTarget.row !== null && colName && filterText !== null
+              ? () => applyQuickFilter(colName, 'eq', filterText)
+              : undefined
+          }
+          onFilterNotEquals={
+            contextTarget.row !== null && colName && filterText !== null
+              ? () => applyQuickFilter(colName, 'ne', filterText)
+              : undefined
+          }
+          onFilterIsNull={
+            contextTarget.row !== null && colName && cellValue === null
+              ? () => applyQuickFilter(colName, 'is-null')
+              : undefined
+          }
+          onFilterIsNotNull={
+            contextTarget.row !== null && colName && cellValue === null
+              ? () => applyQuickFilter(colName, 'is-not-null')
+              : undefined
+          }
           onSelectColumn={(column) => cells.selectColumn(column)}
+          onResetColumnOrder={hasCustomColumnOrder ? () => setColumnOrder([]) : undefined}
           onCopy={(withHeaders) => cells.copy(withHeaders)}
           onCopyRow={(row) => cells.copyRow(row)}
           onCopyColumnValues={(column) => cells.copyColumn(column, false)}
@@ -2172,6 +2490,22 @@ export default function TableDataViewer({
           }}
           copyColumnSqlInDisabled={!hasNonNullColumnValue(visibleRows, contextTarget.column)}
           onExportColumn={(column) => setExportIntent({ columnIndex: column })}
+          onInspectRow={(row) => setInspectorState({ mode: 'single', rowIndex: row })}
+          onCompareSelectedRows={
+            twoRows
+              ? () => setInspectorState({ mode: 'compare', rowA: twoRows[0], rowB: twoRows[1] })
+              : undefined
+          }
+          onFillDown={
+            canBatchEdit && selectionBounds && selectionBounds.bottom > selectionBounds.top
+              ? () => applyBatchFill('fill-down')
+              : undefined
+          }
+          onSetSelectionNull={
+            canBatchEdit
+              ? () => applyBatchFill('set-null')
+              : undefined
+          }
           // 与操作列给「编辑」按钮的条件相同：排了队的行只能撤销
           onEditRow={
             contextTarget.row !== null
@@ -2185,14 +2519,14 @@ export default function TableDataViewer({
             if (contextTarget.row === null) {
               return [];
             }
-            const colName = visibleColumnNames[contextTarget.column];
             const row = tableData[contextTarget.row];
             return colName && row ? resolveRowCellJumps(row, colName) : [];
           })()}
           onJump={handleJump}
           onClose={() => setContextTarget(null)}
         />
-      )}
+        );
+      })()}
 
       {showChanges && (
         <ChangeDiffDialog

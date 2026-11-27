@@ -219,6 +219,43 @@ function calendarKey(value: SerializedResultValue): { year: number; rest: string
 }
 
 /**
+ * 按多列组合排序（支持 `Shift + 点击` 次级排序）。
+ * 返回新数组，不改原数组；排序稳定，NULL 恒排在末尾。
+ */
+export function sortRowsByColumns(
+  columns: readonly string[],
+  rows: readonly (readonly SerializedResultValue[])[],
+  sorts: readonly ColumnSort[]
+): (readonly SerializedResultValue[])[] {
+  const resolved = sorts
+    .map((item) => ({ index: columns.indexOf(item.column), sign: item.direction === 'asc' ? 1 : -1 }))
+    .filter((item) => item.index >= 0);
+
+  if (resolved.length === 0) {
+    return [...rows];
+  }
+
+  return [...rows]
+    .map((row, position) => ({ row, position }))
+    .sort((left, right) => {
+      for (const { index, sign } of resolved) {
+        const leftValue = left.row[index] ?? null;
+        const rightValue = right.row[index] ?? null;
+        const order = compareResultValues(leftValue, rightValue);
+        if (order === 0) {
+          continue;
+        }
+        // NULL 永远在末尾，不参与升降序翻转
+        const leftNull = leftValue === null;
+        const rightNull = rightValue === null;
+        return leftNull !== rightNull ? order : order * sign;
+      }
+      return left.position - right.position;
+    })
+    .map((entry) => entry.row);
+}
+
+/**
  * 按某一列排序。返回新数组，不改原数组——调用方常把原始结果留作「未排序」态。
  * 排序是稳定的：同值行保持原有相对顺序。
  */
@@ -227,30 +264,7 @@ export function sortRowsByColumn(
   rows: readonly (readonly SerializedResultValue[])[],
   sort: ColumnSort | null
 ): (readonly SerializedResultValue[])[] {
-  if (!sort) {
-    return [...rows];
-  }
-
-  const index = columns.indexOf(sort.column);
-  if (index < 0) {
-    return [...rows];
-  }
-
-  const sign = sort.direction === 'asc' ? 1 : -1;
-
-  return [...rows]
-    .map((row, position) => ({ row, position }))
-    .sort((left, right) => {
-      const order = compareResultValues(left.row[index] ?? null, right.row[index] ?? null);
-      // NULL 永远在末尾，所以它的次序不参与升降序翻转
-      const leftNull = (left.row[index] ?? null) === null;
-      const rightNull = (right.row[index] ?? null) === null;
-      if (leftNull !== rightNull) {
-        return order;
-      }
-      return order !== 0 ? order * sign : left.position - right.position;
-    })
-    .map((entry) => entry.row);
+  return sortRowsByColumns(columns, rows, sort ? [sort] : []);
 }
 
 /** 点击表头时的三态循环：升序 → 降序 → 取消排序 */
@@ -259,4 +273,32 @@ export function nextColumnSort(current: ColumnSort | null, column: string): Colu
     return { column, direction: 'asc' };
   }
   return current.direction === 'asc' ? { column, direction: 'desc' } : null;
+}
+
+/**
+ * 支持 `Shift + 点击` 追加/循环次级排序的多列排序状态机：
+ * - 普通点击：退回单列三态循环（若当前是多列排序且点了其中一列，收窄为仅按该列排序）
+ * - `append = true`（Shift + 点击）：保留其它排序列，仅对该列做 升序 → 降序 → 移除
+ */
+export function nextColumnSorts(
+  current: readonly ColumnSort[],
+  column: string,
+  append = false
+): ColumnSort[] {
+  if (!append) {
+    if (current.length === 1 && current[0].column === column) {
+      const next = nextColumnSort(current[0], column);
+      return next ? [next] : [];
+    }
+    return [{ column, direction: 'asc' }];
+  }
+
+  const index = current.findIndex((item) => item.column === column);
+  if (index < 0) {
+    return [...current, { column, direction: 'asc' }];
+  }
+  if (current[index].direction === 'asc') {
+    return current.map((item, i) => (i === index ? { ...item, direction: 'desc' } : item));
+  }
+  return current.filter((_, i) => i !== index);
 }

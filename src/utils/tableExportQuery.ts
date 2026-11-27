@@ -18,7 +18,7 @@ export interface TableExportQuery {
    * 渲染期调用的——在这里现造一个会抛的排序，一次失败就是整个应用白屏。
    */
   paginationOrder: TablePaginationOrder | null;
-  sort: ColumnSort | null;
+  sort: ColumnSort | readonly ColumnSort[] | null;
   dialect: SqlIdentifierDialect;
   /**
    * 按导出的列去重（`SELECT DISTINCT`）。
@@ -31,17 +31,26 @@ export interface TableExportQuery {
 
 function createDistinctOrderClause(
   selectedNames: readonly string[],
-  sort: ColumnSort | null,
+  sort: ColumnSort | readonly ColumnSort[] | null,
   dialect: SqlIdentifierDialect
 ): string {
-  const ordered = sort && selectedNames.includes(sort.column)
-    ? [
-        `${quoteSqlIdentifier(sort.column, dialect)} ${sort.direction === 'desc' ? 'DESC' : 'ASC'}`,
-        ...selectedNames
-          .filter((name) => name !== sort.column)
-          .map((name) => quoteSqlIdentifier(name, dialect))
-      ]
-    : selectedNames.map((name) => quoteSqlIdentifier(name, dialect));
+  const sorts = sort === null ? [] : (Array.isArray(sort) ? sort : [sort]);
+  const selectedSet = new Set(selectedNames);
+  const used = new Set<string>();
+  const ordered: string[] = [];
+
+  for (const item of sorts) {
+    if (!selectedSet.has(item.column) || used.has(item.column)) {
+      continue;
+    }
+    used.add(item.column);
+    ordered.push(`${quoteSqlIdentifier(item.column, dialect)} ${item.direction === 'desc' ? 'DESC' : 'ASC'}`);
+  }
+  for (const name of selectedNames) {
+    if (!used.has(name)) {
+      ordered.push(quoteSqlIdentifier(name, dialect));
+    }
+  }
   return ordered.length > 0 ? `ORDER BY ${ordered.join(', ')}` : '';
 }
 

@@ -1,4 +1,5 @@
 import type { ColumnInfo } from '../contracts';
+import type { SerializedResultValue } from '../contracts/resultSet';
 import { quoteSqlIdentifier, type SqlIdentifierDialect } from './sqlIdentifiers';
 import {
   escapeClickHouseLikePattern,
@@ -8,6 +9,7 @@ import {
 } from './sqlLiterals';
 import { binaryLiteral, columnEditorKind } from './columnEditors';
 import { columnTypeToken, isNumericColumnType, NUMERIC_LITERAL } from './columnTypes';
+import { formatResultValue } from './resultValues';
 import { ORACLE_ZONED_TIMESTAMP, oracleTimestampText } from './tablePagination';
 
 /** `0x` 加偶数位十六进制：网格里二进制值的写法 */
@@ -285,4 +287,39 @@ export function buildFilterClause(
     .filter((term): term is string => term !== null);
 
   return terms.length === 0 ? '' : `WHERE ${terms.join(' AND ')}`;
+}
+
+/**
+ * 把网格里的单元格值转成 `ColumnFilter.value`；`NULL` 或空字符串返回 `null`
+ * （`NULL` 走 `is-null` / `is-not-null`；空字符串在 `isCompleteFilter` 中视作未填写）。
+ */
+export function cellValueToFilterText(value: SerializedResultValue): string | null {
+  if (value === null) {
+    return null;
+  }
+  const text = formatResultValue(value);
+  return text === '' ? null : text;
+}
+
+/**
+ * 右键「按当前值快速筛选」的条件合并规则：
+ * - `eq` / `is-null` / `is-not-null` 替换同一列已有条件（避免产生恒假的 `col = A AND col = B`）
+ * - `ne` 允许叠加多个排除值（像 Excel 连续排除多个状态），去重完全相同的条目
+ */
+export function upsertQuickFilter(
+  existing: readonly ColumnFilter[],
+  next: ColumnFilter
+): ColumnFilter[] {
+  if (next.operator === 'ne') {
+    const duplicate = existing.some(
+      (item) => item.column === next.column
+        && item.operator === 'ne'
+        && item.value === next.value
+    );
+    return duplicate ? [...existing] : [...existing, next];
+  }
+  return [
+    ...existing.filter((item) => item.column !== next.column),
+    next
+  ];
 }

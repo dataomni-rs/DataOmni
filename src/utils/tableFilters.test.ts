@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ColumnInfo } from '../contracts';
-import { buildFilterClause, isCompleteFilter, type ColumnFilter } from './tableFilters';
+import {
+  buildFilterClause,
+  cellValueToFilterText,
+  isCompleteFilter,
+  upsertQuickFilter,
+  type ColumnFilter
+} from './tableFilters';
 
 function column(name: string, dataType = 'text'): ColumnInfo {
   return { name, data_type: dataType, is_nullable: true, is_primary_key: false };
@@ -339,5 +345,31 @@ describe('二进制列上的比较', () => {
   it('文本列上的 0x 仍是文本', () => {
     expect(buildFilterClause([filter({ column: 'name', value: '0x0aff' })], COLUMNS, 'mysql'))
       .toBe("WHERE `name` = '0x0aff'");
+  });
+});
+
+describe('右键单元格快速筛选', () => {
+  it('NULL 与空字符串不直接生成值比较', () => {
+    expect(cellValueToFilterText(null)).toBeNull();
+    expect(cellValueToFilterText('')).toBeNull();
+    expect(cellValueToFilterText({ type: 'bigint', value: '65253938877693959' })).toBe('65253938877693959');
+  });
+
+  it('eq 替换同列条件，ne 允许同列叠加并去重', () => {
+    let list = upsertQuickFilter([], filter({ id: '1', column: 'name', operator: 'ne', value: 'a' }));
+    list = upsertQuickFilter(list, filter({ id: '2', column: 'name', operator: 'ne', value: 'b' }));
+    list = upsertQuickFilter(list, filter({ id: '3', column: 'name', operator: 'ne', value: 'a' }));
+    list = upsertQuickFilter(list, filter({ id: '4', column: 'id', operator: 'eq', value: '10' }));
+    expect(list.map((item) => [item.column, item.operator, item.value])).toEqual([
+      ['name', 'ne', 'a'],
+      ['name', 'ne', 'b'],
+      ['id', 'eq', '10']
+    ]);
+
+    list = upsertQuickFilter(list, filter({ id: '5', column: 'name', operator: 'eq', value: 'c' }));
+    expect(list.map((item) => [item.column, item.operator, item.value])).toEqual([
+      ['id', 'eq', '10'],
+      ['name', 'eq', 'c']
+    ]);
   });
 });

@@ -16,7 +16,14 @@ interface GridContextMenuProps {
   target: GridContextTarget;
   /** 右键所在列的列名，用于「导出列 xxx…」清晰提示目标列 */
   columnName?: string;
+  /** 右键单元格值的短预览，用于「筛选 = xxx / 排除 ≠ xxx」 */
+  cellPreview?: string;
+  onFilterEquals?: () => void;
+  onFilterNotEquals?: () => void;
+  onFilterIsNull?: () => void;
+  onFilterIsNotNull?: () => void;
   onSelectColumn?: (column: number) => void;
+  onResetColumnOrder?: () => void;
   onCopy: (withHeaders: boolean) => void;
   onCopyRow: (row: number) => void;
   onCopyColumnValues?: (column: number) => void;
@@ -25,6 +32,10 @@ interface GridContextMenuProps {
   /** 这一列当前页全为 NULL 时置灰，避免复制出无意义的空列表 */
   copyColumnSqlInDisabled?: boolean;
   onExportColumn?: (column: number) => void;
+  onInspectRow?: (row: number) => void;
+  onCompareSelectedRows?: () => void;
+  onFillDown?: () => void;
+  onSetSelectionNull?: () => void;
   /** 只有这一行此刻能改时才给：表数据页的操作列在最右边，列一多就看不见 */
   onEditRow?: (row: number) => void;
   /** 右键所在单元格可跳转的目标表（物理外键 / SQL JOIN / 目录匹配） */
@@ -49,7 +60,13 @@ interface MenuItem {
 export function GridContextMenu({
   target,
   columnName,
+  cellPreview,
+  onFilterEquals,
+  onFilterNotEquals,
+  onFilterIsNull,
+  onFilterIsNotNull,
   onSelectColumn,
+  onResetColumnOrder,
   onCopy,
   onCopyRow,
   onCopyColumnValues,
@@ -57,6 +74,10 @@ export function GridContextMenu({
   onCopyColumnSqlIn,
   copyColumnSqlInDisabled = false,
   onExportColumn,
+  onInspectRow,
+  onCompareSelectedRows,
+  onFillDown,
+  onSetSelectionNull,
   onEditRow,
   jumpTargets,
   onJump,
@@ -73,6 +94,29 @@ export function GridContextMenu({
   const groups: MenuItem[][] = [];
 
   if (target.row !== null) {
+    const filterItems: MenuItem[] = [];
+    if (onFilterEquals && cellPreview !== undefined) {
+      filterItems.push({
+        label: t('grid.filterEquals', { value: cellPreview }),
+        run: onFilterEquals
+      });
+    }
+    if (onFilterNotEquals && cellPreview !== undefined) {
+      filterItems.push({
+        label: t('grid.filterNotEquals', { value: cellPreview }),
+        run: onFilterNotEquals
+      });
+    }
+    if (onFilterIsNull) {
+      filterItems.push({ label: t('grid.filterIsNull'), run: onFilterIsNull });
+    }
+    if (onFilterIsNotNull) {
+      filterItems.push({ label: t('grid.filterIsNotNull'), run: onFilterIsNotNull });
+    }
+    if (filterItems.length > 0) {
+      groups.push(filterItems);
+    }
+
     const rowIndex = target.row;
     groups.push([
       { label: t('grid.copySelection'), hint: hint(SHORTCUTS.copySelection), run: () => onCopy(false) },
@@ -111,13 +155,43 @@ export function GridContextMenu({
   }
   groups.push(columnItems);
 
-  if (target.row === null && onExportColumn) {
-    groups.push([{ label: exportColumnLabel, run: () => onExportColumn(target.column) }]);
+  if (target.row === null && (onExportColumn || onResetColumnOrder)) {
+    const headerExtras: MenuItem[] = [];
+    if (onExportColumn) {
+      headerExtras.push({ label: exportColumnLabel, run: () => onExportColumn(target.column) });
+    }
+    if (onResetColumnOrder) {
+      headerExtras.push({ label: t('columns.resetOrder'), run: onResetColumnOrder });
+    }
+    groups.push(headerExtras);
   }
 
-  if (target.row !== null && onEditRow) {
+  if (target.row !== null) {
     const rowIndex = target.row;
-    groups.push([{ label: t('grid.editRow'), run: () => onEditRow(rowIndex) }]);
+    const inspectItems: MenuItem[] = [];
+    if (onInspectRow) {
+      inspectItems.push({ label: t('grid.inspectRow'), run: () => onInspectRow(rowIndex) });
+    }
+    if (onCompareSelectedRows) {
+      inspectItems.push({ label: t('grid.compareSelectedRows'), run: onCompareSelectedRows });
+    }
+    if (inspectItems.length > 0) {
+      groups.push(inspectItems);
+    }
+
+    const editItems: MenuItem[] = [];
+    if (onEditRow) {
+      editItems.push({ label: t('grid.editRow'), run: () => onEditRow(rowIndex) });
+    }
+    if (onFillDown) {
+      editItems.push({ label: t('grid.fillDown'), hint: hint(SHORTCUTS.fillDown), run: onFillDown });
+    }
+    if (onSetSelectionNull) {
+      editItems.push({ label: t('grid.setSelectionNull'), run: onSetSelectionNull });
+    }
+    if (editItems.length > 0) {
+      groups.push(editItems);
+    }
   }
 
   const jumps = target.row !== null && onJump && jumpTargets && jumpTargets.length > 0 ? jumpTargets : [];
