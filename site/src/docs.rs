@@ -1485,6 +1485,24 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-3-3",
+    toc_label: "v1.3.3 (2026-11-27)",
+    heading: "v1.3.3 — 2026-11-27",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Brings Excel-like interactive grid ergonomics to both Table Data and SQL Query Results so you can explore, filter, compare, reorder, and batch-edit data without writing repetitive SQL.",
+      ),
+      DocBlock::Bullets(&[
+        "Rectangular drag selection & live aggregation bar: drag across any contiguous cell rectangle without pulling in unintended columns, preserve the selection on right-click for rectangular TSV copy, and view real-time cell count, non-null count, distinct count, plus exact BigInt fixed-point sum, average, min, and max (click any metric to copy). Query result grids now feature sticky headers and a viewport-pinned footer bar.",
+        "Right-click quick value filters: filter = value, exclude != value, IS NULL, and IS NOT NULL from any cell — emitting server-side WHERE clauses in Table Data and instant removable filter chips in SQL Query Results synced with pagination, sorting, charts, profiling, and export.",
+        "Inline grid find & filter (Cmd+F / Ctrl+F): highlight and step through matches on the current page in Table Data, or filter all loaded rows in SQL Query Results with one-click matching-rows-only mode.",
+        "Vertical row inspector & 2-row diff drawer: inspect wide rows vertically with field search, auto-formatted JSON, and previous/next row stepping; select 2 adjacent rows and right-click Compare selected 2 rows to diff fields side-by-side with a Show differences only toggle.",
+        "Full-header multi-column sorting & drag-to-reorder columns: click anywhere on a column header to sort and Shift+click additional columns for priority-badged multi-column sorting (server-side ORDER BY in Table Data and client-side multi-sort in SQL Query Results); drag any column header past 6px to swap or reorder columns across data cells, frozen offsets, selection copy, exports, charts, and row diffs, with one-click Reset order.",
+        "Safe batch cell fill (Table Data): press Cmd+D / Ctrl+D or right-click to fill down from the top cell or set a selection to NULL — automatically skipping key, generated, and NOT NULL columns while staging every change into the SQL-previewed single-transaction commit queue.",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-3-2",
     toc_label: "v1.3.2 (2026-11-27)",
     heading: "v1.3.2 — 2026-11-27",
@@ -1632,7 +1650,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.2 through v1.0.0 across macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.3 through v1.0.0 across macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1641,6 +1659,24 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-3-3",
+    toc_label: "v1.3.3（2026-11-27）",
+    heading: "v1.3.3 — 2026-11-27",
+    blocks: &[
+      DocBlock::Paragraph(
+        "为表数据视图与 SQL 查询结果两张主网格补齐类 Excel 交互能力，支持拖拽框选、实时聚合、右键筛选、表头换列、多列排序、双行对比与安全批量填充。",
+      ),
+      DocBlock::Bullets(&[
+        "矩形拖拽框选与实时聚合状态栏：支持按住左键拖拽框选任意连续矩形单元格区域（不误卷入非目标列），右键选区保留整块选区并支持整块 TSV 复制；底部状态栏实时计算已选格数、非空数、去重数及纯数值选区的精确 BigInt 定点求和 / 均值 / 最小 / 最大值（点击任一指标即可复制），SQL 查询结果网格新增粘性表头与吸底状态栏 / 分页条。",
+        "右键按当前值快速筛选：右键任意单元格一键执行「筛选 = 当前值」「排除 ≠ 当前值」「仅看 NULL / 排除 NULL」——表数据视图下发服务端 WHERE，SQL 查询结果客户端即时过滤并展示可逐个移除的筛选标签，同步作用于分页、排序、图表、画像与导出。",
+        "网格内即时查找与过滤（Cmd+F / Ctrl+F）：表数据支持当前页高亮定位与上下跳转，SQL 查询结果支持跨全部已加载行高亮及「仅看匹配行」即时过滤。",
+        "宽表单行竖排详情 & 双行并排对比抽屉：右键「查看行详情（竖排）」支持字段检索、JSON 自动格式化与上下行切换；框选相邻 2 行后右键「对比选中的 2 行」可并排高亮差异列并提供「仅看差异列」开关。",
+        "整段列头多列排序与拖动交换列顺序：点击列名整段表头即可排序，Shift+点击多列追加次级排序并展示数字优先级徽标；按住列头水平拖动超过 6px 即可交换或重排列顺序（不干扰点击排序与列宽拖拽），同步作用于数据格、冻结列偏移、选区复制、导出 / 图表 / 画像及行详情对比，并支持一键「重置列顺序」。",
+        "安全批量填充（表数据视图）：框选多行后支持 Cmd+D / Ctrl+D（或右键）「向下填充（首格值）」及「选区设为 NULL」，自动跳过键列、生成列与非空列，所有变更进入暂存队列并经 SQL 预览单事务提交。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-3-2",
     toc_label: "v1.3.2（2026-11-27）",
@@ -1789,7 +1825,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.3.2、v1.3.1 与 v1.3.0 至 v1.0.0 正式版能力更新、单列导出与真库回归覆盖、安全加固细节与配置文件前后向兼容说明。",
+  meta_description: "DataOmni v1.3.3、v1.3.2 与 v1.3.0 至 v1.0.0 正式版能力更新、类 Excel 网格交互、单列导出、安全加固细节与配置文件前后向兼容说明。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
