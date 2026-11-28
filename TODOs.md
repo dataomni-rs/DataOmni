@@ -28,7 +28,7 @@
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
 | v1.3.1 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [x] `DC0–DC7` 全部合并（`DC0–DC4` + `DC6` PR `#69`、`DC7` PR `#70`、`DC5` 达梦 DM8 `odbc` feature PR `#71`），已于 2026-11-22 正式发布 `v1.3.1`（三平台 10 项产物、`latest.json`、`dataomni-rs/homebrew-tap` 与 `dataomni.dev` 全量上线） |
-| v1.3.4 架构稳固与安全加固 | 2026-11-28 全仓架构与安全深度审计收口：信任边界与注入封堵（`H1–H7`）、前端竞态/方言收口与后端并发阻塞修复（`H8–H13`）、纵深防线与按变化边界结构减债（`H14–H18`） | [-] 进行中 |
+| v1.3.4 架构稳固与安全加固 | 2026-11-28 全仓架构与安全深度审计收口：信任边界与注入封堵（`H1–H7`）、前端竞态/方言收口与后端并发阻塞修复（`H8–H13`）、纵深防线与按变化边界结构减债（`H14–H18`） | [-] Batch 1（`H1–H7`）已全部收口验证通过，正在推进 Batch 2（`H8–H13`） |
 | 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
@@ -212,20 +212,20 @@
 
 ### 第一批（Batch 1 · P0 安全止血与 UB 修复，`H1–H7`）
 
-- [ ] H1（S3）修复 Elasticsearch CLI/MCP 只读门禁 `%5f` 百分号编码与 `..` 路径折叠绕过
-  - 在 `cli/elasticsearch.rs` 中先按 URL 规范化路径并显式拒绝 `.`、`..`、反斜杠、含百分号编码或控制字符的段，通配符 `*` 禁止匹配 `.`/`..`/`_` 前缀段；反向单测覆盖 `POST /books/%5fdoc/_search`、`GET /%5fflush`、`POST /books/%5fdelete_by_query/_explain/..`、`POST /books/_explain/..`。
-- [ ] H2（S4）将 CSV 导入 `valid_type_name` 替换为严格 SQL 类型语法解析器，消除 PG / SQL Server SQL 注入
-  - 替换 `services/csv_import.rs` 宽字符白名单为严格 SQL 类型语法校验（可选 `schema.` + 合法 SQL 类型名/已知多词类型 + 可选数字/`max` 精度 `(p[,s])` + 可选 `[]`，禁止任意空格组合、子查询与多余括号）；反向单测覆盖 `INT, 1) IS NULL OR (SELECT 1)=1--`、`text) VALUES ((SELECT 1))` 等注入载荷及合法多词/带引号/数组类型。
-- [ ] H3（C3）消除达梦 DM8 `ensure_dm_svc_utf8` 工作线程 `std::env::set_var` POSIX 多线程 UB 与 `/tmp` 抢占
-  - 将 `dm_svc.conf` 迁至用户私有目录（如 `app_config_dir()/dm8`）并在 `main.rs` 创建多线程运行时之前（单线程启动阶段）预写并设置 `DM_SVC_PATH`（仍尊重外部已有环境变量）；移走 `spawn_blocking` 内的 `set_var` 调用并补单测验证私有路径与幂等初始化。
-- [ ] H4（S5）加固 `opengauss_relay`：握手帧长上限 + 本机临时口令鉴权 + 生命周期绑定清理
-  - `read_message` 增加握手帧最大字节上限（64 KiB）阻断远端 OOM；每个转发口生成进程内随机本机口令，要求 `sqlx` 客户端先通过本机口令认证再代为向上游握手；将转发口生命周期绑定至连接关闭/删除清理而非进程级永久泄漏；补先红后绿单测。
-- [ ] H5（S6）抽象统一 `path_guard` 并接入全部 13 处文件 IPC 命令
-  - 封禁 `app_config_dir` 与 `app_log_dir`（修复 macOS `~/Library/Logs` 漏保）；`resolve_for_comparison` 向上回溯至最近存在祖先 `canonicalize` 后词法折叠剩余 `..` 段；`write_new_text_files` 逐目标路径校验阻断内部符号链接穿透；全部接路径 IPC 命令（`read_text_file`、`write_text_file`、`write_binary_file`、`write_new_text_files`、`analytics_open_file`、`analytics_attach_file`、`analytics_export_parquet`、`export_connections`、`import_connections`、`export_query_to_file`、`backup_database`、`preview_csv_file`、`import_csv_file`、`mongodb_export_to_file`、`mongodb_import_file`）统一经 `path_guard` 校验；补反向绕过单测。
-- [ ] H6（S1）升级 Agent HMAC 授权至 `dataomni-agent-read-v2` 并覆盖无口令/文件连接
-  - 补签 `ssh_tunnel.{host,port,username,auth,private_key_path,remote_host,remote_port}`、`ssl`、`tls_mode`、全部证书/私钥路径及按 key 排序规范化后的 `options`（阻断 `remote_host` 跳转 PROD 与 `options.odbcDriver` 动态库注入提权）；在钥匙串引入安装级独立随机 HMAC 密钥（`#agent-grant-key`），使 SQLite/DuckDB/X.509/无口令连接同样强制签发与核验 `<id>#agent`；旧 v1 授权在 CLI/MCP 返回明确提示要求用户在界面重新保存升级，不静默放行已被篡改的字段；补全套反向篡改单测。
-- [ ] H7（S2）收口 `tauri-plugin-sql` 历史接缝：MySQL/PostgreSQL 池键去口令、下线原始 URL `open_database_pool`、脱敏锁中毒日志
-  - 将 MySQL/PostgreSQL 池键统一为不含明文口令的标识符（与 SQL Server/Oracle/Mongo/Redis 对齐），`test_connection` 不再向 WebView 返回含口令连接串，前端建连/查询改为按连接 ID 经后端解析连接池，移除 `open_database_pool` 接受前端任意原始 URL 的入口，并在 `pool_registry.rs` 异常日志中脱敏 `{key}`；补反向回归单测。
+- [x] H1（S3）修复 Elasticsearch CLI/MCP 只读门禁 `%5f` 百分号编码与 `..` 路径折叠绕过（`f9083ef`，`cli::elasticsearch::tests` 3/3 先红后绿、`cargo fmt --check` 通过）
+  - 在 `cli/elasticsearch.rs` 中先按与 `services/elasticsearch.rs` 一致的 `url::Url` 解析器规范化路径并严格逐段解码百分号转义，显式拒绝 `.`/`..` 路径折叠、反斜杠、控制字符、双重编码与百分号编码的 `_` 端点段，通配符 `*` 禁止匹配 `.`/`..`/`_` 前缀段；反向单测覆盖 `POST /books/%5fdoc/_search`、`GET /%5fflush`、`POST /books/%5fdelete_by_query/_explain/..`、`POST /books/_explain/..` 等 18 条攻击向量及合法含 `%20` 文档 ID。
+- [x] H2（S4）将 CSV 导入 `valid_type_name` 替换为严格 SQL 类型语法解析器，消除 PG / SQL Server SQL 注入（`f37899a`，`services::csv_import::tests` 29/29 先红后绿、`cargo fmt --check` 通过）
+  - 替换 `services/csv_import.rs` 宽字符白名单为严格 SQL 类型语法解析器（可选单一 `schema.` + 合法 SQL 类型名/已知标准多词类型 + 可选单一精度修饰 `(p[,s])` + 可选 `[]`），阻断全部无单引号/无分号的括号/逗号/多词 SQL 注入载荷（18 条反向载荷与全部合法带引号/多词/数组/PostGIS 类型均通过验证）。
+- [x] H3（C3）消除达梦 DM8 `ensure_dm_svc_utf8` 工作线程 `std::env::set_var` POSIX 多线程 UB 与 `/tmp` 抢占（`bb4d0e1`，`services::dameng::tests` 4/4 + `--features odbc` 编译 + `cargo fmt --check` 全绿）
+  - 将 `dm_svc.conf` 迁至用户私有配置目录 `<app_config_dir>/dm8`（Unix `0o700` 权限、原子写盘、动态写入本地时区偏移）并在 `main.rs` 单线程启动阶段调用 `init_dm_svc_env()`（仍尊重外部已有 `DM_SVC_PATH`），彻底移除 `spawn_blocking` 工作线程中的 `std::env::set_var`。
+- [x] H4（S5）加固 `opengauss_relay`：握手帧长上限 + 本机临时口令鉴权 + 生命周期绑定清理（`eddb085`，`services::opengauss_relay::tests` 8/8 含真 `sqlx` SM3 端到端与未鉴权入侵拒连/Drop 关停门、`cargo fmt --check` 通过）
+  - 给 `read_message` 增加 64 KiB 握手帧上限阻断远端超大长度头 OOM；移除进程级永久缓存 `RELAYS`，改为每连接池独占 `RelayHandle`（256-bit 随机本机口令 + `AuthenticationCleartextPassword` 常量时间核验，未过鉴权绝不触碰上游），并经 `sqlx::PgPool::close_event` 在池关闭/释放时自动停听并释放上游口令。
+- [x] H5（S6）抽象统一 `path_guard` 并接入全部 15 处文件 IPC 命令（`f582d77`，`services::path_guard::tests` + `commands::file_commands::tests` 14/14 含不存在父目录 `..`、悬空符号链接与目录逃逸反向门、`cargo fmt` 通过）
+  - 新增 `services/path_guard.rs`，封禁应用配置目录与跨平台日志目录（修复 macOS `~/Library/Logs/com.dataomni.app` 漏保）；`resolve_for_comparison` 逐段规范化、展开悬空符号链接（限 16 层防环）并词法折叠未存在尾段的 `..`；`write_new_text_files` 逐目标校验包含性；全部 15 处文件/分析/导入导出/备份 IPC 命令统一经 `path_guard` 拦截。
+- [x] H6（S1）升级 Agent HMAC 授权至 `dataomni-agent-read-v2` 并覆盖无口令/文件连接（`2ac1c3c`，`connection_service` + `cli::` + `mcp::` 114/114 全绿、`cargo fmt` 通过）
+  - 补签 `ssh_tunnel.{host,port,username,auth,private_key_path,remote_host,remote_port}`、`ssl`/`tls_mode`/全部证书与私钥路径及按 key 排序规范化后的 `options`（阻断 `remote_host` 跳转 PROD 与 `options.odbcDriver` 动态库注入）；在系统钥匙串引入安装级 256-bit 随机 HMAC 密钥 `#agent-grant-key`，使 SQLite/DuckDB/X.509/无口令连接同样强制签发并核验 `<id>#agent`；旧版 v1 凭证拒绝执行并返回 `DATAOMNI_AGENT_GRANT_UPGRADE_REQUIRED`。
+- [x] H7（S2）收口 `tauri-plugin-sql` 历史接缝：MySQL/PostgreSQL 池键去口令、下线原始 URL `open_database_pool`、脱敏锁中毒日志（`3151d26`，前端 `eslint` + `tsc` + 223 文件 2494 条单测、Rust 525 条单测与默认/`--no-default-features` 双特性 `clippy -D warnings` 全绿）
+  - `models/mod.rs` 将 MySQL/PostgreSQL `to_connection_string` 统一为无口令池键（全部 12 类数据库零明文口令回传 WebView，真实含口令 URL 收敛于内部 `sqlx_connect_url_via`）；`test_connection` 直接完成 MySQL/PG/SQLite 建池登记，彻底移除 `open_database_pool` IPC 命令；`pool_registry.rs` 锁中毒日志经 `redact_connection_string` 脱敏；补齐 `DATAOMNI_AGENT_GRANT_UPGRADE_REQUIRED` 双语错误文案。
 
 ### 第二批（Batch 2 · P0/P1 正确性、前端竞态、方言收口与后端并发，`H8–H13`）
 
