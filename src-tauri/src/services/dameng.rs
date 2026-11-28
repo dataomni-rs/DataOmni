@@ -146,6 +146,49 @@ fn is_plsql(sql: &str) -> bool {
   }
 }
 
+/// 生成达梦 `dm_svc.conf` 内容，按当前本地时区偏移写入并钉死 `CHAR_CODE=(PG_UTF8)`。
+#[cfg(any(feature = "odbc", test))]
+fn dm_svc_conf_contents(utc_offset_minutes: i32) -> String {
+  format!("TIME_ZONE=({utc_offset_minutes})\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n")
+}
+
+/// 在用户私有配置目录下原子写入 `dm8/dm_svc.conf`，避免使用公共 `/tmp` 目录产生抢占或符号链接风险。
+#[cfg(any(feature = "odbc", test))]
+fn write_dm_svc_conf_in(base_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+  let dir = base_dir.join("dm8");
+  std::fs::create_dir_all(&dir)?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+  }
+  let offset_minutes = chrono::Local::now().offset().local_minus_utc() / 60;
+  let contents = dm_svc_conf_contents(offset_minutes);
+  let conf = dir.join("dm_svc.conf");
+  let part = dir.join("dm_svc.conf.part");
+  std::fs::write(&part, contents)?;
+  std::fs::rename(&part, &conf)?;
+  Ok(dir)
+}
+
+/// 在进程仍处于单线程的启动阶段（`main()` 开头）初始化达梦官方驱动的 `DM_SVC_PATH`。
+///
+/// 若外部环境已显式设置 `DM_SVC_PATH`，完全尊重不覆盖；否则写入用户私有配置目录
+/// `<app_config_dir>/dm8/dm_svc.conf` 并设置环境变量。严禁在多线程工作线程中调用 `set_var`。
+pub fn init_dm_svc_env() {
+  #[cfg(feature = "odbc")]
+  {
+    if std::env::var_os("DM_SVC_PATH").is_some() {
+      return;
+    }
+    if let Some(config_dir) = crate::services::connection_service::app_config_dir() {
+      if let Ok(dir) = write_dm_svc_conf_in(&config_dir) {
+        std::env::set_var("DM_SVC_PATH", &dir);
+      }
+    }
+  }
+}
+
 /// 判断是否属于达梦原生「只读事务内禁止写」等连接或驱动错误
 #[cfg(feature = "odbc")]
 fn format_odbc_error(error: &odbc_api::Error) -> QueryError {
@@ -285,27 +328,8 @@ mod enabled {
   type SharedOdbcConn = Arc<Mutex<Connection<'static>>>;
 
   static ODBC_ENV: OnceLock<Result<&'static Environment, String>> = OnceLock::new();
-  static DM_SVC_INIT: OnceLock<()> = OnceLock::new();
-
-  /// 确保达梦官方驱动在未配置 `/etc/dm_svc.conf` 时仍以 `PG_UTF8` 编解码中文（见 cu 真库实测）。
-  /// 若外部环境已经显式配置了 `DM_SVC_PATH`，完全尊重不覆盖。
-  fn ensure_dm_svc_utf8() {
-    DM_SVC_INIT.get_or_init(|| {
-      if std::env::var_os("DM_SVC_PATH").is_some() {
-        return;
-      }
-      let dir = std::env::temp_dir().join("dataomni-dm8");
-      if std::fs::create_dir_all(&dir).is_ok() {
-        let conf = dir.join("dm_svc.conf");
-        if std::fs::write(&conf, "TIME_ZONE=(480)\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n").is_ok() {
-          std::env::set_var("DM_SVC_PATH", &dir);
-        }
-      }
-    });
-  }
 
   fn environment() -> Result<&'static Environment, QueryError> {
-    ensure_dm_svc_utf8();
     match ODBC_ENV.get_or_init(|| {
       Environment::new()
         .map(|env| Box::leak(Box::new(env)) as &'static Environment)
@@ -1139,5 +1163,28 @@ mod tests {
       statement_text("CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"),
       "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"
     );
+  }
+
+  #[test]
+  fn dm_svc_conf_writes_to_private_dir_with_utf8_and_local_offset() {
+    assert_eq!(dm_svc_conf_contents(480), "TIME_ZONE=(480)\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n");
+    assert_eq!(
+      dm_svc_conf_contents(-300),
+      "TIME_ZONE=(-300)\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n"
+    );
+
+    let root = std::env::temp_dir().join(format!("dataomni-dm8-test-{}", std::process::id()));
+    let dir = write_dm_svc_conf_in(&root).expect("write dm_svc.conf");
+    assert_eq!(dir, root.join("dm8"));
+    let body = std::fs::read_to_string(dir.join("dm_svc.conf")).expect("read dm_svc.conf");
+    assert!(body.contains("CHAR_CODE=(PG_UTF8)\n"), "{body}");
+    assert!(body.starts_with("TIME_ZONE=("), "{body}");
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let mode = std::fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
+      assert_eq!(mode, 0o700, "dm8 config dir must be owner-only");
+    }
+    std::fs::remove_dir_all(&root).ok();
   }
 }

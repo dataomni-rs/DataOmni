@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+  // 单线程启动阶段初始化达梦 DM_SVC_PATH（必须在起 Tokio / Tauri / 日志线程之前调用，避免 POSIX environ 数据竞争）
+  dataomni_lib::services::dameng::init_dm_svc_env();
+
   // 终端调用（`dataomni --help`、`dataomni connections`、`dataomni cli ...`、`dataomni mcp`）
   // 在起 Tauri 之前直接无头执行并退出，不启动桌面窗口；和应用共用同一二进制，钥匙串才能认得它
   let args: Vec<String> = std::env::args().collect();
