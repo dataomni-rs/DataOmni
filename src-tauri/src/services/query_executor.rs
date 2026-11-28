@@ -2006,4 +2006,22 @@ mod tests {
     assert_eq!(error.code.as_deref(), Some(QUERY_TIMEOUT_CODE));
     assert_eq!(error.message, format!("{QUERY_TIMEOUT}: 1"));
   }
+
+  /// 跨层契约（H18）：`QueryColumnMetadata` 序列化结果必须与 `fixtures/contract-conformance.json` 一致
+  #[test]
+  fn query_column_metadata_matches_shared_contract_fixture() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../fixtures/contract-conformance.json"
+    )))
+    .expect("valid contract fixture json");
+    let sample = QueryColumnMetadata {
+      name: "total_amount".to_string(),
+      ordinal: 2,
+      database_type: "NUMERIC".to_string(),
+      logical_type: "decimal".to_string(),
+      nullable: Some(false),
+    };
+    assert_eq!(serde_json::to_value(&sample).expect("serialize"), fixture["query_column_metadata"]);
+  }
 }

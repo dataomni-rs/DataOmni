@@ -279,4 +279,37 @@ describe('异步竞态防护（H9 / F1）', () => {
 
     expect(executedSql).toEqual(['SELECT 1;', 'SELECT 2;']);
   });
+
+  it('跨标签结果集总字节超过上限时优先淘汰非活动标签的旧结果（H18 / P2-4）', async () => {
+    const { evictExcessDocumentResults } = await import('./queryStore');
+    const makeDoc = (stmtId: string, bytesRead: number) => ({
+      sqlInput: 'SELECT 1;',
+      latestExecutionIdByStatement: {},
+      parameters: {},
+      statements: [
+        {
+          id: stmtId,
+          sql: 'SELECT 1;',
+          isExecuting: false,
+          result: {
+            columns: ['a'],
+            rows: [[1]],
+            affected_rows: 1,
+            execution_time: 10,
+            bytes_read: bytesRead
+          }
+        }
+      ]
+    });
+
+    const docs = {
+      'tab-old-1': makeDoc('s1', 40_000_000),
+      'tab-old-2': makeDoc('s2', 30_000_000),
+      'tab-active': makeDoc('s3', 20_000_000)
+    };
+    const trimmed = evictExcessDocumentResults(docs, 'tab-active', 64 * 1024 * 1024);
+    expect(trimmed['tab-old-1'].statements[0].result).toBeUndefined();
+    expect(trimmed['tab-old-2'].statements[0].result).toBeDefined();
+    expect(trimmed['tab-active'].statements[0].result).toBeDefined();
+  });
 });

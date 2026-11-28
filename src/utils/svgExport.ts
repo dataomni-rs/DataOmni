@@ -52,7 +52,7 @@ export function serializeSvgWithInlineStyles(
   // 平移只是屏幕上的视图状态，导出的图不该带着它
   clone.removeAttribute('style');
 
-  const background = `<rect width="100%" height="100%" fill="${options.background}"/>`;
+  const background = `<rect width="100%" height="100%" fill="${escapeAttribute(options.background)}"/>`;
   const body = clone.innerHTML;
   const attributes = Array.from(clone.attributes)
     .map(attribute => `${attribute.name}="${escapeAttribute(attribute.value)}"`)
@@ -62,7 +62,7 @@ export function serializeSvgWithInlineStyles(
 }
 
 function escapeAttribute(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /** 读一个 CSS 变量当前的值，用来给导出的图填背景 */

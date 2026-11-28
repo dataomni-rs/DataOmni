@@ -103,7 +103,9 @@ function decodeXmlEntities(value: string): string {
         const code = entity.startsWith('#x')
           ? Number.parseInt(entity.slice(2), 16)
           : Number.parseInt(entity.slice(1), 10);
-        return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : full;
+        return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+          ? String.fromCodePoint(code)
+          : full;
       }
     }
   });

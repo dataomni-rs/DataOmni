@@ -213,6 +213,8 @@ function asRows(value: unknown): Array<Record<string, unknown>> {
 
 /** selector 返回的空值要是同一个引用，否则每次 render 都算「变了」 */
 const EMPTY_CHANGES: PendingChange[] = [];
+/** 按连接 ID + 方言缓存 `SELECT VERSION()`，避免切换多张表的结构页重复往返（H18 / P2-4） */
+const serverVersionCache = new Map<string, string>();
 
 export default function TableDataViewer({ 
   connection,
@@ -275,7 +277,10 @@ export default function TableDataViewer({
    * 改结构时要把改表名拆出来（见 `renamesApart`）。读不到就当 MySQL——
    * 那样发的是原子的一条，TiDB 上被整条拒绝、什么都不改
    */
-  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const serverVersionKey = `${connection.id}:${identifierDialectFor(connection.db_type)}`;
+  const [serverVersion, setServerVersion] = useState<string | null>(
+    () => serverVersionCache.get(serverVersionKey) ?? null
+  );
   // 与 appliedFiltersRef 同理：不在渲染体里用 sorts 覆盖它，避免并发重渲染把刚写入的多列排序冲回旧值
   const sortsRef = useRef<ColumnSort[]>([]);
   const [totalRows, setTotalRows] = useState(0);
@@ -327,17 +332,38 @@ export default function TableDataViewer({
   const dialect = identifierDialectFor(connection.db_type);
   useEffect(() => {
     // MySQL 系认 TiDB / OceanBase（改表名拆开），PostgreSQL 系认 CockroachDB（改类型拆开）
-    if (activeTab !== 'schema' || (dialect !== 'mysql' && dialect !== 'postgresql') || serverVersion !== null || !database) {
+    if (activeTab !== 'schema' || (dialect !== 'mysql' && dialect !== 'postgresql') || !database) {
       return;
     }
+    const cached = serverVersionCache.get(serverVersionKey);
+    if (cached !== undefined) {
+      if (serverVersion !== cached) {
+        setServerVersion(cached);
+      }
+      return;
+    }
+    if (serverVersion !== null) {
+      return;
+    }
+    let cancelled = false;
     database
       .select('SELECT VERSION() AS version')
       .then((rows) => {
+        if (cancelled) return;
         const first = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | undefined) : undefined;
-        setServerVersion(String(first?.version ?? ''));
+        const version = String(first?.version ?? '');
+        serverVersionCache.set(serverVersionKey, version);
+        setServerVersion(version);
       })
-      .catch(() => setServerVersion(''));
-  }, [activeTab, dialect, serverVersion, database]);
+      .catch(() => {
+        if (cancelled) return;
+        serverVersionCache.set(serverVersionKey, '');
+        setServerVersion('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, dialect, serverVersion, serverVersionKey, database]);
 
   // OceanBase MySQL 模式在 INFORMATION_SCHEMA 里不标 DEFAULT_GENERATED，借助已拉取的
   // SHOW CREATE TABLE 补标表达式默认值列，避免改结构时误当成字符串重述（DC4）

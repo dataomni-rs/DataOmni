@@ -87,6 +87,16 @@ describe('serializeSvgWithInlineStyles', () => {
     });
     expect(out).toContain('orders');
   });
+
+  it('转义 background 属性值，防止 XML 属性逃逸注入（H18 / P2-5）', () => {
+    const out = serializeSvgWithInlineStyles(buildSvg(), {
+      background: '#fff"/><script>alert(1)</script>',
+      width: 10,
+      height: 10
+    });
+    expect(out).not.toContain('<script>');
+    expect(out).toContain('fill="#fff&quot;/&gt;&lt;script&gt;alert(1)&lt;/script&gt;"');
+  });
 });
 
 describe('readCssColor', () => {

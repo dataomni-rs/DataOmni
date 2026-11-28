@@ -429,4 +429,19 @@ mod tests {
     state.after_success("COMMIT", NOW, false, false);
     assert_eq!(state, TransactionState::default());
   }
+
+  /// 跨层契约（H18）：`TransactionState` 序列化结果必须与 `fixtures/contract-conformance.json` 一致
+  #[test]
+  fn transaction_state_matches_shared_contract_fixture() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../fixtures/contract-conformance.json"
+    )))
+    .expect("valid contract fixture json");
+    let sample = TransactionState {
+      status: TransactionStatus::Active,
+      started_at: Some("2026-11-28T08:00:00Z".to_string()),
+    };
+    assert_eq!(serde_json::to_value(&sample).expect("serialize"), fixture["transaction_state"]);
+  }
 }

@@ -988,7 +988,7 @@ mod enabled {
         let Some(_stmt_cancel) =
           StmtCancelGuard::arm(Arc::clone(&cancel_slot), stmt.as_stmt_ref().as_sys())
         else {
-          return Err(QueryError::message("查询已取消"));
+          return Err(QueryError::message("Query cancelled"));
         };
         let num_cols = stmt.num_result_cols().map_err(|err| format_odbc_error(&err))?;
         if num_cols == 0 && non_query == NonQueryHandling::Refuse {
