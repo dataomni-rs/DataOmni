@@ -2051,6 +2051,28 @@ pub fn render_doc_page(
           writeln!(html, "            </table>")?;
           writeln!(html, "          </div>")?;
         }
+        DocBlock::Figure { webp_path, image_path, width, height, alt, caption } => {
+          writeln!(html, "          <figure class=\"docs-figure\">")?;
+          writeln!(html, "            <picture>")?;
+          writeln!(
+            html,
+            "              <source type=\"image/webp\" srcset=\"{}\">",
+            escape_html(webp_path)
+          )?;
+          writeln!(
+            html,
+            "              <img class=\"docs-figure-img\" src=\"{}\" alt=\"{}\" width=\"{width}\" height=\"{height}\" loading=\"lazy\" decoding=\"async\">",
+            escape_html(image_path),
+            escape_html(alt)
+          )?;
+          writeln!(html, "            </picture>")?;
+          writeln!(
+            html,
+            "            <figcaption class=\"docs-figcaption\">{}</figcaption>",
+            escape_html(caption)
+          )?;
+          writeln!(html, "          </figure>")?;
+        }
         DocBlock::McpPresets => {
           writeln!(html, "          <div class=\"code-panel docs-code-panel\">")?;
           writeln!(html, "            <div class=\"code-panel-bar\">")?;
@@ -2493,6 +2515,11 @@ pub fn render_llms_full_txt(version: &str, released_at: &str) -> Result<String, 
             for row in *rows {
               writeln!(md, "| {} |", row.join(" | "))?;
             }
+            writeln!(md)?;
+          }
+          DocBlock::Figure { webp_path, alt, caption, .. } => {
+            writeln!(md, "![{}]({SITE_ORIGIN}{})", alt, webp_path)?;
+            writeln!(md, "*{caption}*")?;
             writeln!(md)?;
           }
           DocBlock::McpPresets => {
