@@ -3,6 +3,7 @@ use crate::content::Locale;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocSlug {
   Quickstart,
+  Workbench,
   Mcp,
   Cli,
   Databases,
@@ -12,6 +13,7 @@ pub enum DocSlug {
 
 pub const ALL_DOC_SLUGS: &[DocSlug] = &[
   DocSlug::Quickstart,
+  DocSlug::Workbench,
   DocSlug::Mcp,
   DocSlug::Cli,
   DocSlug::Databases,
@@ -24,6 +26,8 @@ impl DocSlug {
     match (locale, self) {
       (Locale::En, Self::Quickstart) => "/docs/quickstart/",
       (Locale::Zh, Self::Quickstart) => "/zh/docs/quickstart/",
+      (Locale::En, Self::Workbench) => "/docs/workbench/",
+      (Locale::Zh, Self::Workbench) => "/zh/docs/workbench/",
       (Locale::En, Self::Mcp) => "/docs/mcp/",
       (Locale::Zh, Self::Mcp) => "/zh/docs/mcp/",
       (Locale::En, Self::Cli) => "/docs/cli/",
@@ -41,6 +45,8 @@ impl DocSlug {
     match (locale, self) {
       (Locale::En, Self::Quickstart) => "docs/quickstart/index.html",
       (Locale::Zh, Self::Quickstart) => "zh/docs/quickstart/index.html",
+      (Locale::En, Self::Workbench) => "docs/workbench/index.html",
+      (Locale::Zh, Self::Workbench) => "zh/docs/workbench/index.html",
       (Locale::En, Self::Mcp) => "docs/mcp/index.html",
       (Locale::Zh, Self::Mcp) => "zh/docs/mcp/index.html",
       (Locale::En, Self::Cli) => "docs/cli/index.html",
@@ -58,6 +64,8 @@ impl DocSlug {
     match (locale, self) {
       (Locale::En, Self::Quickstart) => "Quickstart",
       (Locale::Zh, Self::Quickstart) => "快速上手",
+      (Locale::En, Self::Workbench) => "Analytics",
+      (Locale::Zh, Self::Workbench) => "网格与分析",
       (Locale::En, Self::Mcp) => "MCP Server",
       (Locale::Zh, Self::Mcp) => "只读 MCP",
       (Locale::En, Self::Cli) => "Agent CLI",
@@ -78,7 +86,8 @@ impl DocSlug {
   pub const fn prev(self) -> Option<Self> {
     match self {
       Self::Quickstart => None,
-      Self::Mcp => Some(Self::Quickstart),
+      Self::Workbench => Some(Self::Quickstart),
+      Self::Mcp => Some(Self::Workbench),
       Self::Cli => Some(Self::Mcp),
       Self::Databases => Some(Self::Cli),
       Self::Changelog => Some(Self::Databases),
@@ -88,7 +97,8 @@ impl DocSlug {
 
   pub const fn next(self) -> Option<Self> {
     match self {
-      Self::Quickstart => Some(Self::Mcp),
+      Self::Quickstart => Some(Self::Workbench),
+      Self::Workbench => Some(Self::Mcp),
       Self::Mcp => Some(Self::Cli),
       Self::Cli => Some(Self::Databases),
       Self::Databases => Some(Self::Changelog),
@@ -143,6 +153,14 @@ pub enum DocBlock {
     headers: &'static [&'static str],
     rows: &'static [&'static [&'static str]],
   },
+  Figure {
+    webp_path: &'static str,
+    image_path: &'static str,
+    width: u32,
+    height: u32,
+    alt: &'static str,
+    caption: &'static str,
+  },
   McpPresets,
   CompatibilityMatrix,
 }
@@ -170,6 +188,8 @@ pub fn doc_page(slug: DocSlug, locale: Locale) -> &'static DocPage {
   match (locale, slug) {
     (Locale::En, DocSlug::Quickstart) => &EN_QUICKSTART,
     (Locale::Zh, DocSlug::Quickstart) => &ZH_QUICKSTART,
+    (Locale::En, DocSlug::Workbench) => &EN_WORKBENCH,
+    (Locale::Zh, DocSlug::Workbench) => &ZH_WORKBENCH,
     (Locale::En, DocSlug::Mcp) => &EN_MCP,
     (Locale::Zh, DocSlug::Mcp) => &ZH_MCP,
     (Locale::En, DocSlug::Cli) => &EN_CLI,
@@ -585,6 +605,316 @@ static ZH_QUICKSTART: DocPage = DocPage {
   lead: "两分钟完成安装、系统钥匙串存密、SSH 跳板机与 TLS 校验配置，掌握「改表先审 SQL、单事务核对回滚」的日常安全工作流。",
   toc_heading: "本页目录",
   sections: ZH_QUICKSTART_SECTIONS,
+};
+
+// ============================================================================
+// 1B. WORKBENCH, GRID & ANALYTICS (/docs/workbench/ & /zh/docs/workbench/)
+// ============================================================================
+
+const EN_WORKBENCH_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "excel-grid",
+    toc_label: "Excel-like grid & shortcuts",
+    heading: "Excel-like grid selection, sorting, diffing, and safe batch fill",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Both the Table Data Viewer and SQL Query Result grid share the same spreadsheet-inspired interaction model (v1.3.2–v1.3.3), without sacrificing transactional write safety.",
+      ),
+      DocBlock::Table {
+        caption: "Grid gestures, shortcuts, and behaviors",
+        headers: &["Action", "Gesture / Shortcut", "What happens"],
+        rows: &[
+          &[
+            "Rectangular cell selection & live stats",
+            "Click + drag across cells",
+            "Selects any rectangular cell block (preserving selection on right-click for TSV copy). The sticky status bar computes cell count, non-null count, distinct count, and exact BigInt fixed-point Sum / Avg / Min / Max for numeric blocks — click any metric to copy.",
+          ],
+          &[
+            "Quick filter by cell value",
+            "Right-click cell -> Filter = / != / NULL",
+            "In Table Data, pushes a server-side WHERE clause. In SQL Results, filters loaded rows immediately with removable chips that sync across paging, sorting, charts, profiling, and export.",
+          ],
+          &[
+            "In-grid find & filter",
+            "Cmd + F / Ctrl + F",
+            "Highlights matches and jumps next/previous; SQL Results also toggle \"Matching rows only\" across all loaded rows.",
+          ],
+          &[
+            "Multi-column sort & column reorder",
+            "Shift + click header / drag header > 6px",
+            "Click any full header to sort; Shift+click appends secondary sorts with numbered badges. Drag a header horizontally to reorder columns across cells, sticky columns, copy, charts, profiling, and export (with one-click Reset column order).",
+          ],
+          &[
+            "Vertical row inspector & 2-row diff",
+            "Right-click row(s) -> View / Compare 2 rows",
+            "Inspect wide rows vertically with field search and auto-formatted JSON, or select 2 rows to compare every column side by side with a \"Differences only\" toggle.",
+          ],
+          &[
+            "Safe batch fill (Table Data)",
+            "Cmd + D / Ctrl + D or right-click -> Set NULL",
+            "Fills down the top cell value or sets NULL across selected rows while automatically skipping primary-key, generated, and NOT NULL columns. Every change stages in the preview queue before single-transaction commit.",
+          ],
+          &[
+            "Single-column copy & SQL IN (...)",
+            "Right-click column header / cell",
+            "Select entire column, copy values (with or without header), copy as dialect-escaped SQL IN (...) (skipping NULL and deduplicating in order), or jump straight to single-column DISTINCT streaming export.",
+          ],
+        ],
+      },
+    ],
+  },
+  DocSection {
+    id: "duckdb-analytics",
+    toc_label: "DuckDB profiling & charts",
+    heading: "Built-in DuckDB profiling, multi-series charts, and local file analytics",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni embeds a memory-bounded DuckDB 2.0 sandbox (with enable_external_access = false) so you can profile query results, sample whole tables, reconcile against local files, and export charts without standing up a BI server.",
+      ),
+      DocBlock::Bullets(&[
+        "Column data profiling: Click Profile on any SQL result, bounded table sample (1,000 / 5,000 / 20,000 rows inheriting active filters), MongoDB collection, or Elasticsearch hits to inspect null/empty/padded-space alerts, cardinality, Min/P50/P95/Max/Stddev, histograms, Top-5 distributions, and one-click filter-back SQL.",
+        "Multi-table reconciliation & local files: Attach up to 4 local CSV, Parquet, or JSON files inside the Analytics SQL workbench for JOIN/EXCEPT reconciliation and Parquet export, or open local data files directly from the sidebar without any database connection (capped at 100k rows / 512 MB).",
+        "Native SVG charts & correlation heatmaps: Plot bars, stacked bars, line, area, scatter, 24x24 cross-tab heatmaps, and Pearson correlation matrices — copy as Markdown tables or export theme-aware SVG and 2x Retina PNG.",
+      ]),
+      DocBlock::Figure {
+        webp_path: "/assets/shots/en/query-heatmap.webp",
+        image_path: "/images/en/query-heatmap.png",
+        width: 3934,
+        height: 2372,
+        alt: "DataOmni Quick chart displaying an 18x4 monthly channel order heatmap with SVG and 2x PNG export buttons",
+        caption: "Quick chart heatmap comparing order volume across months and sales channels — exportable directly as Markdown, SVG, or 2x PNG.",
+      },
+      DocBlock::Callout {
+        tone: CalloutTone::Note,
+        title: "Restrained AI insights (zero raw rows sent)",
+        body: "When an AI provider (or keyless local Ollama) is configured, the optional AI Insights button inside Column Profile sends only aggregated, desensitized column statistics — never raw database rows. You can inspect the exact payload before sending, and STAGING/PROD connections can be restricted to local models only.",
+      },
+    ],
+  },
+  DocSection {
+    id: "multi-engine-checkups",
+    toc_label: "Multi-engine diagnostics",
+    heading: "Native read-only checkups for Redis, MongoDB, Elasticsearch, and Neo4j",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Non-relational engines fail in engine-specific ways — unbounded TTL leaks, BigKeys, nested schema drift, unused indexes, or super-nodes. Each dedicated workspace ships a zero-write diagnostic panel tailored to that engine.",
+      ),
+      DocBlock::Table {
+        caption: "Native read-only checkups across non-relational workspaces",
+        headers: &["Workspace", "Read-only diagnostic", "How it stays safe on live servers"],
+        rows: &[
+          &[
+            "Redis",
+            "Prefix memory breakdown, TTL health buckets, and BigKey Top 50 (by memory or element length)",
+            "Uses bounded non-blocking SCAN sampling (configurable key cap & delimiter) and MEMORY USAGE; never runs KEYS *.",
+          ],
+          &[
+            "MongoDB",
+            "Nested field schema drift & type variance plus zombie index report",
+            "Combines bounded $sample aggregation with $indexStats access counts — strictly read-only.",
+          ],
+          &[
+            "Elasticsearch / OpenSearch",
+            "Native aggregation templates, mapping field counts, and shard allocation checkup",
+            "Runs size: 0 aggregations and read-only _mapping / _cat metadata queries.",
+          ],
+          &[
+            "Neo4j",
+            "Label & relationship inventory plus super-node topology checkup",
+            "Uses O(1) metadata counts and bounded degree inspection over Bolt 5.",
+          ],
+        ],
+      },
+      DocBlock::Figure {
+        webp_path: "/assets/shots/en/redis-bigkey.webp",
+        image_path: "/images/en/redis-bigkey.png",
+        width: 3928,
+        height: 2374,
+        alt: "Redis keyspace memory, TTL and BigKey Top 50 diagnostic modal highlighting a 192.1 KB no-expiry string key",
+        caption: "Redis BigKey Top 50 checkup pinpointing an oversized no-expiry cache blob; click any row to jump directly to the key inspector.",
+      },
+    ],
+  },
+  DocSection {
+    id: "active-sessions",
+    toc_label: "Active sessions & locks",
+    heading: "On-demand active sessions and lock-wait diagnostics",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Open the Sessions panel from the SQL toolbar or command palette (Cmd+K / Ctrl+K) to inspect running queries, idle transactions, and blocking lock chains across PostgreSQL, MySQL, openGauss, KingbaseES, SQL Server, Oracle, ClickHouse, and Dameng DM8.",
+      ),
+      DocBlock::Bullets(&[
+        "Zero background polling: Session snapshots refresh only when you click Refresh, adding zero idle load to monitored servers.",
+        "Blocking chain visibility: Highlights waiting vs blocking sessions so you can pinpoint lock contention before canceling a runaway query.",
+        "Guarded termination: Terminating a session always requires explicit confirmation and preserves the red PROD warning banner on production connections.",
+      ]),
+    ],
+  },
+];
+
+static EN_WORKBENCH: DocPage = DocPage {
+  slug: DocSlug::Workbench,
+  locale: Locale::En,
+  meta_title: "Grid Ergonomics, DuckDB Profiling & Diagnostics — DataOmni",
+  meta_description: "Master DataOmni's Excel-like grid shortcuts, live BigInt stats, 2-row diff, built-in DuckDB profiling, multi-engine checkups, and live session diagnostics.",
+  breadcrumb_group: "Docs",
+  title: "Grid Ergonomics, DuckDB Analytics & Diagnostics",
+  lead: "Practical guide to DataOmni's spreadsheet-speed data grid, embedded DuckDB profiling and charts, non-relational checkups, and on-demand session monitoring.",
+  toc_heading: "On this page",
+  sections: EN_WORKBENCH_SECTIONS,
+};
+
+const ZH_WORKBENCH_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "excel-grid",
+    toc_label: "类 Excel 网格与快捷键",
+    heading: "类 Excel 矩形框选、多列排序、双行对比与安全批量填充",
+    blocks: &[
+      DocBlock::Paragraph(
+        "表数据视图与 SQL 查询结果两张主网格共用同一套类电子表格交互体验（v1.3.2–v1.3.3），在不牺牲单事务写护栏的前提下大幅缩短排查与改数路径。",
+      ),
+      DocBlock::Table {
+        caption: "主网格高频手势、快捷键与行为说明",
+        headers: &["能力", "操作 / 快捷键", "实际效果"],
+        rows: &[
+          &[
+            "矩形框选与实时精确聚合",
+            "按住左键拖拽跨行跨列框选",
+            "精准框选连续矩形单元格区域（右键保留整块选区支持 TSV 复制）；吸底状态栏实时计算已选格数、非空数、去重数及纯数值选区的精确 BigInt 定点求和 / 均值 / 最小 / 最大值，点击任一指标即可复制。",
+          ],
+          &[
+            "右键按单元格值快筛",
+            "右键单元格 -> 筛选 = / != / NULL",
+            "表数据视图下发服务端 WHERE；SQL 查询结果客户端即时过滤并生成可逐个移除的筛选标签，同步作用于分页、排序、图表、画像与导出。",
+          ],
+          &[
+            "网格内即时查找与过滤",
+            "Cmd + F / Ctrl + F",
+            "高亮命中项并上下跳转；SQL 查询结果支持一键勾选「仅看匹配行」，跨全部已加载行实时过滤。",
+          ],
+          &[
+            "多列排序与拖动换列",
+            "Shift + 点击表头 / 水平拖动表头 > 6px",
+            "点击整段列头排序，Shift+点击追加次级排序并展示数字优先级徽标；拖动表头即可重排列顺序，同步作用于冻结列、复制、图表、画像与导出，并支持一键「重置列顺序」。",
+          ],
+          &[
+            "单行竖排详情与双行对比",
+            "右键行 -> 查看行详情 / 对比选中的 2 行",
+            "宽表可按字段名检索并自动格式化 JSON；框选 2 行后在右侧抽屉并排高亮差异列，支持「仅看差异列」开关。",
+          ],
+          &[
+            "安全批量填充（表数据视图）",
+            "Cmd + D / Ctrl + D 或右键 -> 设为 NULL",
+            "将首行值向下填充或批量置 NULL，自动跳过主键列、生成列与非空列；所有修改进入暂存队列，先审 SQL 再单事务提交。",
+          ],
+          &[
+            "单列复制、SQL IN (…) 与去重导出",
+            "右键列头或单元格",
+            "一键选中整列、复制整列、按当前方言转义并去重生成 SQL IN (…) 列表，或直达单列 DISTINCT 流式导出。",
+          ],
+        ],
+      },
+    ],
+  },
+  DocSection {
+    id: "duckdb-analytics",
+    toc_label: "DuckDB 画像与图表",
+    heading: "内置 DuckDB 列级画像、多维图表与本地文件对账",
+    blocks: &[
+      DocBlock::Paragraph(
+        "DataOmni 内置受控内存 DuckDB 2.0 分析沙盒（锁死 enable_external_access = false），无需外接 BI 或导进 Python 笔记本，即可在桌面端完成数据体检、跨文件对账与图表出图。",
+      ),
+      DocBlock::Bullets(&[
+        "列级数据画像：在 SQL 查询结果、继承当前筛选的有界表抽样（1,000 / 5,000 / 20,000 行）、MongoDB 集合或 Elasticsearch 命中结果上点「画像」，毫秒级输出空值/空串/首尾空格预警、基数、Min/P50/P95/Max/标准差、直方图、Top-5 高频值与一键回表筛选 SQL。",
+        "多表对账与免连接本地文件：在「分析 SQL」工作台附加最多 4 张本地 CSV / Parquet / JSON 文件，直接用标准 SQL 做 JOIN / EXCEPT 对账或导出 Parquet；也可从左下角侧边栏免连接直查本地数据文件（10 万行 / 512 MB 安全上限）。",
+        "原生 SVG 多维图表：支持柱状图、堆叠柱图、折线图、面积图、散点图、24×24 交叉热力图与 Pearson 相关性双极热力图，一键复制 Markdown 表格或导出自适应主题底色的 SVG / 2× PNG。",
+      ]),
+      DocBlock::Figure {
+        webp_path: "/assets/shots/zh/query-heatmap.webp",
+        image_path: "/images/zh/query-heatmap.png",
+        width: 3934,
+        height: 2376,
+        alt: "DataOmni 快速图表热力图展示 18 个月与 4 个渠道的订单分布矩阵，顶部带复制 Markdown 与导出 SVG/PNG 按钮",
+        caption: "快速图表热力图：按月份与渠道两个维度直观查看订单分布热度，支持一键复制 Markdown 或导出 SVG / 2× PNG。",
+      },
+      DocBlock::Callout {
+        tone: CalloutTone::Note,
+        title: "克制型 AI 解读（零原始业务行外发）",
+        body: "配置模型（支持本地无 Key 的 Ollama）后，数据画像内的可选「AI 解读」只发送脱敏后的统计摘要（列类型、空值率、分位数与告警），绝不外发原始数据行；发送前可展开核对原文，并可开启「STAGING/PROD 仅允许本地模型」路由守卫。",
+      },
+    ],
+  },
+  DocSection {
+    id: "multi-engine-checkups",
+    toc_label: "多引擎原生只读体检",
+    heading: "Redis、MongoDB、Elasticsearch 与 Neo4j 专属只读诊断",
+    blocks: &[
+      DocBlock::Paragraph(
+        "非关系型数据库的线上隐患各不相同——永不过期内存泄漏、BigKey、嵌套 Schema 漂移、僵尸索引或图谱超级节点。DataOmni 在每个专属工作区内置贴合该引擎语义的只读体检面板。",
+      ),
+      DocBlock::Table {
+        caption: "四大非关系型工作区只读体检能力与安全边界",
+        headers: &["工作区", "原生只读体检内容", "线上安全保护"],
+        rows: &[
+          &[
+            "Redis",
+            "命名空间前缀内存占比、TTL 健康度分桶与 BigKey Top 50（按内存或元素数排序）",
+            "全程使用有界非阻塞 SCAN 抽样与 MEMORY USAGE，绝不执行阻塞服务端的 KEYS *。",
+          ],
+          &[
+            "MongoDB",
+            "嵌套字段 Schema 漂移与类型冲突统计、$indexStats 零命中僵尸索引识别",
+            "采用有界 $sample 抽样与索引统计聚合，严格只读。",
+          ],
+          &[
+            "Elasticsearch / OpenSearch",
+            "原生聚合模板、Mapping 字段膨胀统计与分片状态体检",
+            "聚合请求自动带 size: 0，只读拉取 _mapping 与集群元数据。",
+          ],
+          &[
+            "Neo4j",
+            "标签与关系类型计数概览、有界超级节点拓扑分析",
+            "优先走 Bolt 5 的 O(1) 元数据计数与有界度数抽样。",
+          ],
+        ],
+      },
+      DocBlock::Figure {
+        webp_path: "/assets/shots/zh/redis-bigkey.webp",
+        image_path: "/images/zh/redis-bigkey.png",
+        width: 3938,
+        height: 2370,
+        alt: "Redis 空间内存、TTL 与 BigKey Top 50 体检弹窗，首行标出 192.1 KB 永不过期大键",
+        caption: "Redis BigKey Top 50 体检：一眼定位 192.1 KB 永不过期的大缓存键，点击键名即可直接跳转到右侧详情编辑器。",
+      },
+    ],
+  },
+  DocSection {
+    id: "active-sessions",
+    toc_label: "活跃会话与锁等待",
+    heading: "零后台轮询的关系库活跃会话与锁等待监控",
+    blocks: &[
+      DocBlock::Paragraph(
+        "在 SQL 工作台工具栏点击「会话」或从命令面板（Cmd+K / Ctrl+K）打开活跃会话面板，覆盖 PostgreSQL、MySQL、openGauss、KingbaseES、SQL Server、Oracle、ClickHouse 与达梦 DM8。",
+      ),
+      DocBlock::Bullets(&[
+        "零后台轮询：仅在手动点击刷新时拉取一次系统视图快照，打开客户端不给线上数据库增加额外负载。",
+        "锁等待链定位：直接标出阻塞会话与等待会话，快速分辨慢 SQL 还是长事务持锁。",
+        "分级终止保护：终止会话前强制二次确认，生产（PROD）连接保留红色高危警示。",
+      ]),
+    ],
+  },
+];
+
+static ZH_WORKBENCH: DocPage = DocPage {
+  slug: DocSlug::Workbench,
+  locale: Locale::Zh,
+  meta_title: "类 Excel 网格、DuckDB 画像与多引擎体检 — DataOmni",
+  meta_description: "掌握 DataOmni 的类 Excel 网格交互、矩形框选精确聚合、双行并排对比、内置 DuckDB 列画像与本地 Parquet 探索、多引擎原生只读体检及关系库活跃会话锁监控。",
+  breadcrumb_group: "文档",
+  title: "类 Excel 网格、DuckDB 分析与多引擎体检",
+  lead: "一页掌握 DataOmni v1.3.x 新增的类电子表格主网格、内置 DuckDB 列画像与图表、四大 NoSQL 只读体检及关系库活跃会话锁监控。",
+  toc_heading: "本页目录",
+  sections: ZH_WORKBENCH_SECTIONS,
 };
 
 // ============================================================================

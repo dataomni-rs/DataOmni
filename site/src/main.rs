@@ -3,7 +3,7 @@ mod docs;
 mod render;
 
 use content::{Locale, EN_COPY, ZH_COPY};
-use docs::{doc_page, ALL_DOC_SLUGS};
+use docs::{doc_page, DocBlock, ALL_DOC_SLUGS};
 use render::{
   render_doc_page, render_docs_hub_redirect, render_llms_full_txt, render_llms_txt,
   render_not_found, render_page, render_robots_txt, render_sitemap_xml, INDEXNOW_KEY,
@@ -390,6 +390,22 @@ pub fn build_site(repo_root: &Path, out_dir: &Path) -> Result<String, String> {
     copy_checked(&site_dir.join(webp_rel), &out_dir.join(webp_rel))?;
   }
 
+  // Copy documentation figure screenshots (WebP + PNG)
+  for slug in ALL_DOC_SLUGS {
+    for locale in [Locale::En, Locale::Zh] {
+      for section in doc_page(*slug, locale).sections {
+        for block in section.blocks {
+          if let DocBlock::Figure { webp_path, image_path, .. } = block {
+            let png_rel = image_path.trim_start_matches('/');
+            copy_checked(&repo_root.join(png_rel), &out_dir.join(png_rel))?;
+            let webp_rel = webp_path.trim_start_matches('/');
+            copy_checked(&site_dir.join(webp_rel), &out_dir.join(webp_rel))?;
+          }
+        }
+      }
+    }
+  }
+
   let en_html = render_page(&EN_COPY, &version, &released_at)
     .map_err(|err| format!("render EN failed: {err}"))?;
   let zh_html = render_page(&ZH_COPY, &version, &released_at)
@@ -661,6 +677,8 @@ mod tests {
     let expected_pages = [
       ("docs/quickstart/index.html", "/zh/docs/quickstart/"),
       ("zh/docs/quickstart/index.html", "/docs/quickstart/"),
+      ("docs/workbench/index.html", "/zh/docs/workbench/"),
+      ("zh/docs/workbench/index.html", "/docs/workbench/"),
       ("docs/mcp/index.html", "/zh/docs/mcp/"),
       ("zh/docs/mcp/index.html", "/docs/mcp/"),
       ("docs/cli/index.html", "/zh/docs/cli/"),
@@ -700,6 +718,8 @@ mod tests {
     for url in [
       "https://dataomni.dev/docs/quickstart/",
       "https://dataomni.dev/zh/docs/quickstart/",
+      "https://dataomni.dev/docs/workbench/",
+      "https://dataomni.dev/zh/docs/workbench/",
       "https://dataomni.dev/docs/mcp/",
       "https://dataomni.dev/zh/docs/mcp/",
       "https://dataomni.dev/docs/cli/",
