@@ -17,39 +17,10 @@ pub const FILE_TOO_LARGE: &str = "DATAOMNI_FILE_TOO_LARGE";
 pub const FILES_EXIST: &str = "DATAOMNI_FILES_EXIST";
 /// 相对路径不合规矩（绝对路径、带 `..`、空的）。数据里带的是那条路径
 pub const RELATIVE_PATH_INVALID: &str = "DATAOMNI_RELATIVE_PATH_INVALID";
-/// 路径落在应用自己的配置目录里。数据里带的是那条路径
-pub const PATH_RESERVED: &str = "DATAOMNI_PATH_RESERVED";
+/// 路径落在应用自己的配置或日志保留目录里。数据里带的是那条路径
+pub use crate::services::path_guard::PATH_RESERVED;
 
-/// 下面三个命令收前端给的任意路径（不引入 `tauri-plugin-fs` 的取舍见 `write_text_file`）。
-/// CSP 挡住了外来脚本，这一道是万一没挡住时的第二层：前端脚本不能借它们读改
-/// `connections.json`（连接配置与 Agent 授权）以及同目录下的 CLI 审计记录
-fn refuse_reserved_path(target: &Path) -> Result<(), String> {
-  match crate::services::connection_service::app_config_dir() {
-    Some(reserved) => refuse_inside(target, &reserved),
-    None => Ok(()),
-  }
-}
-
-fn refuse_inside(target: &Path, reserved: &Path) -> Result<(), String> {
-  let reserved = reserved.canonicalize().unwrap_or_else(|_| reserved.to_path_buf());
-  if resolve_for_comparison(target).starts_with(&reserved) {
-    return Err(format!("{PATH_RESERVED}: {}", target.display()));
-  }
-  Ok(())
-}
-
-/// 解开符号链接与 `..` 再比。文件可能还不存在（另存为），那就规范化父目录再接上文件名
-fn resolve_for_comparison(target: &Path) -> PathBuf {
-  if let Ok(resolved) = target.canonicalize() {
-    return resolved;
-  }
-  match (target.parent(), target.file_name()) {
-    (Some(parent), Some(name)) => {
-      parent.canonicalize().map(|dir| dir.join(name)).unwrap_or_else(|_| target.to_path_buf())
-    }
-    _ => target.to_path_buf(),
-  }
-}
+use crate::services::path_guard::{check_contained_target, refuse_reserved_path};
 
 /// 把导出内容写到用户在保存对话框里选定的路径。
 ///
@@ -217,7 +188,10 @@ pub async fn write_new_text_files(
     if !safe {
       return Err(format!("{RELATIVE_PATH_INVALID}: {}", file.path));
     }
-    targets.push(root.join(relative));
+    let target = root.join(relative);
+    // 逐目标校验，阻断目录内已有子目录符号链接穿透至保留目录或逃逸 root（H5 / S6）
+    check_contained_target(&root, &target)?;
+    targets.push(target);
   }
   let existing: Vec<String> = targets
     .iter()
@@ -241,6 +215,7 @@ pub async fn write_new_text_files(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::services::path_guard::refuse_inside;
 
   #[test]
   fn refuses_paths_inside_the_reserved_directory_even_through_dot_dot_and_symlinks() {
@@ -318,6 +293,22 @@ mod tests {
           .await
           .expect_err("must refuse");
       assert!(error.starts_with(RELATIVE_PATH_INVALID), "{path}: {error}");
+    }
+    #[cfg(unix)]
+    {
+      // H5 (S6)：导出目录内部存在指向外部目录的符号链接时，写新文件也必须逐目标拦截
+      let outside = std::env::temp_dir().join(format!("dataomni-outside-{}", std::process::id()));
+      std::fs::create_dir_all(&outside).expect("outside");
+      std::os::unix::fs::symlink(&outside, dir.join("linked")).expect("symlink");
+      let error = write_new_text_files(
+        dir.to_string_lossy().to_string(),
+        vec![new_file("linked/escaped.ts", "x")],
+      )
+      .await
+      .expect_err("must refuse symlink escape");
+      assert!(error.starts_with(PATH_RESERVED), "{error}");
+      assert!(!outside.join("escaped.ts").exists());
+      std::fs::remove_dir_all(&outside).ok();
     }
     std::fs::remove_dir_all(&dir).ok();
   }

@@ -396,6 +396,8 @@ pub async fn mongodb_export_to_file(
   registry: State<'_, MongoRegistry>,
   cancellation_state: State<'_, QueryCancellationState>,
 ) -> Result<ExportSummary, QueryError> {
+  crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&request.path))
+    .map_err(QueryError::message)?;
   let filter = mongo_shell::parse_document(&request.filter)
     .map_err(|error| QueryError::message(error.to_string()))?;
   let sort = mongo_shell::parse_document(&request.sort)
@@ -445,6 +447,8 @@ pub async fn mongodb_import_file(
   cancellation_state: State<'_, QueryCancellationState>,
   pause_state: State<'_, ImportPauseState>,
 ) -> Result<ImportSummary, QueryError> {
+  crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&request.path))
+    .map_err(QueryError::message)?;
   let client = client(&registry, &request.connection_string).map_err(QueryError::message)?;
   let mut receiver =
     cancellation_state.register(&request.import_id).await.map_err(QueryError::message)?;

@@ -346,6 +346,8 @@ pub async fn export_query_to_file(
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<ExportSummary, QueryError> {
+  let target_path = std::path::Path::new(&request.path);
+  crate::services::path_guard::refuse_reserved_path(target_path).map_err(QueryError::message)?;
   // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
   let connection_string = {
@@ -414,6 +416,8 @@ pub async fn backup_database(
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::backup::BackupKind, QueryError> {
+  crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&path))
+    .map_err(QueryError::message)?;
   let tunnel_port = tunnels.local_port(&connection_id).await;
   // PostgreSQL / MySQL / MongoDB 走外部工具：要的是补上凭据的 profile（主机、用户、TLS），不是连接池
   let (connection_string, tool_profile) = {
@@ -525,6 +529,7 @@ pub async fn preview_csv_file(request: CsvPreviewRequest) -> Result<CsvPreview, 
   };
 
   let path = std::path::PathBuf::from(&request.path);
+  crate::services::path_guard::refuse_reserved_path(&path).map_err(QueryError::message)?;
   // 阻塞的文件读放到阻塞线程池：几十 MB 的文件在异步线程上读会把整个运行时卡住
   tokio::task::spawn_blocking(move || {
     csv_import::preview_csv(&path, delimiter, request.has_header, csv_import::PREVIEW_ROWS)
@@ -561,6 +566,8 @@ pub async fn import_csv_file(
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<ImportSummary, QueryError> {
+  crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&request.import.path))
+    .map_err(QueryError::message)?;
   // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
   let connection_string = {

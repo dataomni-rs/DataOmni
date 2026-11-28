@@ -128,11 +128,12 @@ pub async fn export_connections(
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
 ) -> Result<usize, String> {
+  let target = std::path::PathBuf::from(&path);
+  crate::services::path_guard::refuse_reserved_path_with_app(&target, Some(&app_handle))?;
   let (document, count) = with_service(&service_state, &app_handle, |service| {
     Ok((service.export_document()?, service.get_connections().len()))
   })?;
   // 和连接配置、导出、备份一样先写 .part 再改名：覆盖一份旧的导出时，写到一半不会把它弄坏
-  let target = std::path::PathBuf::from(&path);
   let part = target.with_extension("json.part");
   std::fs::write(&part, document).map_err(|error| format!("{}: {error}", part.display()))?;
   std::fs::rename(&part, &target).map_err(|error| format!("{path}: {error}"))?;
@@ -145,7 +146,9 @@ pub async fn import_connections(
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
 ) -> Result<crate::services::connection_service::ConnectionImport, String> {
-  let content = std::fs::read_to_string(&path).map_err(|error| format!("{path}: {error}"))?;
+  let target = std::path::Path::new(&path);
+  crate::services::path_guard::refuse_reserved_path_with_app(target, Some(&app_handle))?;
+  let content = std::fs::read_to_string(target).map_err(|error| format!("{path}: {error}"))?;
   with_service(&service_state, &app_handle, |service| service.import_document(&content))
 }
 

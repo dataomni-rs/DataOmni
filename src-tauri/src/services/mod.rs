@@ -24,6 +24,7 @@ pub mod neo4j;
 pub mod object_catalog;
 pub mod opengauss_relay;
 pub mod oracle;
+pub mod path_guard;
 pub mod plugin_decode;
 pub mod pool_registry;
 pub mod query_error;
