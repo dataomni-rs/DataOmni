@@ -21,8 +21,9 @@
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -57,6 +58,12 @@ const GSS_ENC_REQUEST: u32 = 80_877_104;
 const CANCEL_REQUEST: u32 = 80_877_102;
 /// 启动包的长度上限。正常的只有几百字节；防一个坏长度让这里分配几个 GB
 const MAX_STARTUP_LENGTH: usize = 10_000;
+/// 握手阶段单条消息的长度上限（仅在 `authenticate` 与本机鉴权期间使用，防远端发超大长度头触发 OOM）
+const MAX_HANDSHAKE_MESSAGE_LENGTH: usize = 64 * 1024;
+/// 本机 `sqlx` 客户端响应本机临时口令鉴权的超时
+const LOCAL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// PostgreSQL 协议 `AuthenticationCleartextPassword`（码 3）：仅用于本机 loopback 转发口核验进程内随机令牌
+const AUTH_CLEARTEXT_PASSWORD: [u8; 9] = [b'R', 0, 0, 0, 8, 0, 0, 0, 3];
 
 /// 转发口连谁、用什么口令登录
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -274,18 +281,32 @@ fn relay_runtime() -> Result<tokio::runtime::Handle, String> {
     .clone()
 }
 
-/// 这个服务端的转发口，没有就开一个。同一个服务端与口令只开一个，连接池里每条连接都连它：
-/// 转发口跟着应用走，不跟着池子或单次 Tokio 运行时走，数目以「连过几个这样的服务端」为上限。
-/// 经 SSH 隧道时本机端口每次重连都不同，旧的那个留着空等——一个监听套接字，没有连接就不占别的
-pub async fn local_port(upstream: Upstream) -> Result<u16, String> {
-  static RELAYS: OnceLock<Mutex<HashMap<Upstream, u16>>> = OnceLock::new();
-  let relays = RELAYS.get_or_init(Default::default);
-  if let Some(port) = relays.lock().map_err(|error| error.to_string())?.get(&upstream) {
-    return Ok(*port);
+/// 单个 openGauss 连接池独占的本机转发口句柄。
+///
+/// 每次打开连接池生成独立 256-bit 随机本机口令，本机客户端必须先通过口令核验才代为向上游认证；
+/// `RelayHandle` 随连接池关闭而 Drop，立即关闭监听套接字并释放内存中的上游口令（H4 / S5）。
+pub struct RelayHandle {
+  pub port: u16,
+  pub local_token: String,
+  shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for RelayHandle {
+  fn drop(&mut self) {
+    if let Some(tx) = self.shutdown.take() {
+      let _ = tx.send(());
+    }
   }
+}
+
+/// 为当前连接池启动一个独占的本机转发口（不跨池永久常驻，且要求本机临时口令鉴权）。
+pub async fn start(upstream: Upstream) -> Result<RelayHandle, String> {
   let handle = relay_runtime()?;
   let (port_tx, port_rx) = tokio::sync::oneshot::channel();
-  let upstream_for_task = Arc::new(upstream.clone());
+  let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+  let local_token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+  let upstream_for_task = Arc::new(upstream);
+  let token_for_task = Arc::new(local_token.clone());
   handle.spawn(async move {
     let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
       Ok(listener) => listener,
@@ -305,20 +326,38 @@ pub async fn local_port(upstream: Upstream) -> Result<u16, String> {
       return;
     }
     loop {
-      let Ok((client, _)) = listener.accept().await else {
-        continue;
-      };
-      let upstream = Arc::clone(&upstream_for_task);
-      tokio::spawn(async move {
-        if let Err(error) = relay(client, &upstream).await {
-          log::warn!("openGauss relay: {error}");
+      tokio::select! {
+        _ = &mut shutdown_rx => break,
+        accepted = listener.accept() => {
+          let Ok((client, _)) = accepted else {
+            continue;
+          };
+          let upstream = Arc::clone(&upstream_for_task);
+          let expected_token = Arc::clone(&token_for_task);
+          tokio::spawn(async move {
+            if let Err(error) = relay(client, &upstream, &expected_token).await {
+              log::warn!("openGauss relay: {error}");
+            }
+          });
         }
-      });
+      }
     }
   });
   let port = port_rx.await.map_err(|error| error.to_string())??;
-  relays.lock().map_err(|error| error.to_string())?.insert(upstream, port);
-  Ok(port)
+  Ok(RelayHandle { port, local_token, shutdown: Some(shutdown_tx) })
+}
+
+/// 将转发口生命周期绑定至对应 `sqlx::PgPool` 的关闭事件：连接池关闭或最后引用释放时自动停掉转发口。
+pub fn attach_to_close_event(
+  relay: RelayHandle,
+  close_event: impl Future<Output = ()> + Send + 'static,
+) {
+  if let Ok(handle) = relay_runtime() {
+    handle.spawn(async move {
+      close_event.await;
+      drop(relay);
+    });
+  }
 }
 
 /// 客户端发来的启动包（长度在内），以及它的码
@@ -337,11 +376,11 @@ async fn read_startup(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, u32)>
   Ok((packet, code))
 }
 
-/// 服务端的一条消息（类型字节、长度在内）
+/// 握手阶段的一条消息（类型字节、长度在内），长度受 [`MAX_HANDSHAKE_MESSAGE_LENGTH`] 保护防 OOM
 async fn read_message<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<Vec<u8>> {
   let kind = stream.read_u8().await?;
   let length = stream.read_u32().await? as usize;
-  if length < 4 {
+  if !(4..=MAX_HANDSHAKE_MESSAGE_LENGTH).contains(&length) {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidData,
       format!("message length {length}"),
@@ -353,6 +392,50 @@ async fn read_message<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<V
   message.resize(length + 1, 0);
   stream.read_exact(&mut message[5..]).await?;
   Ok(message)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+  if left.len() != right.len() {
+    return false;
+  }
+  let mut diff = 0u8;
+  for (&a, &b) in left.iter().zip(right.iter()) {
+    diff |= a ^ b;
+  }
+  diff == 0
+}
+
+/// 核验本机客户端持有的进程内随机口令，不通过则立刻断开、绝不触碰远端库
+async fn verify_local_client(client: &mut TcpStream, expected_token: &str) -> std::io::Result<()> {
+  client.write_all(&AUTH_CLEARTEXT_PASSWORD).await?;
+  let message = match tokio::time::timeout(LOCAL_AUTH_TIMEOUT, read_message(client)).await {
+    Ok(Ok(message)) => message,
+    Ok(Err(error)) => {
+      let _ =
+        client.write_all(&error_response("openGauss relay local authentication failed")).await;
+      return Err(error);
+    }
+    Err(_) => {
+      let _ =
+        client.write_all(&error_response("openGauss relay local authentication timed out")).await;
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "local client authentication timed out",
+      ));
+    }
+  };
+  let valid = message.first() == Some(&b'p')
+    && message.len() >= 6
+    && message.last() == Some(&0)
+    && constant_time_eq(&message[5..message.len() - 1], expected_token.as_bytes());
+  if !valid {
+    let _ = client.write_all(&error_response("openGauss relay local authentication failed")).await;
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::PermissionDenied,
+      "openGauss relay local authentication failed",
+    ));
+  }
+  Ok(())
 }
 
 /// 给 sqlx 一条它会照原样报出来的错误（28P01：口令不对一类）
@@ -370,12 +453,19 @@ fn error_response(message: &str) -> Vec<u8> {
   packet
 }
 
-async fn relay(mut client: TcpStream, upstream: &Upstream) -> std::io::Result<()> {
+async fn relay(
+  mut client: TcpStream,
+  upstream: &Upstream,
+  expected_token: &str,
+) -> std::io::Result<()> {
   // sqlx 连转发口时按 `sslmode=disable` 不会先问 TLS；`prefer` 一类的客户端问了就答「不用」
   let (mut startup, mut code) = read_startup(&mut client).await?;
   while code == SSL_REQUEST || code == GSS_ENC_REQUEST {
     client.write_all(b"N").await?;
     (startup, code) = read_startup(&mut client).await?;
+  }
+  if code != CANCEL_REQUEST {
+    verify_local_client(&mut client, expected_token).await?;
   }
   let mut server = match connect(upstream).await {
     Ok(server) => server,
@@ -776,10 +866,106 @@ mod tests {
       "unexpected sqlx SM3 rejection message: {direct_err}"
     );
 
-    // 2) 实测经 sqlx_pool::open 自动切 opengauss_relay 完成 SM3 认证建连
+    // 2) 实测经 sqlx_pool::open 自动切 opengauss_relay 完成 SM3 认证建连（含本机临时口令鉴权）
     let url = format!("postgres://sm3user:Test%40123@127.0.0.1:{port}/postgres?sslmode=disable");
     let pool = crate::services::sqlx_pool::open(&url).await.expect("open via sm3 relay");
-    drop(pool);
+    if let crate::services::sqlx_pool::DbPool::Postgres(pg) = pool {
+      pg.close().await;
+    }
     server.await.expect("mock server");
+  }
+
+  /// H4 (S5)：握手帧长度超过上限必须立刻拒绝，绝不能分配超大 Vec 触发 OOM
+  #[tokio::test]
+  async fn read_message_rejects_oversized_handshake_frame() {
+    let mut header = vec![b'R'];
+    header.extend_from_slice(&((MAX_HANDSHAKE_MESSAGE_LENGTH + 1) as u32).to_be_bytes());
+    let mut cursor = std::io::Cursor::new(header);
+    let err = read_message(&mut cursor).await.expect_err("oversized handshake frame must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    let mut huge = vec![b'R'];
+    huge.extend_from_slice(&0x7fff_ffffu32.to_be_bytes());
+    let mut cursor = std::io::Cursor::new(huge);
+    let err = read_message(&mut cursor).await.expect_err("2GiB frame must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+  }
+
+  /// H4 (S5)：本机其他进程连上转发口若没有进程内随机口令，必须直接被拒且绝不触碰上游服务端；
+  /// 转发口句柄 Drop 后必须立刻停止监听
+  #[tokio::test]
+  async fn unauthenticated_local_client_is_rejected_and_drop_closes_listener() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let upstream_listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind mock upstream");
+    let upstream_port = upstream_listener.local_addr().expect("addr").port();
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&upstream_hits);
+    let upstream_task = tokio::spawn(async move {
+      if let Ok((_sock, _)) = upstream_listener.accept().await {
+        hits_clone.fetch_add(1, Ordering::SeqCst);
+      }
+    });
+
+    let relay = start(Upstream {
+      host: "127.0.0.1".to_string(),
+      port: upstream_port,
+      password: "secret-upstream-password".to_string(),
+      tls: Tls {
+        mode: TlsMode::Disable,
+        root_certificate: None,
+        client_certificate: None,
+        client_key: None,
+      },
+    })
+    .await
+    .expect("start relay");
+    let relay_port = relay.port;
+
+    // 伪造本机无口令/错口令客户端连接转发口
+    let mut intruder = TcpStream::connect(("127.0.0.1", relay_port)).await.expect("connect relay");
+    let mut startup = Vec::new();
+    let body = b"user\0sm3user\0database\0postgres\0\0";
+    startup.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+    startup.extend_from_slice(&((3u32 << 16).to_be_bytes()));
+    startup.extend_from_slice(body);
+    intruder.write_all(&startup).await.expect("send startup");
+
+    // 转发口必须先发出 AuthenticationCleartextPassword (R, len=8, 3)
+    let auth_req = read_message(&mut intruder).await.expect("auth req");
+    assert_eq!(auth_req, AUTH_CLEARTEXT_PASSWORD);
+
+    // 错口令应被拒绝并收到 28P01 ErrorResponse
+    let wrong = b"wrong-token\0";
+    let mut pwd_msg = vec![b'p'];
+    pwd_msg.extend_from_slice(&((4 + wrong.len()) as u32).to_be_bytes());
+    pwd_msg.extend_from_slice(wrong);
+    intruder.write_all(&pwd_msg).await.expect("send wrong token");
+
+    let reply = read_message(&mut intruder).await.expect("error response");
+    assert_eq!(reply[0], b'E');
+    assert!(
+      String::from_utf8_lossy(&reply).contains("28P01"),
+      "expected 28P01 rejection: {:?}",
+      String::from_utf8_lossy(&reply)
+    );
+    assert_eq!(
+      upstream_hits.load(Ordering::SeqCst),
+      0,
+      "unauthenticated local client must never reach upstream server"
+    );
+
+    // 释放句柄后监听器必须停止并拒绝新连接
+    drop(relay);
+    let mut closed = false;
+    for _ in 0..30 {
+      if TcpStream::connect(("127.0.0.1", relay_port)).await.is_err() {
+        closed = true;
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(closed, "relay listener must shut down after handle drop");
+    upstream_task.abort();
   }
 }
