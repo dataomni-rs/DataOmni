@@ -37,6 +37,7 @@ pub mod schema_metadata;
 pub mod session_target;
 pub mod sql_server;
 pub mod sqlite_path;
+pub(crate) mod sqlx_decode;
 pub mod sqlx_pool;
 pub mod ssh_tunnel;
 pub mod transaction_state;
