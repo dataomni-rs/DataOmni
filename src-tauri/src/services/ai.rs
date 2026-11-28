@@ -69,10 +69,81 @@ pub fn is_local_ai_endpoint(base_url: &str) -> bool {
   }
 }
 
+/// 规范化端点 Origin（`scheme://host[:port]`），用于将钥匙串中的 API Key 绑定至保存时的目标主机（H15 / S8）。
+pub fn canonical_origin(base_url: &str) -> Result<String, String> {
+  let parsed = validate_ai_endpoint_url(base_url)?;
+  let scheme = parsed.scheme().to_ascii_lowercase();
+  let host = match parsed.host() {
+    Some(url::Host::Domain(domain)) => domain.to_ascii_lowercase(),
+    Some(url::Host::Ipv4(ip)) => ip.to_string(),
+    Some(url::Host::Ipv6(ip)) => format!("[{ip}]"),
+    None => return Err(format!("{AI_REQUEST_FAILED}: AI endpoint URL has no host")),
+  };
+  match parsed.port() {
+    Some(port) => Ok(format!("{scheme}://{host}:{port}")),
+    None => Ok(format!("{scheme}://{host}")),
+  }
+}
+
+/// 校验 AI 端点 URL：非本机回环地址强制要求 `https://`，并禁止 URL 内嵌明文凭据（H15 / S8）。
+pub fn validate_ai_endpoint_url(base_url: &str) -> Result<url::Url, String> {
+  let parsed = url::Url::parse(base_url.trim())
+    .map_err(|error| format!("{AI_REQUEST_FAILED}: invalid AI endpoint URL: {error}"))?;
+  if !matches!(parsed.scheme(), "http" | "https") {
+    return Err(format!("{AI_REQUEST_FAILED}: AI endpoint must use https://"));
+  }
+  if parsed.host().is_none() {
+    return Err(format!("{AI_REQUEST_FAILED}: AI endpoint URL has no host"));
+  }
+  if !parsed.username().is_empty() || parsed.password().is_some() {
+    return Err(format!(
+      "{AI_REQUEST_FAILED}: AI endpoint URL must not embed username or password"
+    ));
+  }
+  if parsed.scheme() != "https" && !is_local_ai_endpoint(base_url) {
+    return Err(format!(
+      "{AI_REQUEST_FAILED}: non-local AI endpoint must use https:// to protect API keys"
+    ));
+  }
+  Ok(parsed)
+}
+
+const BOUND_KEY_PREFIX: &str = "v2:";
+
+/// 将 API Key 与其保存时的端点 Origin 编码存储到钥匙串，防止渲染层改写 `base_url` 将钥匙串 Key 外泄到任意主机（H15 / S8）。
+pub fn encode_bound_api_key(key: &str, base_url: Option<&str>) -> Result<String, String> {
+  let trimmed = key.trim();
+  let Some(url) = base_url.map(str::trim).filter(|url| !url.is_empty()) else {
+    return Ok(trimmed.to_string());
+  };
+  let origin = canonical_origin(url)?;
+  Ok(format!("{BOUND_KEY_PREFIX}{origin}\n{trimmed}"))
+}
+
+/// 解包钥匙串中的 API Key 并核验是否与当前 `base_url` 的 Origin 一致；无损兼容旧版未绑定格式的 Key。
+pub fn decode_bound_api_key(stored: &str, base_url: &str) -> Result<String, String> {
+  let request_origin = canonical_origin(base_url)?;
+  if let Some(rest) = stored.strip_prefix(BOUND_KEY_PREFIX) {
+    let Some((bound_origin, secret)) = rest.split_once('\n') else {
+      return Err(format!("{AI_REQUEST_FAILED}: stored API key binding is malformed"));
+    };
+    if bound_origin != request_origin {
+      return Err(format!(
+        "{AI_REQUEST_FAILED}: saved API key is bound to {bound_origin} and cannot be sent to {request_origin}"
+      ));
+    }
+    return Ok(secret.to_string());
+  }
+  Ok(stored.to_string())
+}
+
 pub async fn complete(request: &AiRequest, api_key: &str) -> Result<String, QueryError> {
+  validate_ai_endpoint_url(&request.base_url).map_err(QueryError::message)?;
   // 生产环境不关代理：模型服务在公网上，很多人正是靠代理才连得上；
-  // 但指向本机回环地址（Ollama / LM Studio）时绕过系统代理，避免被代理黑洞
-  let mut builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
+  // 但指向本机回环地址（Ollama / LM Studio）时绕过系统代理，避免被代理黑洞；
+  // 显式禁用 HTTP 重定向，防止 302 将 Authorization / x-api-key 头转发到其他主机（H15 / S8）。
+  let mut builder =
+    reqwest::Client::builder().timeout(REQUEST_TIMEOUT).redirect(reqwest::redirect::Policy::none());
   if is_local_ai_endpoint(&request.base_url) {
     builder = builder.no_proxy();
   }
@@ -87,6 +158,7 @@ pub async fn complete_with(
   request: &AiRequest,
   api_key: &str,
 ) -> Result<String, QueryError> {
+  validate_ai_endpoint_url(&request.base_url).map_err(QueryError::message)?;
   let base = request.base_url.trim().trim_end_matches('/');
   let key = api_key.trim();
   let (builder, body) = match request.protocol {
@@ -344,5 +416,50 @@ mod tests {
     server_empty.join().expect("server");
     assert!(empty_err.message.starts_with(AI_BAD_RESPONSE), "{}", empty_err.message);
     assert!(empty_err.message.contains("finish_reason"), "{}", empty_err.message);
+  }
+
+  /// H15（S8）：非本机回环端点必须强制 `https://`，禁止内嵌凭据；已保存 Key 严格绑定保存时的 Origin
+  #[test]
+  fn validates_https_for_non_local_endpoints_and_enforces_origin_bound_keys() {
+    for ok in [
+      "https://api.openai.com/v1",
+      "https://api.anthropic.com",
+      "http://localhost:11434/v1",
+      "http://127.0.0.1:11434/v1",
+      "http://[::1]:11434/v1",
+    ] {
+      assert!(validate_ai_endpoint_url(ok).is_ok(), "should allow {ok}");
+    }
+
+    for bad in [
+      "http://api.openai.com/v1",
+      "http://169.254.169.254/latest/meta-data",
+      "http://10.0.0.1:8080/v1",
+      "http://localhost.evil.com/v1",
+      "file:///etc/passwd",
+      "https://user:pass@api.openai.com/v1",
+    ] {
+      assert!(validate_ai_endpoint_url(bad).is_err(), "should reject {bad}");
+    }
+
+    let encoded =
+      encode_bound_api_key("sk-secret-1", Some("https://api.openai.com/v1")).expect("encode");
+    assert_eq!(
+      decode_bound_api_key(&encoded, "https://API.OPENAI.COM/v1/chat").expect("same origin"),
+      "sk-secret-1"
+    );
+    assert!(
+      decode_bound_api_key(&encoded, "https://evil.example.com/v1").is_err(),
+      "different host must be refused"
+    );
+    assert!(
+      decode_bound_api_key(&encoded, "https://api.openai.com:8443/v1").is_err(),
+      "different port must be refused"
+    );
+    // 兼容旧版未绑定 Key
+    assert_eq!(
+      decode_bound_api_key("sk-legacy", "https://api.openai.com/v1").expect("legacy"),
+      "sk-legacy"
+    );
   }
 }

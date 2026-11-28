@@ -176,9 +176,12 @@ function pureReduce(callable: PickleValue, args: PickleValue[]): PickleValue | n
   }
 }
 
+const MAX_OPCODES = 200_000;
+
 function run(reader: Reader): PickleValue {
   const stack: StackItem[] = [];
   const memo = new Map<number, PickleValue>();
+  let steps = 0;
 
   const pop = (): PickleValue => {
     const item = stack.pop();
@@ -237,6 +240,7 @@ function run(reader: Reader): PickleValue {
   const bytes = (value: Uint8Array, mutable = false) => push({ kind: 'bytes', value: value.slice(), mutable });
 
   for (;;) {
+    if (++steps > MAX_OPCODES) fail('opcode limit exceeded');
     const op = reader.byte();
     switch (op) {
       case 0x2e: // STOP
@@ -515,6 +519,16 @@ export function decodePickle(bytes: Uint8Array): DecodedPickle | null {
 // ---- 显示：按 Python repr 的写法，长的换行缩进 ----
 
 const INLINE_LIMIT = 72;
+/** 格式化硬上限：阻断几十字节 memo DAG（Billion Laughs）或超深嵌套拖死渲染进程（H15 / S12） */
+const MAX_FORMAT_NODES = 10_000;
+const MAX_FORMAT_CHARS = 256 * 1024;
+const MAX_FORMAT_DEPTH = 64;
+
+interface FormatBudget {
+  nodes: number;
+  chars: number;
+  truncated: boolean;
+}
 
 function pythonString(value: string): string {
   const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
@@ -575,7 +589,12 @@ function utcOffset(tz: PickleValue | undefined): string | null {
  * datetime / date / time 的 pickle 参数是打包好的字节（年两字节、月、日……），
  * 原样显示成 `datetime(b'\x07\xea…')` 没法看，这里还原成 ISO 写法。
  */
-function temporal(node: Extract<PickleValue, { kind: 'object' }>): Doc | null {
+function temporal(
+  node: Extract<PickleValue, { kind: 'object' }>,
+  open: Set<PickleValue>,
+  depth: number,
+  budget: FormatBudget,
+): Doc | null {
   if (node.callable.kind !== 'global' || node.callable.module !== 'datetime') return null;
   const [packed, tz] = node.args;
   if (packed?.kind !== 'bytes') return null;
@@ -586,7 +605,7 @@ function temporal(node: Extract<PickleValue, { kind: 'object' }>): Doc | null {
   };
   const zone = () => {
     if (tz === undefined) return '';
-    return utcOffset(tz) ?? ` ${docText(format(tz, '', new Set()))}`;
+    return utcOffset(tz) ?? ` ${docText(format(tz, '', open, depth + 1, budget))}`;
   };
   // 类名一种颜色，ISO 写法的日期时间当数值上色
   const call = (name: string, iso: string): Doc => [...piece(name, 'type'), ...piece('('), ...piece(iso, 'number'), ...piece(')')];
@@ -629,79 +648,133 @@ function sequence(open: string, close: string, parts: Doc[], indent: string, nam
   ];
 }
 
-function entries(pairs: Array<[PickleValue, PickleValue]>, child: (node: PickleValue) => Doc): Doc[] {
+function budgetExhausted(budget: FormatBudget): boolean {
+  return budget.nodes >= MAX_FORMAT_NODES || budget.chars >= MAX_FORMAT_CHARS;
+}
+
+function chargeDoc(doc: Doc, budget: FormatBudget): Doc {
+  for (const segment of doc) {
+    budget.chars += segment.text.length;
+  }
+  return doc;
+}
+
+function mapBounded<T>(items: T[], budget: FormatBudget, render: (item: T) => Doc): Doc[] {
+  const parts: Doc[] = [];
+  for (const item of items) {
+    if (budgetExhausted(budget)) {
+      budget.truncated = true;
+      parts.push(piece('... /* truncated */'));
+      break;
+    }
+    parts.push(render(item));
+  }
+  return parts;
+}
+
+function entries(
+  pairs: Array<[PickleValue, PickleValue]>,
+  child: (node: PickleValue) => Doc,
+  budget: FormatBudget,
+): Doc[] {
   // 字符串键换成「属性」色，和 JSON 视图一样一眼分出哪边是名字
-  return pairs.map(([key, item]) => [
-    ...(key.kind === 'str' ? piece(pythonString(key.value), 'property') : child(key)),
+  return mapBounded(pairs, budget, ([key, item]) => [
+    ...(key.kind === 'str' ? chargeDoc(piece(pythonString(key.value), 'property'), budget) : child(key)),
     ...piece(': '),
     ...child(item),
   ]);
 }
 
-function format(value: PickleValue, indent: string, open: Set<PickleValue>): Doc {
+function format(
+  value: PickleValue,
+  indent: string,
+  open: Set<PickleValue>,
+  depth: number,
+  budget: FormatBudget,
+): Doc {
+  if (depth > MAX_FORMAT_DEPTH) {
+    budget.truncated = true;
+    return piece('... /* max depth */');
+  }
+  if (budgetExhausted(budget)) {
+    budget.truncated = true;
+    return piece('...');
+  }
+  budget.nodes += 1;
   switch (value.kind) {
     case 'none':
-      return piece('None', 'atom');
+      return chargeDoc(piece('None', 'atom'), budget);
     case 'bool':
-      return piece(value.value ? 'True' : 'False', 'atom');
+      return chargeDoc(piece(value.value ? 'True' : 'False', 'atom'), budget);
     case 'int':
-      return piece(value.value.toString(), 'number');
+      return chargeDoc(piece(value.value.toString(), 'number'), budget);
     case 'float':
-      return piece(pythonFloat(value.value), 'number');
+      return chargeDoc(piece(pythonFloat(value.value), 'number'), budget);
     case 'str':
-      return piece(pythonString(value.value), 'string');
+      return chargeDoc(piece(pythonString(value.value), 'string'), budget);
     case 'bytes':
-      return value.mutable
-        ? [...piece('bytearray', 'type'), ...piece('('), ...piece(pythonBytes(value.value), 'string'), ...piece(')')]
-        : piece(pythonBytes(value.value), 'string');
+      return chargeDoc(
+        value.mutable
+          ? [...piece('bytearray', 'type'), ...piece('('), ...piece(pythonBytes(value.value), 'string'), ...piece(')')]
+          : piece(pythonBytes(value.value), 'string'),
+        budget,
+      );
     case 'global':
-      return piece(`${value.module}.${value.name}`, 'type');
+      return chargeDoc(piece(`${value.module}.${value.name}`, 'type'), budget);
     default:
       break;
   }
   // 容器可能引用自己（memo 里拿回正在构造的那个），与 Python repr 一样画成省略号
-  if (open.has(value)) return piece(value.kind === 'dict' ? '{...}' : '[...]');
+  if (open.has(value)) return chargeDoc(piece(value.kind === 'dict' ? '{...}' : '[...]'), budget);
   open.add(value);
   const inner = `${indent}  `;
-  const child = (node: PickleValue) => format(node, inner, open);
+  const child = (node: PickleValue) => format(node, inner, open, depth + 1, budget);
   let doc: Doc;
   switch (value.kind) {
     case 'list':
-      doc = sequence('[', ']', value.items.map(child), indent);
+      doc = sequence('[', ']', mapBounded(value.items, budget, child), indent);
       break;
     case 'tuple':
       doc =
         value.items.length === 1
           ? [...piece('('), ...child(value.items[0]), ...piece(',)')]
-          : sequence('(', ')', value.items.map(child), indent);
+          : sequence('(', ')', mapBounded(value.items, budget, child), indent);
       break;
     case 'set':
-      doc = value.items.length === 0 ? [...piece('set', 'type'), ...piece('()')] : sequence('{', '}', value.items.map(child), indent);
+      doc = value.items.length === 0
+        ? [...piece('set', 'type'), ...piece('()')]
+        : sequence('{', '}', mapBounded(value.items, budget, child), indent);
       break;
     case 'frozenset':
       doc = [
         ...piece('frozenset', 'type'),
         ...piece('('),
-        ...(value.items.length === 0 ? [] : sequence('{', '}', value.items.map(child), indent)),
+        ...(value.items.length === 0 ? [] : sequence('{', '}', mapBounded(value.items, budget, child), indent)),
         ...piece(')'),
       ];
       break;
     case 'dict':
-      doc = sequence('{', '}', entries(value.entries, child), indent);
+      doc = sequence('{', '}', entries(value.entries, child, budget), indent);
       break;
     case 'object': {
-      const special = temporal(value);
+      const special = temporal(value, open, depth, budget);
       if (special !== null) {
-        doc = special;
+        doc = chargeDoc(special, budget);
         break;
       }
-      const parts = value.args.map(child);
-      if (value.dictItems) parts.push(sequence('{', '}', entries(value.dictItems, child), inner));
-      if (value.listItems) parts.push(sequence('[', ']', value.listItems.map(child), inner));
+      const parts = mapBounded(value.args, budget, child);
+      if (value.dictItems && !budgetExhausted(budget)) {
+        parts.push(sequence('{', '}', entries(value.dictItems, child, budget), inner));
+      }
+      if (value.listItems && !budgetExhausted(budget)) {
+        parts.push(sequence('[', ']', mapBounded(value.listItems, budget, child), inner));
+      }
       // 没有参数只有状态的（pydantic 模型、普通类实例），写成 `模块.类 {状态}` 比空括号好读
-      const name = format(value.callable, indent, open);
+      const name = format(value.callable, indent, open, depth + 1, budget);
       const call = parts.length === 0 && value.state ? name : sequence('(', ')', parts, indent, name);
-      doc = value.state ? [...call, ...piece(' '), ...format(value.state, indent, open)] : call;
+      doc = value.state
+        ? [...call, ...piece(' '), ...format(value.state, indent, open, depth + 1, budget)]
+        : call;
       break;
     }
   }
@@ -721,19 +794,19 @@ function merge(doc: Doc): Doc {
 }
 
 export function formatPickle(value: PickleValue): CodeSegment[] {
-  return merge(format(value, '', new Set()));
+  const budget: FormatBudget = { nodes: 0, chars: 0, truncated: false };
+  return merge(format(value, '', new Set(), 0, budget));
 }
 
 /** 给界面用：base64 的原始字节 → 能解就给出 protocol、排好版的文字与上好色的片段 */
 export function pickleView(base64: string): { protocol: number; text: string; segments: CodeSegment[] } | null {
-  let bytes: Uint8Array;
   try {
-    bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    const decoded = decodePickle(bytes);
+    if (!decoded) return null;
+    const segments = formatPickle(decoded.value);
+    return { protocol: decoded.protocol, text: docText(segments), segments };
   } catch {
     return null;
   }
-  const decoded = decodePickle(bytes);
-  if (!decoded) return null;
-  const segments = formatPickle(decoded.value);
-  return { protocol: decoded.protocol, text: docText(segments), segments };
 }

@@ -489,3 +489,21 @@ export function redactConsoleForHistory(language: ConsoleLanguage, text: string)
   const withoutUrlCredentials = redacted.replace(URL_CREDENTIAL, '$1***$3');
   return { sql: withoutUrlCredentials, redacted: withoutUrlCredentials !== text };
 }
+
+const BEARER_TOKEN = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}\b/gi;
+const KNOWN_API_KEY = /\b(?:sk|pk|ghp|gho|glpat|xoxb|xoxp)-[A-Za-z0-9_-]{10,}\b/g;
+const QUOTED_SECRET_ASSIGN =
+  /(\b(?:password|passwd|pwd|token|access_token|refresh_token|api_key|apikey|secret|secret_key|private_key)\b\s*(?::=|=|:)\s*)(?:'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.)*")/gi;
+
+/**
+ * 脱敏自由文本（数据库报错详情、EXPLAIN 过滤条件、自然语言输入与备注）中可能夹带的连接串口令、
+ * 键值对密码与常见 API Token，避免发往外部模型服务（H15 / S8）。
+ */
+export function redactSensitiveText(text: string): string {
+  return text
+    .replace(URL_CREDENTIAL, '$1***$3')
+    .replace(QUOTED_SECRET_ASSIGN, '$1\'***\'')
+    .replace(KEY_VALUE_PASSWORD, '$1***')
+    .replace(BEARER_TOKEN, '$1***')
+    .replace(KNOWN_API_KEY, '***');
+}
