@@ -171,10 +171,16 @@ fn endpoint_error(error: EndpointError) -> String {
   }
 }
 
+/// 仅当服务端明确证实账号已处于 `readonly = 1` 或 `2` 时才省略请求级 `readonly=1`（fail-closed）
+fn should_append_readonly_param(level: Option<&str>) -> bool {
+  !matches!(level.map(str::trim), Some("1" | "2"))
+}
+
 impl ClickHousePool {
   /// 命令行用：之后的每条请求都带 `readonly = 1`，DDL、写、表函数、改设置都由服务端拒绝
   /// （`rfcs/agent-cli.md` §3.1）。账号本身已经只读（1 或 2）就不带：`readonly = 2` 的账号
-  /// 收到 `readonly = 1` 会报 164「Cannot modify 'readonly'」，而它本来就写不了
+  /// 收到 `readonly = 1` 会报 164「Cannot modify 'readonly'」，而它本来就写不了。
+  /// fail-closed（H14 / S7）：仅当服务端明确返回 `1` 或 `2` 时跳过追加，其余值（含 `0`/空/未知）均强制附加 `readonly = 1`。
   pub async fn enforce_read_only(self: &Arc<Self>) -> Result<(), QueryError> {
     let rows = self.select("SELECT toString(getSetting('readonly')) AS level", &[]).await?;
     let level = rows.first().and_then(|row| row.get("level")).map(|value| match value {
@@ -184,8 +190,8 @@ impl ClickHousePool {
       }
       other => other.to_string(),
     });
-    if level.as_deref() == Some("0") {
-      self.read_only.store(true, std::sync::atomic::Ordering::Relaxed);
+    if should_append_readonly_param(level.as_deref()) {
+      self.read_only.store(true, std::sync::atomic::Ordering::Release);
     }
     Ok(())
   }
@@ -212,7 +218,7 @@ impl ClickHousePool {
       if request.wait_for_mutation {
         query.append_pair("mutations_sync", "2");
       }
-      if self.read_only.load(std::sync::atomic::Ordering::Relaxed) {
+      if self.read_only.load(std::sync::atomic::Ordering::Acquire) {
         query.append_pair("readonly", "1");
       }
     }
@@ -1405,5 +1411,17 @@ mod tests {
     for sql in ["INSERT INTO t VALUES (1)", "ALTER TABLE t DELETE WHERE 1", "OPTIMIZE TABLE t"] {
       assert!(!is_query(sql), "{sql}");
     }
+  }
+
+  /// H14（S7）：ClickHouse 只读门禁 fail-closed，只有明确为 `1`/`2` 时才省略 `readonly=1`
+  #[test]
+  fn enforce_read_only_fails_closed_unless_server_confirms_readonly_level() {
+    assert!(should_append_readonly_param(Some("0")));
+    assert!(should_append_readonly_param(None));
+    assert!(should_append_readonly_param(Some("")));
+    assert!(should_append_readonly_param(Some("unexpected")));
+    assert!(!should_append_readonly_param(Some("1")));
+    assert!(!should_append_readonly_param(Some("2")));
+    assert!(!should_append_readonly_param(Some(" 2 ")));
   }
 }

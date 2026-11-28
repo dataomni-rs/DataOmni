@@ -180,8 +180,39 @@ fn namespace_of(text: &str) -> Result<Namespace, CliError> {
   }
 }
 
+/// 递归检查任意过滤条件与聚合管道，拦截服务端 JS 执行（`$where`/`$function`/`$accumulator`）
+/// 以及嵌套子管道里的 `$out`/`$merge` 写阶段（H14 / S10）。
+const REFUSED_BSON_OPERATORS: &[&str] = &["$where", "$function", "$accumulator", "$out", "$merge"];
+
+fn refuse_dangerous_bson(value: &Bson) -> Result<(), CliError> {
+  match value {
+    Bson::Document(doc) => {
+      for (key, nested) in doc {
+        let lower = key.to_ascii_lowercase();
+        if REFUSED_BSON_OPERATORS.contains(&lower.as_str()) {
+          return Err(CliError::refused(format!(
+            "operator {key} is not allowed in read-only CLI/MCP mode"
+          )));
+        }
+        refuse_dangerous_bson(nested)?;
+      }
+      Ok(())
+    }
+    Bson::Array(items) => {
+      for item in items {
+        refuse_dangerous_bson(item)?;
+      }
+      Ok(())
+    }
+    _ => Ok(()),
+  }
+}
+
 fn document(what: &str, text: &str) -> Result<Document, CliError> {
-  mongo_shell::parse_document(text).map_err(|error| CliError::usage(format!("{what}: {error}")))
+  let parsed = mongo_shell::parse_document(text)
+    .map_err(|error| CliError::usage(format!("{what}: {error}")))?;
+  refuse_dangerous_bson(&Bson::Document(parsed.clone()))?;
+  Ok(parsed)
 }
 
 /// 条件可以不给（全部文档），给了就只能给一个
@@ -199,13 +230,19 @@ fn optional_document(what: &str, rest: &[&str]) -> Result<(Document, String), Cl
 fn pipeline_of(text: &str) -> Result<Vec<Document>, CliError> {
   let value = mongo_shell::parse_value(text)
     .map_err(|error| CliError::usage(format!("pipeline: {error}")))?;
-  mongodb::parse_pipeline(value).map_err(|error| match error.strip_prefix(MONGO_PIPELINE_WRITES) {
-    Some(stage) => CliError::refused(format!(
-      "the pipeline writes ({}); the command line only reads",
-      stage.trim_start_matches(':').trim()
-    )),
-    None => CliError::usage(format!("pipeline: {error}")),
-  })
+  let stages = mongodb::parse_pipeline(value).map_err(|error| {
+    match error.strip_prefix(MONGO_PIPELINE_WRITES) {
+      Some(stage) => CliError::refused(format!(
+        "the pipeline writes ({}); the command line only reads",
+        stage.trim_start_matches(':').trim()
+      )),
+      None => CliError::usage(format!("pipeline: {error}")),
+    }
+  })?;
+  for stage in &stages {
+    refuse_dangerous_bson(&Bson::Document(stage.clone()))?;
+  }
+  Ok(stages)
 }
 
 /// 连上服务端（配了隧道先开隧道），跑这一个请求。隧道与客户端活到返回为止
@@ -348,12 +385,32 @@ mod tests {
     matches!(parse(&args(list)), Err(CliError { exit: Exit::Usage, .. }))
   }
 
-  /// §5.2：写库的阶段在解析时就拒，连接都不用找
+  /// §5.2 & H14（S10）：写库阶段与服务端 JS 执行算子（$where/$function/$accumulator）及嵌套 $out/$merge 在解析时就拒
   #[test]
   fn pipelines_that_write_are_refused() {
     assert!(refused(&["m", "aggregate", "db.c", "[{ $match: {} }, { $out: 'copy' }]"]));
     assert!(refused(&["m", "aggregate", "db.c", "[{ $merge: { into: 'copy' } }]"]));
     assert!(refused(&["m", "explain", "db.c", "--pipeline", "[{ $out: 'copy' }]"]));
+    assert!(refused(&["m", "find", "db.c", "{ $where: 'while(true){}' }"]));
+    assert!(refused(&["m", "count", "db.c", "{ $and: [{ $where: 'this.a > 1' }] }"]));
+    assert!(refused(&[
+      "m",
+      "aggregate",
+      "db.c",
+      "[{ $project: { x: { $function: { body: 'function(){ return 1; }', args: [], lang: 'js' } } } }]"
+    ]));
+    assert!(refused(&[
+      "m",
+      "aggregate",
+      "db.c",
+      "[{ $group: { _id: null, a: { $accumulator: { init: 'function(){}' } } } }]"
+    ]));
+    assert!(refused(&[
+      "m",
+      "aggregate",
+      "db.c",
+      "[{ $unionWith: { coll: 'other', pipeline: [{ $out: 'stolen' }] } }]"
+    ]));
     assert!(
       parse(&args(&["m", "aggregate", "db.c", "[{ $match: { a: 1 } }, { $count: 'n' }]"])).is_ok()
     );

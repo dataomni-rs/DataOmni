@@ -458,8 +458,16 @@ fn replay_duckdb_schema(directory: &Path) -> Result<(), QueryError> {
   let schema = std::fs::read_to_string(directory.join("schema.sql")).map_err(|error| {
     QueryError::message(format!("{BACKUP_FAILED}: {} · {error}", directory.display()))
   })?;
-  duckdb::Connection::open_in_memory()
-    .and_then(|connection| connection.execute_batch(&schema))
+  let connection = duckdb::Connection::open_in_memory()
+    .map_err(|error| QueryError::message(format!("{BACKUP_NOT_RESTORABLE}: {error}")))?;
+  // 锁死沙盒与内存上限后再重放不可信的 `schema.sql`，阻断恶意视图/宏借 `read_text`/`COPY` 读盘外泄（H14 / S11）
+  connection
+    .execute_batch(
+      "SET memory_limit = '128MB'; SET enable_external_access = false; SET lock_configuration = true;",
+    )
+    .map_err(|error| QueryError::message(format!("{BACKUP_NOT_RESTORABLE}: {error}")))?;
+  connection
+    .execute_batch(&schema)
     .map_err(|error| QueryError::message(format!("{BACKUP_NOT_RESTORABLE}: {error}")))
 }
 
@@ -926,6 +934,31 @@ mod tests {
     .expect("write schema");
     let error = replay_duckdb_schema(&dir).expect_err("not restorable");
     assert!(error.message.starts_with(BACKUP_NOT_RESTORABLE), "{}", error.message);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  /// H14（S11）：恶意 `schema.sql` 试图调用 `read_text`/`COPY` 访问本地文件或解锁配置时必须被沙盒阻断
+  #[test]
+  fn replay_duckdb_schema_blocks_external_access_and_config_unlock() {
+    let dir = temp_dir("duckdb-replay-sandbox");
+    let secret = dir.join("secret.txt");
+    std::fs::write(&secret, "top-secret-token").expect("seed secret");
+    let escaped = secret.to_string_lossy().replace('\'', "''");
+    std::fs::write(
+      dir.join("schema.sql"),
+      format!("CREATE TABLE leak AS SELECT * FROM read_text('{escaped}');"),
+    )
+    .expect("write malicious schema");
+    let error = replay_duckdb_schema(&dir).expect_err("must block read_text");
+    assert!(error.message.starts_with(BACKUP_NOT_RESTORABLE), "{}", error.message);
+
+    std::fs::write(
+      dir.join("schema.sql"),
+      "SET enable_external_access = true; CREATE TABLE t(a INT);",
+    )
+    .expect("write unlock schema");
+    let unlock_err = replay_duckdb_schema(&dir).expect_err("must block config unlock");
+    assert!(unlock_err.message.starts_with(BACKUP_NOT_RESTORABLE), "{}", unlock_err.message);
     std::fs::remove_dir_all(&dir).ok();
   }
 
