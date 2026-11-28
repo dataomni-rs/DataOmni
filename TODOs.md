@@ -28,6 +28,7 @@
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
 | v1.3.1 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [x] `DC0–DC7` 全部合并（`DC0–DC4` + `DC6` PR `#69`、`DC7` PR `#70`、`DC5` 达梦 DM8 `odbc` feature PR `#71`），已于 2026-11-22 正式发布 `v1.3.1`（三平台 10 项产物、`latest.json`、`dataomni-rs/homebrew-tap` 与 `dataomni.dev` 全量上线） |
+| v1.3.4 架构稳固与安全加固 | 2026-11-28 全仓架构与安全深度审计收口：信任边界与注入封堵（`H1–H7`）、前端竞态/方言收口与后端并发阻塞修复（`H8–H13`）、纵深防线与按变化边界结构减债（`H14–H18`） | [-] 进行中 |
 | 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
@@ -205,6 +206,57 @@
 
 ---
 
+## v1.3.4 架构稳固与安全深度加固（2026-11-28 全仓审计立项）
+
+原则：针对 `v1.3.3`（`main@966f839`）全仓架构与安全评估暴露出的历史接缝，按「**先安全止血与 UB → 再正确性与并发阻塞 → 最后纵深防线与按变化边界结构减债**」三批增量推进；每项先写失败的反向攻击或回归单测（先红后绿），严禁借加固名义引入无证据的过度抽象。
+
+### 第一批（Batch 1 · P0 安全止血与 UB 修复，`H1–H7`）
+
+- [ ] H1（S3）修复 Elasticsearch CLI/MCP 只读门禁 `%5f` 百分号编码与 `..` 路径折叠绕过
+  - 在 `cli/elasticsearch.rs` 中先按 URL 规范化路径并显式拒绝 `.`、`..`、反斜杠、含百分号编码或控制字符的段，通配符 `*` 禁止匹配 `.`/`..`/`_` 前缀段；反向单测覆盖 `POST /books/%5fdoc/_search`、`GET /%5fflush`、`POST /books/%5fdelete_by_query/_explain/..`、`POST /books/_explain/..`。
+- [ ] H2（S4）将 CSV 导入 `valid_type_name` 替换为严格 SQL 类型语法解析器，消除 PG / SQL Server SQL 注入
+  - 替换 `services/csv_import.rs` 宽字符白名单为严格 SQL 类型语法校验（可选 `schema.` + 合法 SQL 类型名/已知多词类型 + 可选数字/`max` 精度 `(p[,s])` + 可选 `[]`，禁止任意空格组合、子查询与多余括号）；反向单测覆盖 `INT, 1) IS NULL OR (SELECT 1)=1--`、`text) VALUES ((SELECT 1))` 等注入载荷及合法多词/带引号/数组类型。
+- [ ] H3（C3）消除达梦 DM8 `ensure_dm_svc_utf8` 工作线程 `std::env::set_var` POSIX 多线程 UB 与 `/tmp` 抢占
+  - 将 `dm_svc.conf` 迁至用户私有目录（如 `app_config_dir()/dm8`）并在 `main.rs` 创建多线程运行时之前（单线程启动阶段）预写并设置 `DM_SVC_PATH`（仍尊重外部已有环境变量）；移走 `spawn_blocking` 内的 `set_var` 调用并补单测验证私有路径与幂等初始化。
+- [ ] H4（S5）加固 `opengauss_relay`：握手帧长上限 + 本机临时口令鉴权 + 生命周期绑定清理
+  - `read_message` 增加握手帧最大字节上限（64 KiB）阻断远端 OOM；每个转发口生成进程内随机本机口令，要求 `sqlx` 客户端先通过本机口令认证再代为向上游握手；将转发口生命周期绑定至连接关闭/删除清理而非进程级永久泄漏；补先红后绿单测。
+- [ ] H5（S6）抽象统一 `path_guard` 并接入全部 13 处文件 IPC 命令
+  - 封禁 `app_config_dir` 与 `app_log_dir`（修复 macOS `~/Library/Logs` 漏保）；`resolve_for_comparison` 向上回溯至最近存在祖先 `canonicalize` 后词法折叠剩余 `..` 段；`write_new_text_files` 逐目标路径校验阻断内部符号链接穿透；全部接路径 IPC 命令（`read_text_file`、`write_text_file`、`write_binary_file`、`write_new_text_files`、`analytics_open_file`、`analytics_attach_file`、`analytics_export_parquet`、`export_connections`、`import_connections`、`export_query_to_file`、`backup_database`、`preview_csv_file`、`import_csv_file`、`mongodb_export_to_file`、`mongodb_import_file`）统一经 `path_guard` 校验；补反向绕过单测。
+- [ ] H6（S1）升级 Agent HMAC 授权至 `dataomni-agent-read-v2` 并覆盖无口令/文件连接
+  - 补签 `ssh_tunnel.{host,port,username,auth,private_key_path,remote_host,remote_port}`、`ssl`、`tls_mode`、全部证书/私钥路径及按 key 排序规范化后的 `options`（阻断 `remote_host` 跳转 PROD 与 `options.odbcDriver` 动态库注入提权）；在钥匙串引入安装级独立随机 HMAC 密钥（`#agent-grant-key`），使 SQLite/DuckDB/X.509/无口令连接同样强制签发与核验 `<id>#agent`；旧 v1 授权在 CLI/MCP 返回明确提示要求用户在界面重新保存升级，不静默放行已被篡改的字段；补全套反向篡改单测。
+- [ ] H7（S2）收口 `tauri-plugin-sql` 历史接缝：MySQL/PostgreSQL 池键去口令、下线原始 URL `open_database_pool`、脱敏锁中毒日志
+  - 将 MySQL/PostgreSQL 池键统一为不含明文口令的标识符（与 SQL Server/Oracle/Mongo/Redis 对齐），`test_connection` 不再向 WebView 返回含口令连接串，前端建连/查询改为按连接 ID 经后端解析连接池，移除 `open_database_pool` 接受前端任意原始 URL 的入口，并在 `pool_registry.rs` 异常日志中脱敏 `{key}`；补反向回归单测。
+
+### 第二批（Batch 2 · P0/P1 正确性、前端竞态、方言收口与后端并发，`H8–H13`）
+
+- [ ] H8（C1）修复 `QueryResultScrollTable` 重跑语句不清空 `changes` 等 6 个编辑暂存态
+  - 在 `[statementId, result]` effect 中同步清空 `changes`、`editingCell`、`showAddForm`、`showChanges`、`commitFailure`、`commitError`，并补跨语句重跑防跨表误写单测。
+- [ ] H9（C2 + F1）修复 `SessionManager` 跨连接切换竞态与前端 4 处异步陈旧响应/双查
+  - `SessionManager` 引入单调递增 `switchEpoch`，每个 `await` 后核验 epoch 并关闭孤儿句柄；修复 `queryStore`（`connectionLost` 核对 `connectionId`、`refreshTransaction` 核对 `session.id` 且报错不连调 2 次、`executeAllStatements` 锁定发起 `documentId`）、`TableDataViewer`（请求序号防乱序 + 消除子标签切换双查）、`DatabaseExplorer`（请求序号 + 去掉挂载强制绕缓存重查）与 `RedisKeyBrowser`（`scan` 请求序号）。
+- [ ] H10（F2）定义声明式 `SQL_DIALECT_TRAITS: Record<SqlDialect, ...>` 一次收口 5 处 `dameng` 漏网
+  - 在 `src/contracts/` 建立穷尽检查的 `SQL_DIALECT_TRAITS`，集中收敛并修复 `historyRedaction.ts`（达梦 `IDENTIFIED BY` 口令脱敏）、`resultEditability.ts`（无引号表名折叠大写）、`formatSql.ts`（`DatabaseType.Dameng` 映射）、`sqlCompletionSchema.ts`（大写用户名默认 Schema 与 `PLSQL` 方言）、`rowStatements.ts`（全默认值显式 `DEFAULT` 插入），每处补回归单测。
+- [ ] H11（B1 + B2 + B6）修复 Oracle/达梦阻塞析构、达梦真流式与取消、CLI 双连
+  - `OraclePool`/`DamengPool`/`OracleConnection`/`DamengConnection` 析构与 `BreakOnDrop` 后台化且避免持锁 Drop；达梦 `execute_streaming_with_params` 改为有界 `mpsc::channel` 边读边发并补 `SQLCancel` 取消钩子；`acquire_for_session` 优先复用 `idle` 消除 CLI 双连。
+- [ ] H12（B3 + B4）消除 `QuerySessionState` 跨标签队头阻塞 + 草稿 `test_connection` 隧道/池零泄漏与退出清理
+  - `SessionEntry` 维护 `in_transaction: AtomicBool` 供 `transaction_open_on` 无锁读取；草稿测试（`id.is_empty()`）用后即拆隧道与临时连接不入持久表；覆盖旧 SSH 隧道前调 `disconnect()`；`delete_connection` 与 `RunEvent::Exit` 统一清理。
+- [ ] H13（B5）将 Keychain / `ConnectionService` 与大文件同步 I/O 移出 Tokio Worker
+  - `ConnectionServiceState` 与系统钥匙串操作、8 MB 大文件读写迁入 `spawn_blocking`；`ai_save_key`/`ai_has_key` 改为 `async` 避免阻塞异步运行时。
+
+### 第三批（Batch 3 · P1/P2 纵深防线加固与按变化边界结构减债，`H14–H18`）
+
+- [ ] H14（S7 + S9 + S10 + S11）只读纵深防线全面补齐（SQL / ClickHouse / Redis / MongoDB / DuckDB 备份）
+  - `read_only_gate.rs` 拒绝 PG `U&` 转义标识符、补齐高危副作用函数（`lo_*`/`pg_ls_*`/`pg_stat_reset`/MSSQL `OPENROWSET`）与 Oracle 包前缀（`UTL_*`/`DBMS_*`/`HTTPURITYPE`）；`clickhouse.rs` `enforce_read_only` 默认 fail-closed 加 `readonly=1`；`cli/redis.rs` 显式拦截 `CONFIG`/`ACL`/`DEBUG`/`KEYS`/`EVAL_RO`/`EVALSHA_RO`/`FCALL_RO`/`CLIENT`；`cli/mongo.rs` 递归拦截 `$where`/`$function`/`$accumulator`；`backup.rs` `replay_duckdb_schema` 锁沙盒并限内存。
+- [ ] H15（S8 + S12）AI 端点 SSRF/明文/提示词脱敏加固 + Redis Pickle 查看器防卡死/防栈溢出
+  - AI 端点非 loopback 强制 `https://`、API Key 绑定已保存 origin、`aiSqlAssist.ts` 组装 SQL/报错/EXPLAIN 前统一脱敏；`pickle.ts` `format()` 加节点/字符/深度硬上限、`temporal()` 透传 `open` 集、`pickleView` 兜底 `try/catch`。
+- [ ] H16（P2-1 + P2-3）后端 10 个 `PoolRegistry` 收拢为 `EngineRegistries` 与微并发清理
+  - 合并 10 个注册表消除 7 份连接解析序言与 8 处 `too_many_arguments`，`ResolvedPool::resolve` 去多余 `async`；修复 `redis.rs` 锁外建连、`opengauss_relay.rs` PBKDF2 迁 `spawn_blocking`、`ALL_DATABASE_TYPES` 补 `Dameng`、MCP `with_keychain_deadline` 消除 10 秒睡线程堆积、`LocalAnalyticsRegistry` 锁外 Drop。
+- [ ] H17（P2-2）按真实变化边界拆分 3 个多职责 Rust 文件
+  - `cli/mod.rs` → `runtime.rs`/`catalog.rs`/`query.rs`；`services/local_analytics.rs` → `local_analytics/{mod,ingest,export,profile}.rs`；`services/query_executor.rs` → 抽出 `services/sqlx_decode.rs`。
+- [ ] H18（P2-4 + P2-5）前端热点减负、契约护栏与 Low 级安全加固
+  - `TableDataViewer` 抽取 `useTableDataLoader` 并按连接缓存 `serverVersion`；`queryStore` 合并 3 份流式循环、复用 `TextEncoder`、加 64 MB 跨标签大结果集 LRU 上限、`DatabaseSession` 存 `dbType`；清理跨 Store 循环依赖与 `stateSync`/`App.tsx` 缺陷、收窄过宽订阅；扩展 `fixtures/contract-conformance.json`；补齐 TLS `Required` MITM 提示、`svgExport` 背景转义、`.ncx` XML 码点上限与 `rowStatements` 列类型语法校验。
+
+---
+
 ## 「当前版本不做」的保留项与可执行重估条件
 
 ### 架构与性能重估门
@@ -215,6 +267,11 @@
 - **v0.3 Windows ARM64 原生包**：当前靠系统转译跑 x64 包（且 Oracle 无 Windows ARM64 Instant Client）；重估条件：有 ARM Windows 用户反馈转译慢或装不上。
 - **5.4 带 Oracle 的 Linux AppImage 不发**：重估条件：AppImage 打包能排除 `instantclient` 目录不改 ELF。
 - **每种数据库独立能力声明表**：重估条件：出现第一个前后端能力判断不一致的缺陷，届时做共用语料（仿 `fixtures/export-conformance.json`）。
+- **用 `Box<dyn DatabaseDriver>` 取代 `SessionConnection`/`PoolRef` 枚举**（v1.3.3 审计确认不做）：静态枚举带来编译器穷尽检查、零堆分配、无痛访问方言原语；重估条件：新增一种数据库引擎在 `query_executor`+`commands` 中产生重复样板且出现外部动态插件机制（第 3 类独立驱动扩展诉求）时。
+- **将 117 个 Tauri 命令合并为通用 RPC 分发器**（v1.3.3 审计确认不做）：当前按域清晰分组且保持端到端静态类型；重估条件：命令总数超过 180 且参数校验/鉴权出现无法靠 `EngineRegistries` 复用的跨命令样板时。
+- **按行数盲拆高内聚大文件**（`schema_metadata.rs` / `explain.rs` / 各独立引擎文件 / `ConnectionForm.tsx` 等大弹窗，v1.3.3 审计确认不做）：重估条件：某文件在连续 30 次提交中因两个互不相干的功能方向产生合并冲突 ≥ 3 次时。
+- **替换 Zustand / 重写 Feature 门禁 / 改动现有 5 处 `unsafe`**（v1.3.3 审计确认不做）：311 处订阅 0 裸调用、uninhabited enum 零成本、`unsafe` 均有充分 `SAFETY` 约束；重估条件：`cargo clippy` / Miri 或新增平台目标暴露真实违例时。
+- **对话框返回路径的会话级路径令牌（dialog-brokered path token）**（`H5` 完成统一 `path_guard` 后作为下一档可选加固保留）：重估条件：需要进一步把渲染层受损面收紧到「零任意路径读写」或引入用户脚本/插件能力时。
 
 ### 方言、工作区与编辑器长尾重估门（触发条件均为「收到真实用户反馈」）
 
