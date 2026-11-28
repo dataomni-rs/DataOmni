@@ -72,8 +72,9 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
   const [value, setValue] = useState<RedisValue | null>(null);
   const [loadingValue, setLoadingValue] = useState(false);
   const [valueError, setValueError] = useState<string | null>(null);
-  // 快速点两个键时，先发的那次晚回来不能盖掉后点的
+  // 快速点两个键或连续切换扫描筛选时，先发的那次晚回来不能盖掉后点的（H9 / F1）
   const valueRequest = useRef(0);
+  const scanRequest = useRef(0);
   const { ask, prompt: confirmPrompt } = useConfirmPrompt();
   const [dialog, setDialog] = useState<'rename' | 'ttl' | 'new' | null>(null);
   const [showKeyspaceAnalytics, setShowKeyspaceAnalytics] = useState(false);
@@ -85,6 +86,7 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
 
   const scan = useCallback(async (query: AppliedScan, from: string | null) => {
     if (!connectionString) return;
+    const request = ++scanRequest.current;
     setScanning(true);
     setScanError(null);
     try {
@@ -97,6 +99,7 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
         page: KEY_PAGE,
         timeoutMs
       });
+      if (request !== scanRequest.current) return;
       setKeys((previous) => (from === null ? page.keys : [...previous, ...page.keys]));
       // 选中的那个键又扫到了：剩余时间换成这次的，否则列表写 42 秒、详情还写着 2 分。
       // 从头一次扫完都不见它，就是过期或被删了——模式没变，它在的话一定扫得到
@@ -106,9 +109,12 @@ export function RedisKeyBrowser({ database }: RedisKeyBrowserProps) {
       });
       setCursor(page.cursor);
     } catch (caught) {
+      if (request !== scanRequest.current) return;
       setScanError(describeError(caught));
     } finally {
-      setScanning(false);
+      if (request === scanRequest.current) {
+        setScanning(false);
+      }
     }
   }, [connectionString, database, timeoutMs]);
 

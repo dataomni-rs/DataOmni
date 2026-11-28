@@ -206,3 +206,77 @@ describe('新旧句柄是同一个后端池子', () => {
     expect(useQueryStore.getState().database).not.toBeNull();
   });
 });
+
+describe('异步竞态防护（H9 / F1）', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    connectedStore();
+  });
+
+  it('refreshTransaction 晚到时不覆盖已切换的新 session 事务状态', async () => {
+    let resolveTx!: (tx: { status: string; startedAt: string | null }) => void;
+    invokeMock.mockImplementation(() => new Promise((resolve) => { resolveTx = resolve; }));
+
+    const pending = useQueryStore.getState().refreshTransaction();
+    // 切换到新会话
+    useQueryStore.setState({
+      session: { id: 'session-b', profileId: 'profile-b', database: null, transaction: { status: 'idle', startedAt: null } } as never
+    });
+
+    resolveTx({ status: 'active', startedAt: '2026-11-28T00:00:00Z' });
+    await pending;
+
+    expect(useQueryStore.getState().session?.id).toBe('session-b');
+    expect(useQueryStore.getState().session?.transaction.status).toBe('idle');
+  });
+
+  it('事务内语句失败只刷新一次事务状态（不重复发两次 get_session_transaction）', async () => {
+    useQueryStore.setState({
+      session: { id: 'session-a', profileId: 'profile-a', database: null, transaction: { status: 'active', startedAt: '2026-11-28T00:00:00Z' } } as never
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'execute_query') {
+        throw { code: '42601', message: 'syntax error' };
+      }
+      if (command === 'get_session_transaction') {
+        return { status: 'failed', startedAt: '2026-11-28T00:00:00Z' };
+      }
+      return undefined;
+    });
+
+    const store = useQueryStore.getState();
+    store.openDocument('tab-tx');
+    store.setSqlInput('BAD SQL;');
+    store.parseStatements();
+    const stmt = selectActiveSqlDocument(useQueryStore.getState()).statements[0];
+    await useQueryStore.getState().executeStatement(stmt.id);
+
+    const txCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'get_session_transaction');
+    expect(txCalls).toHaveLength(1);
+  });
+
+  it('executeAllStatements 中途切到别的 SQL 标签仍会执行完发起标签里的全部语句', async () => {
+    const executedSql: string[] = [];
+    invokeMock.mockImplementation(async (command: string, payload?: { request?: { sql: string } }) => {
+      if (command === 'execute_query') {
+        executedSql.push(payload?.request?.sql ?? '');
+        if (executedSql.length === 1) {
+          // 第一条语句运行期间用户切到了另一个标签
+          useQueryStore.getState().openDocument('tab-other');
+        }
+        return { kind: 'affected', rows_affected: 1 };
+      }
+      if (command === 'get_session_transaction') {
+        return { status: 'idle', startedAt: null };
+      }
+      return undefined;
+    });
+
+    const store = useQueryStore.getState();
+    store.openDocument('tab-batch');
+    store.setSqlInput('SELECT 1; SELECT 2;');
+    await useQueryStore.getState().executeAllStatements();
+
+    expect(executedSql).toEqual(['SELECT 1;', 'SELECT 2;']);
+  });
+});

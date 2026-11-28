@@ -398,6 +398,10 @@ export default function TableDataViewer({
     return requireDatabase(database).select(request.sql, request.params);
   };
 
+  const schemaObjectsRequestSeqRef = useRef(0);
+  const schemaRequestSeqRef = useRef(0);
+  const dataRequestSeqRef = useRef(0);
+
   /**
    * 索引、外键与检查约束。
    *
@@ -405,12 +409,14 @@ export default function TableDataViewer({
    * 与「查过了，一条也没有」是两回事——后者会让人以为表上没写 CHECK。
    */
   const loadSchemaObjects = async () => {
+    const seq = ++schemaObjectsRequestSeqRef.current;
     setSchemaObjects(null);
 
     try {
       const queries = await invoke<SchemaMetadataQueries>('get_schema_metadata_queries', {
         dbType: connection.db_type
       });
+      if (seq !== schemaObjectsRequestSeqRef.current) return;
 
       // SQLite 的 pragma 表值函数只认一个表名参数，没有 schema 概念
       const params = catalogQueryParams(queries.parameter_count, tableName, schema);
@@ -453,6 +459,7 @@ export default function TableDataViewer({
           }
         )
       ]);
+      if (seq !== schemaObjectsRequestSeqRef.current) return;
 
       const describe = (reason: unknown) => describeError(reason, t('schema.readObjectsFailed'));
       const pending: PromiseSettledResult<string | null> = { status: 'fulfilled', value: null };
@@ -461,6 +468,7 @@ export default function TableDataViewer({
         ddlPending: true
       });
       const [ddl] = await Promise.allSettled([ddlQuery]);
+      if (seq !== schemaObjectsRequestSeqRef.current) return;
       const objects = collectSchemaObjects(
         { indexes, foreignKeys, checkConstraints, ddl, triggers },
         describe
@@ -473,6 +481,7 @@ export default function TableDataViewer({
         console.error('部分结构对象读取失败:', objects.failures);
       }
     } catch (err) {
+      if (seq !== schemaObjectsRequestSeqRef.current) return;
       // 结构对象读失败不该把已经拿到的列信息一起打掉：列是主体，这里是补充
       console.error('加载索引与约束失败:', err);
       setSchemaObjects(failAllSchemaObjects(describeError(err, t('schema.readObjectsFailed'))));
@@ -481,6 +490,7 @@ export default function TableDataViewer({
 
   // 加载表结构信息
   const loadTableSchema = async (forceRefresh = false): Promise<TableSchema | null> => {
+    const seq = ++schemaRequestSeqRef.current;
     // 表结构切走不会变。缓存命中时这里省掉的是列目录、索引、外键、触发器
     // 四条目录查询——切回一个表标签此前会把它们原样再发一遍
     if (!forceRefresh) {
@@ -500,15 +510,18 @@ export default function TableDataViewer({
     }
 
     if (!await ensureDatabaseConnection()) return null;
+    if (seq !== schemaRequestSeqRef.current) return null;
 
     try {
       const queries = await invoke<SchemaMetadataQueries>('get_schema_metadata_queries', {
         dbType: connection.db_type
       });
+      if (seq !== schemaRequestSeqRef.current) return null;
       const columnsResult = await requireDatabase(database).select(
         queries.columns,
         catalogQueryParams(queries.parameter_count, tableName, schema)
       );
+      if (seq !== schemaRequestSeqRef.current) return null;
       const columns = toColumnInfo(columnsResult);
       // 一列都读不到不是「一张没有列的表」——SQL 里没有这种表。真实的原因是
       // 表已经被别人删了（对象树缓存 5 分钟，这个窗口一点都不窄），或者当前
@@ -529,6 +542,7 @@ export default function TableDataViewer({
       void loadSchemaObjects();
       return loadedSchema;
     } catch (err) {
+      if (seq !== schemaRequestSeqRef.current) return null;
       console.error('加载表结构失败:', err);
       reportConnectionLostIfActive(connection.id, err);
       setError(describeReadError(err));
@@ -543,7 +557,9 @@ export default function TableDataViewer({
     freshSchema?: TableSchema,
     requestedSorts?: readonly ColumnSort[]
   ) => {
+    const seq = ++dataRequestSeqRef.current;
     if (!await ensureDatabaseConnection()) return;
+    if (seq !== dataRequestSeqRef.current) return;
     
     setLoading(true);
     setError(null);
@@ -558,6 +574,7 @@ export default function TableDataViewer({
       );
       const loadedSchema = freshSchema
         ?? (tableSchemaKey === currentTableKey ? tableSchema : await loadTableSchema());
+      if (seq !== dataRequestSeqRef.current) return;
       if (!loadedSchema) {
         // 这里不再抛一条泛泛的「无法加载表结构」：loadTableSchema 的两条失败
         // 路径都已经把**原因**写进 error 了（读不到列 / 驱动报的错），再抛一条
@@ -584,6 +601,7 @@ export default function TableDataViewer({
         // 别名要引用：Oracle 把不带引号的别名折成大写，结果里就只有 `TOTAL`
         const countQuery = `SELECT COUNT(*) AS ${quoteSqlIdentifier('total', dialect)} FROM ${tableReference} ${whereClause}`;
         const countResult = await runReadQuery(countQuery);
+        if (seq !== dataRequestSeqRef.current) return;
         // COUNT(*) 由自建执行器返回为 tagged bigint，取出字面值再转数
         const rawTotal = countResult[0]?.total ?? 0;
         total = Number(
@@ -615,19 +633,25 @@ export default function TableDataViewer({
 
       const failedSorts = requestedSorts ?? sortsRef.current;
       try {
-        setTableData(takeRowPositions(await runReadQuery(dataQuery(failedSorts))));
+        const rows = await runReadQuery(dataQuery(failedSorts));
+        if (seq !== dataRequestSeqRef.current) return;
+        setTableData(takeRowPositions(rows));
       } catch (sortError) {
+        if (seq !== dataRequestSeqRef.current) return;
         // 有的列不能排序（ClickHouse 的聚合状态、PG 的 json、SQL Server 的 xml、Oracle 的 CLOB……）。
         // 报错时行清空、表头跟着没了，而排序只能在表头上取消，刷新又带着它——只能关掉标签重开。
         // COUNT 刚读成功，这条只多了排序：取消排序再读一次，原因留在横幅里
         if (failedSorts.length === 0) throw sortError;
         setSorts([]);
         sortsRef.current = [];
-        setTableData(takeRowPositions(await runReadQuery(dataQuery([]))));
+        const fallbackRows = await runReadQuery(dataQuery([]));
+        if (seq !== dataRequestSeqRef.current) return;
+        setTableData(takeRowPositions(fallbackRows));
         const culprit = failedSorts[failedSorts.length - 1]?.column ?? '';
         setError(t('table.sortFailed', { column: culprit, reason: describeReadError(sortError) }));
       }
     } catch (err) {
+      if (seq !== dataRequestSeqRef.current) return;
       console.error('加载表数据失败:', err);
       reportConnectionLostIfActive(connection.id, err);
       // 原始错误必须可见，否则无从判断是类型解码、权限还是语法问题
@@ -636,7 +660,9 @@ export default function TableDataViewer({
       // 那一列整列画成 NULL，看起来就是「数据是空的」
       setTableData([]);
     } finally {
-      setLoading(false);
+      if (seq === dataRequestSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -648,6 +674,9 @@ export default function TableDataViewer({
       return;
     }
     prevTableKeyRef.current = currentTableKey;
+    dataRequestSeqRef.current += 1;
+    schemaRequestSeqRef.current += 1;
+    schemaObjectsRequestSeqRef.current += 1;
     setSorts([]);
     sortsRef.current = [];
     setFilters([]);
@@ -1142,17 +1171,11 @@ export default function TableDataViewer({
   ]);
 
 
-  // 处理标签页切换
+  // 处理标签页切换：实际加载统一交由上方 [tableName, schema, activeTab, connectionId] effect 触发，
+  // 避免切换子标签时发两次重复 SQL（H9 / F1）
   const handleTabChange = (tabId: TabType) => {
     setActiveTab(tabId);
     setCommitNotice(null);
-    
-    // 根据标签页类型加载相应数据
-    if (tabId === 'schema' && !tableSchema) {
-      loadTableSchema();
-    } else if (tabId === 'data' && tableData.length === 0) {
-      loadTableData(currentPage);
-    }
   };
 
   // 编辑功能工具函数

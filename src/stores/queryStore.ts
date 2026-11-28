@@ -146,7 +146,7 @@ interface QueryActions {
   
   // SQL 执行
   executeSql: (sql: string) => Promise<boolean>;
-  executeStatement: (statementId: string) => Promise<boolean>;
+  executeStatement: (statementId: string, targetDocumentId?: string) => Promise<boolean>;
   executeAllStatements: () => Promise<void>;
   cancelExecution: (executionId: string) => Promise<void>;
   setQueryTimeoutMs: (timeoutMs: number) => void;
@@ -734,12 +734,15 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
     if (!session) {
       return;
     }
+    const sessionId = session.id;
     try {
       const transaction = await invoke<TransactionContext>('get_session_transaction', {
-        sessionId: session.id
+        sessionId
       });
       set((state) => (
-        state.session ? { session: { ...state.session, transaction } } : {}
+        state.session && state.session.id === sessionId
+          ? { session: { ...state.session, transaction } }
+          : {}
       ));
     } catch (error) {
       // 读状态失败不该把界面打掉，但也不能假装「没在事务里」——那正是
@@ -838,7 +841,7 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
     return get().executeStatement(statement.id);
   },
 
-  executeStatement: async (statementId: string) => {
+  executeStatement: async (statementId: string, targetDocumentId?: string) => {
     const {
       connectionId,
       database,
@@ -853,7 +856,7 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
 
     // 在开始时锁定文档，之后所有写回都指向它：执行期间用户切到别的
     // SQL 标签时，结果仍然落在发起这次执行的标签里。
-    const documentId = get().activeDocumentId;
+    const documentId = targetDocumentId ?? get().activeDocumentId;
     if (!documentId) {
       set({ error: translateNow('error.noActiveSqlTab') });
       return false;
@@ -886,6 +889,7 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
 
     // 这次绑上的参数名，按占位符次序。后端报「第几个参数」时换回名字
     let boundNames: string[] = [];
+    let refreshedInCatch = false;
     try {
       const startTime = Date.now();
       // 不打印语句原文：WebKitGTK 打印长字符串是平方级的，一条 200KB 的 INSERT
@@ -1048,8 +1052,8 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
         executions: state.executions.map((candidate) =>
           candidate.id === execution.id ? finished : candidate
         ),
-        // 断线之后后端下一条会换一条连接：跑通了就说明连接是好的，不该还挂着「连接已断开」
-        connectionLost: false
+        // 断线之后后端下一条会换一条连接：跑通了就说明连接是好的，但仅在仍指向同一连接时清标记
+        ...(state.connectionId === connectionId ? { connectionLost: false } : {})
       }));
       recordHistory(finished, queryResult.affected_rows);
 
@@ -1085,7 +1089,8 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
       let transactionLost = false;
       if (inTransactionBefore) {
         await get().refreshTransaction();
-        transactionLost = get().session?.transaction.status === 'idle';
+        refreshedInCatch = true;
+        transactionLost = get().session?.id === session.id && get().session?.transaction.status === 'idle';
       }
       const rolledBack = transactionLost ? translateNow('error.abandonedTransactionRolledBack') : null;
       // 超时、取消、断线、读不懂回包都是我们自己判出来的，数据库没说过话，不该带上任何结构
@@ -1119,18 +1124,18 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
         executions: state.executions.map((candidate) =>
           candidate.id === execution.id ? finished : candidate
         ),
-        // 驱动说连接没了。这一句是界面知道该显示「已断开」并摆出重连按钮的
-        // 唯一来源——在此之前它照样印「已连接」，而下一条语句还是同样的错
-        ...(connectionLost ? { connectionLost: true } : {})
+        // 驱动说连接没了：仅在仍指向发起本次执行的连接时置位，防旧连接报错污染新连接（H9 / F1）
+        ...(connectionLost && state.connectionId === connectionId ? { connectionLost: true } : {})
       }));
       // 失败、取消、超时一样要记：「那条跑崩的语句到底是什么」正是事后最想
       // 翻出来的一条，只记成功等于历史里永远没有出问题的那次
       recordHistory(finished, null);
       return false;
     } finally {
-      // 成功和失败都刷一次。失败那一条尤其重要——它正是 PostgreSQL 把事务
-      // 标成废止的时刻，而失败路径上没有结果可以捎带这个状态
-      await get().refreshTransaction();
+      // 成功和失败都刷一次（已在 catch 里刷过的不再重复发第二次 IPC，H9 / F1）
+      if (!refreshedInCatch) {
+        await get().refreshTransaction();
+      }
     }
   },
 
@@ -1181,13 +1186,18 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
   },
 
   executeAllStatements: async () => {
+    // 先锁定发起批量执行的文档：运行中途切到别的 SQL 标签不能把剩余语句丢掉（H9 / F1）
+    const documentId = get().activeDocumentId;
+    if (!documentId) {
+      return;
+    }
     // 先按现在的文本解析：自动解析有防抖，改完立刻执行时手里那份还是改之前的
     const statements = get().parseStatements();
     const { executeStatement } = get();
 
     await executeSequentially(
       statements.filter((statement) => !statement.isExecuting),
-      (statement) => executeStatement(statement.id)
+      (statement) => executeStatement(statement.id, documentId)
     );
   },
 
