@@ -2194,6 +2194,13 @@ mod tests {
 
   impl ConfigDir {
     pub(super) fn with(connections: &[Value]) -> Self {
+      let dir = Self::with_raw(connections);
+      ConnectionService::write_test_agent_grants(&dir.0, connections);
+      dir
+    }
+
+    /// 只写 `connections.json`，不签任何钥匙串开放凭证（用于测试手改配置文件被拦截）
+    pub(super) fn with_raw(connections: &[Value]) -> Self {
       let dir = std::env::temp_dir().join(format!("dataomni-cli-{}", uuid::Uuid::new_v4()));
       if let Err(error) = std::fs::create_dir_all(&dir) {
         panic!("{error}");
@@ -2204,6 +2211,17 @@ mod tests {
         panic!("{error}");
       }
       Self(dir)
+    }
+
+    /// 写入测试连接配置并按真实 v2 HMAC 算法为免密开放连接签发测试钥匙串凭证
+    pub(super) fn write_connections(&self, connections: &[Value]) {
+      if let Err(error) = std::fs::write(
+        self.0.join("connections.json"),
+        Value::from(connections.to_vec()).to_string(),
+      ) {
+        panic!("{error}");
+      }
+      ConnectionService::write_test_agent_grants(&self.0, connections);
     }
 
     pub(super) fn config_file(&self) -> Vec<u8> {
@@ -2250,7 +2268,7 @@ mod tests {
     assert_eq!(names(&stdout), vec!["open-dev", "open-staging"]);
   }
 
-  /// §8 第 8 条：手写进文件的「开放」，没有凭证就不算——有口令的连接这里看不见
+  /// §8 第 8 条 + H6 (S1)：手写进文件的「开放」，无论有无口令，没有钥匙串凭证都不算
   #[test]
   fn a_connection_marked_open_only_in_the_file_is_hidden() {
     let dir = ConfigDir::with(&[
@@ -2261,6 +2279,15 @@ mod tests {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(names(&stdout), vec!["open"]);
     let (code, _, stderr) = run_in(&dir, &["query", "forged", "SELECT 1"]);
+    assert_eq!(code, Exit::Usage as i32);
+    assert_eq!(json_of(&stderr)["error"]["kind"], "not_found");
+
+    // 无口令连接仅手改文件开放同样不可见（H6 / S1）
+    let raw_dir = ConfigDir::with_raw(&[profile("c", "forged-nopass", "development", "read")]);
+    let (code, stdout, stderr) = run_in(&raw_dir, &["connections"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(names(&stdout).is_empty(), "unsigned passwordless connection must stay hidden");
+    let (code, _, stderr) = run_in(&raw_dir, &["query", "forged-nopass", "SELECT 1"]);
     assert_eq!(code, Exit::Usage as i32);
     assert_eq!(json_of(&stderr)["error"]["kind"], "not_found");
   }
@@ -2434,11 +2461,7 @@ mod tests {
   fn query_reads_rows_with_a_default_limit() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) =
       run_in(&dir, &["query", "local", "SELECT id, name FROM items WHERE id <= 2 ORDER BY id"]);
@@ -2463,11 +2486,7 @@ mod tests {
   fn query_refuses_writes_and_escapes() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let escaped = dir.0.join("escaped.db");
     let attach = format!("ATTACH '{}' AS x", escaped.display());
     let vacuum = format!("VACUUM INTO '{}'", escaped.display());
@@ -2495,11 +2514,7 @@ mod tests {
     let db = seeded_sqlite(&dir.0);
     let mut closed = file_profile("c", "closed", "sqlite", &db, "development");
     closed["agent_access"] = json!("off");
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("p", "prod", "sqlite", &db, "production"), closed]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("p", "prod", "sqlite", &db, "production"), closed]);
     for name in ["prod", "p", "closed", "c", "missing"] {
       let (code, _, stderr) = run_in(&dir, &["query", name, "SELECT 1"]);
       assert_eq!(code, Exit::Usage as i32, "{name}");
@@ -2518,11 +2533,7 @@ mod tests {
         .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2);")
         .expect("seed");
     }
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("d", "duck", "duckdb", &file, "testing")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("d", "duck", "duckdb", &file, "testing")]);
     let (code, stdout, stderr) = run_in(&dir, &["query", "duck", "SELECT sum(x) AS total FROM t"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(json_of(&stdout)["columns"], json!(["total"]));
@@ -2545,11 +2556,7 @@ mod tests {
   fn query_is_recorded_without_the_statement_text() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     run_in(&dir, &["query", "local", "SELECT * FROM items WHERE name = 'alice@example.com'"]);
     run_in(&dir, &["query", "local", "DELETE FROM items"]);
     let log =
@@ -2594,11 +2601,7 @@ mod tests {
       .expect("schema");
       pool.close().await;
     });
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) = run_in(&dir, &["schema", "local"]);
     assert_eq!(code, 0, "{stderr}");
@@ -2653,11 +2656,7 @@ mod tests {
   fn explain_returns_the_plan_without_running_the_statement() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) =
       run_in(&dir, &["explain", "local", "SELECT name FROM items WHERE id = 3"]);
@@ -2688,11 +2687,7 @@ mod tests {
         .expect("orders");
       pool.close().await;
     });
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) = run_in(&dir, &["dictionary", "local"]);
     assert_eq!(code, 0, "{stderr}");
@@ -2715,15 +2710,10 @@ mod tests {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
     let missing = dir.0.join("missing.db");
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("s", "local", "sqlite", &db, "development"),
-        file_profile("m", "gone", "sqlite", &missing, "development"),
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("s", "local", "sqlite", &db, "development"),
+      file_profile("m", "gone", "sqlite", &missing, "development"),
+    ]);
 
     let (code, stdout, stderr) = run_in(&dir, &["test", "local"]);
     assert_eq!(code, 0, "{stderr}");
@@ -2843,11 +2833,7 @@ mod tests {
   fn export_writes_every_row_to_a_new_file() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let csv = dir.0.join("items.csv");
     let csv_path = csv.to_string_lossy().into_owned();
     let (code, stdout, stderr) = run_in(
@@ -2910,11 +2896,7 @@ mod tests {
       sqlx::raw_sql("CREATE INDEX items_name ON items(name)").execute(&pool).await.expect("index");
       pool.close().await;
     });
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let (code, stdout, stderr) = run_in(&dir, &["ddl", "local", "items"]);
     assert_eq!(code, 0, "{stderr}");
     let ddl = json_of(&stdout)["ddl"].as_str().unwrap_or_default().to_string();
@@ -2931,11 +2913,7 @@ mod tests {
   fn backup_copies_a_sqlite_database_without_writing_to_it() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let before = std::fs::read(&db).unwrap_or_default();
     let copy = dir.0.join("copy.db");
     let copy_path = copy.to_string_lossy().into_owned();
@@ -3050,11 +3028,7 @@ mod tests {
   fn export_parquet_and_profile_work_end_to_end() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     // 1. export --format parquet 写出合法 Parquet 文件且绝不覆盖已有文件
     let parquet = dir.0.join("items.parquet");
@@ -3143,15 +3117,10 @@ mod tests {
         )
         .expect("seed duckdb");
     }
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("s", "local", "sqlite", &db, "development"),
-        file_profile("d", "duck", "duckdb", &duck_path, "development"),
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("s", "local", "sqlite", &db, "development"),
+      file_profile("d", "duck", "duckdb", &duck_path, "development"),
+    ]);
 
     // 1. SQLite: --params-json 保留数字类型，--param 传字符串
     let secret_sentinel = "SECRET_PARAM_SENTINEL_9981";
@@ -3244,17 +3213,12 @@ mod tests {
     }
     let mut hidden_profile = file_profile("h", "hidden", "sqlite", &dst_db, "development");
     hidden_profile["agent_access"] = json!("off");
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("a", "dev", "sqlite", &src_db, "development"),
-        file_profile("b", "staging", "sqlite", &dst_db, "staging"),
-        file_profile("p", "prod", "sqlite", &dst_db, "production"),
-        hidden_profile,
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("a", "dev", "sqlite", &src_db, "development"),
+      file_profile("b", "staging", "sqlite", &dst_db, "staging"),
+      file_profile("p", "prod", "sqlite", &dst_db, "production"),
+      hidden_profile,
+    ]);
 
     // 1. JSON 差异报告
     let (code, stdout, stderr) = run_in(&dir, &["diff", "dev", "staging"]);
@@ -3293,12 +3257,7 @@ mod tests {
   fn connection_semantics_injects_into_dictionary_and_schema_without_breaking_baseline() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("conn-sem", "local", "sqlite", &db, "development")])
-        .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("conn-sem", "local", "sqlite", &db, "development")]);
 
     // 1. 无侧文件：dictionary 不含语义块，schema 不含 semantics 字段
     let (code, baseline_dict, stderr) = run_in(&dir, &["dictionary", "local"]);
