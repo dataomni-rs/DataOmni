@@ -19,15 +19,18 @@ impl<P> Default for PoolRegistry<P> {
 
 impl<P> PoolRegistry<P> {
   pub fn insert(&self, key: String, pool: Arc<P>) {
-    match self.pools.lock() {
-      Ok(mut pools) => {
-        pools.insert(key, pool);
+    // 把可能被覆盖的旧池移出锁外再析构，避免连接池 Drop（如 Oracle/达梦清理）在持锁期执行
+    let replaced = match self.pools.lock() {
+      Ok(mut pools) => pools.insert(key, pool),
+      Err(_) => {
+        log::error!(
+          "连接池注册表锁已中毒，无法登记连接池: {}",
+          crate::services::connection_service::redact_connection_string(&key)
+        );
+        None
       }
-      Err(_) => log::error!(
-        "连接池注册表锁已中毒，无法登记连接池: {}",
-        crate::services::connection_service::redact_connection_string(&key)
-      ),
-    }
+    };
+    drop(replaced);
   }
 
   pub fn get(&self, key: &str) -> Option<Arc<P>> {
@@ -102,11 +105,17 @@ impl<T> IdleConnections<T> {
     }
   }
 
-  pub fn put(&self, connection: T) {
-    if let Ok(mut entries) = self.entries.lock() {
-      if entries.len() < self.max {
-        entries.push((connection, std::time::Instant::now()));
-      }
+  /// 归还一条空闲连接；若池已满或锁中毒，把多余连接原样交回调用方在锁外处置
+  /// （Oracle / 达梦连接 Drop 走同步网络登出，不能在持锁期或 Tokio worker 上直接析构）
+  pub fn put(&self, connection: T) -> Option<T> {
+    let Ok(mut entries) = self.entries.lock() else {
+      return Some(connection);
+    };
+    if entries.len() < self.max {
+      entries.push((connection, std::time::Instant::now()));
+      None
+    } else {
+      Some(connection)
     }
   }
 
@@ -145,8 +154,39 @@ mod tests {
   #[test]
   fn at_most_max_connections_wait_in_the_list() {
     let idle = IdleConnections::new(1, 2);
-    idle.put(2);
-    idle.put(3);
+    assert_eq!(idle.put(2), None);
+    assert_eq!(idle.put(3), Some(3));
     assert_eq!(idle.take().0, Some(2));
+  }
+
+  #[test]
+  fn replacing_a_pool_drops_previous_value_outside_the_registry_lock() {
+    struct Probe {
+      registry: Arc<PoolRegistry<Probe>>,
+      checked: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for Probe {
+      fn drop(&mut self) {
+        // 如果 insert 在持锁期间析构旧值，这里二次加锁会立刻死锁
+        let _ = self.registry.get("k");
+        self.checked.store(true, std::sync::atomic::Ordering::SeqCst);
+      }
+    }
+
+    let registry = Arc::new(PoolRegistry::default());
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    registry.insert(
+      "k".to_string(),
+      Arc::new(Probe { registry: Arc::clone(&registry), checked: Arc::clone(&checked) }),
+    );
+    registry.insert(
+      "k".to_string(),
+      Arc::new(Probe {
+        registry: Arc::clone(&registry),
+        checked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      }),
+    );
+    assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
   }
 }
