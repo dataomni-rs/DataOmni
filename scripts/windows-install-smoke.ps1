@@ -1,4 +1,4 @@
-# Windows 安装包冒烟：MSI 与 NSIS 各走一遍 安装 → 启动 → 卸载，给了旧版 MSI 时先装旧版再升级。
+﻿# Windows 安装包冒烟：MSI 与 NSIS 各走一遍 安装 → 启动 → 卸载，给了旧版 MSI 时先装旧版再升级。
 # 在 GitHub Actions 的 windows 机器上跑（.github/workflows/windows-install.yml 与 release.yml），本机也能跑：
 #   pwsh scripts/windows-install-smoke.ps1 -Msi x.msi -Nsis x-setup.exe -Version 0.6.0 [-MsiVersion 0.6.0] [-PreviousMsi old.msi]
 # -MsiVersion：MSI 在「应用」里登记的版本，预发布时与 -Version 不同（1.0.0-rc.1 → 1.0.0.1），不给就同 -Version
@@ -52,10 +52,26 @@ function Test-Launch([string]$installDir, [string]$label) {
   $log = Join-Path $env:LOCALAPPDATA 'com.dataomni.app\logs\dataomni.log'
   Remove-Item $log -ErrorAction SilentlyContinue
   $process = Start-Process $exe.FullName -PassThru
-  Start-Sleep -Seconds 20
-  Check (-not $process.HasExited) "${label}：启动 20 秒后进程还在"
-  $started = (Test-Path $log) -and (Select-String -Path $log -Pattern "DataOmni $Version" -SimpleMatch -Quiet)
-  Check $started "${label}：日志里有「DataOmni $Version 启动」"
+  # 至少等满 20 秒观察不闪退；若首次冷启动因 Windows Defender 扫描或 WebView2 初始化
+  # 超过 20 秒尚未写出启动日志，则继续轮询至多 60 秒，进程提前退出时立即终止等待
+  $minAliveSeconds = 20
+  $maxWaitSeconds = 60
+  $elapsed = 0
+  $started = $false
+  while ($elapsed -lt $maxWaitSeconds) {
+    if ($process.HasExited) { break }
+    if (-not $started -and (Test-Path $log)) {
+      $started = [bool](Select-String -Path $log -Pattern "DataOmni $Version" -SimpleMatch -Quiet)
+    }
+    if ($started -and $elapsed -ge $minAliveSeconds) { break }
+    Start-Sleep -Seconds 2
+    $elapsed += 2
+  }
+  if (-not $started -and (Test-Path $log)) {
+    $started = [bool](Select-String -Path $log -Pattern "DataOmni $Version" -SimpleMatch -Quiet)
+  }
+  Check (-not $process.HasExited) "${label}：启动 ${elapsed} 秒后进程还在"
+  Check $started "${label}：日志里有「DataOmni $Version 启动」（等待 ${elapsed} 秒）"
   if (Test-Path $log) { Get-Content $log | Write-Host }
   if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Start-Sleep -Seconds 2
