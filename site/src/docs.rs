@@ -1815,6 +1815,23 @@ static ZH_DATABASES: DocPage = DocPage {
 
 const EN_CHANGELOG_SECTIONS: &[DocSection] = &[
   DocSection {
+    id: "v1-3-4",
+    toc_label: "v1.3.4 (2026-11-28)",
+    heading: "v1.3.4 — 2026-11-28",
+    blocks: &[
+      DocBlock::Paragraph(
+        "Full-codebase architecture stabilization and defense-in-depth security hardening across trust boundaries, read-only CLI/MCP gates, frontend concurrency, and backend blocking I/O.",
+      ),
+      DocBlock::Bullets(&[
+        "Trust-boundary & IPC hardening: unified path_guard across all file, log, import, export, and backup commands; upgraded Agent HMAC grants to v2 covering SSH tunnel targets, options, TLS, and passwordless profiles; stripped passwords from MySQL/PostgreSQL pool keys and removed the raw-URL open_database_pool command.",
+        "Engine read-only & injection defenses: hardened Elasticsearch CLI path normalization against double-encoding and dot-segment traversal; replaced permissive CSV column type whitelists with a strict SQL type grammar parser; expanded read-only gates across SQL (PG U&\"...\", high-risk functions, Oracle packages), ClickHouse (fail-closed readonly=1), Redis (explicit denylist), MongoDB (recursive BSON scan for $where/$function/$out/$merge), and DuckDB backup replay sandboxes.",
+        "AI, Pickle & export/import hardening: enforced non-loopback HTTPS, disabled redirects, forbade URL credentials, and bound saved AI API keys to endpoint origins (backward-compatible) with automatic prompt redaction; bounded Redis Pickle parsing against Billion-Laughs DAGs and cyclic references; added SVG background attribute escaping, XML numeric entity codepoint caps, and PostgreSQL/ClickHouse column type SQLi validation.",
+        "Frontend race fixes & dialect closure: cleared staged grid edits when re-running statements in QueryResultScrollTable; added monotonic switchEpoch and request sequence guards across SessionManager, queryStore, TableDataViewer, DatabaseExplorer, and RedisKeyBrowser; introduced exhaustive SQL_DIALECT_TRAITS closing 5 Dameng dialect gaps, broke queryStore/connectionStore circular dependencies, and added a 64 MB cross-tab LRU result eviction cap.",
+        "Non-blocking backend & driver reliability: offloaded Oracle/Dameng blocking drops, Keychain/ConnectionService, and file I/O to background threads; upgraded Dameng queries to bounded streaming with mutex-guarded ODBC SQLCancel and EXPLAIN plan parsing; eliminated QuerySessionState cross-tab HOL blocking, draft test_connection tunnel leaks, and openGauss relay framing/auth gaps while consolidating 10 pool registries into EngineRegistries.",
+      ]),
+    ],
+  },
+  DocSection {
     id: "v1-3-3",
     toc_label: "v1.3.3 (2026-11-27)",
     heading: "v1.3.3 — 2026-11-27",
@@ -1980,7 +1997,7 @@ static EN_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::En,
   meta_title: "Changelog & Release Notes — DataOmni",
-  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.3 through v1.0.0 across macOS, Windows, and Linux.",
+  meta_description: "Release history, new capabilities, security hardening, and upgrade notes for DataOmni v1.3.4 through v1.0.0 across macOS, Windows, and Linux.",
   breadcrumb_group: "Releases",
   title: "Changelog",
   lead: "User-facing release highlights, security hardening milestones, and on-disk configuration compatibility guarantees across DataOmni releases.",
@@ -1989,6 +2006,23 @@ static EN_CHANGELOG: DocPage = DocPage {
 };
 
 const ZH_CHANGELOG_SECTIONS: &[DocSection] = &[
+  DocSection {
+    id: "v1-3-4",
+    toc_label: "v1.3.4（2026-11-28）",
+    heading: "v1.3.4 — 2026-11-28",
+    blocks: &[
+      DocBlock::Paragraph(
+        "完成全仓架构稳固与纵深安全加固，全面收口 IPC 路径守卫、多引擎只读防线、前端异步竞态与后端阻塞 I/O。",
+      ),
+      DocBlock::Bullets(&[
+        "信任边界与连接凭据隔离：建立统一 path_guard 覆盖全部文件、日志、导入导出与备份命令；Agent 授权升级为 HMAC v2（覆盖 SSH 隧道目标、连接选项、TLS 与无口令连接）；剥离 MySQL / PostgreSQL 连接池键中的密码并移除裸连接串命令 open_database_pool。",
+        "全引擎只读门禁与注入封堵：收紧 Elasticsearch CLI 路径门禁抵御双编码与路径穿越；CSV 建表列类型升级为严格 SQL 类型语法解析器；全面补齐 SQL（PG U&\"...\"、高危函数与 Oracle 包）、ClickHouse（fail-closed readonly=1）、Redis（高危命令显式黑名单）、MongoDB（递归 BSON 拦截 $where/$function/$out/$merge）与 DuckDB 备份回放沙盒防线。",
+        "AI / Pickle / 导出导入安全加固：AI 端点强制非回环 HTTPS、禁重定向、禁 URL 凭据并按 Origin 绑定 Key（兼容旧 Key），SQL / 报错 / EXPLAIN 提示词外发前统一脱敏；Redis Pickle 查看器增加操作码/节点/字符/深度硬上限与防循环保护；补齐 SVG 背景转义、.ncx XML 码点上限与 PostgreSQL / ClickHouse 列类型防注入校验。",
+        "前端竞态修复与方言收口：修复 QueryResultScrollTable 重跑语句不清空 6 项编辑暂存态的跨表误提交风险；SessionManager 引入 switchEpoch 与孤儿连接清理，queryStore / TableDataViewer / DatabaseExplorer / RedisKeyBrowser 补齐请求序号守卫；引入编译期穷尽的 SQL_DIALECT_TRAITS 收口达梦 5 处方言漏网，消除跨 Store 循环依赖并新增 64 MB 跨标签结果集 LRU 淘汰。",
+        "后端零阻塞与驱动稳态：Oracle / 达梦阻塞析构、Keychain / ConnectionService 与大文件 I/O 全部迁入后台线程；达梦升级为有界流式查询、支持互斥保护 ODBC SQLCancel 与 EXPLAIN 计划解析；消除 QuerySessionState 跨标签队头阻塞、草稿连接测试隧道泄漏与 openGauss 本地转发鉴权缺口，并将 10 类引擎注册表收拢为 EngineRegistries。",
+      ]),
+    ],
+  },
   DocSection {
     id: "v1-3-3",
     toc_label: "v1.3.3（2026-11-27）",
@@ -2155,7 +2189,7 @@ static ZH_CHANGELOG: DocPage = DocPage {
   slug: DocSlug::Changelog,
   locale: Locale::Zh,
   meta_title: "版本更新记录与发布说明 — DataOmni",
-  meta_description: "DataOmni v1.3.3、v1.3.2 与 v1.3.0 至 v1.0.0 正式版能力更新、类 Excel 网格交互、单列导出、安全加固细节与配置文件前后向兼容说明。",
+  meta_description: "DataOmni v1.3.4、v1.3.3 与 v1.3.0 至 v1.0.0 正式版能力更新、架构安全加固、类 Excel 网格交互与配置文件前后向兼容说明。",
   breadcrumb_group: "版本发布",
   title: "版本更新记录",
   lead: "记录 DataOmni 每个正式版本面向用户的核心能力演进、安全加固里程碑与本地配置兼容保障。",
