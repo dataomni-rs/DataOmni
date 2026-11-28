@@ -64,6 +64,24 @@ impl<P> PoolRegistry<P> {
   }
 }
 
+/// 统一托管 10 类引擎连接池注册表的单一状态容器（H16 / P2-1）。
+///
+/// 避免在 `lib.rs` 重复注册 10 个独立 `State`、在 `test_connection` 与 `database_commands`
+/// 重复声明 6~10 个注册表参数与 `#[allow(clippy::too_many_arguments)]`。
+#[derive(Default)]
+pub struct EngineRegistries {
+  pub sqlx: crate::services::SqlxRegistry,
+  pub sql_server: crate::services::SqlServerRegistry,
+  pub oracle: crate::services::oracle::OracleRegistry,
+  pub dameng: crate::services::dameng::DamengRegistry,
+  pub duckdb: crate::services::duckdb::DuckDbRegistry,
+  pub clickhouse: crate::services::clickhouse::ClickHouseRegistry,
+  pub mongo: crate::services::mongodb::MongoRegistry,
+  pub redis: crate::services::redis::RedisRegistry,
+  pub neo4j: crate::services::neo4j::Neo4jRegistry,
+  pub es: crate::services::elasticsearch::EsRegistry,
+}
+
 /// 两个自建池子（SQL Server、Oracle）的空闲连接，带着放回来的时刻。
 ///
 /// 放得太久的不再拿出来用：VPN、NAT、云负载均衡会把空闲几分钟的 TCP 流悄悄丢掉，

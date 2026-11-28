@@ -684,7 +684,14 @@ where
     let Some(hash) = auth_hash else {
       return client.write_all(&message).await;
     };
-    match rfc5802_response(password, &message[9..], hash) {
+    let password_owned = password.to_string();
+    let payload = message[9..].to_vec();
+    // PBKDF2-HMAC-SHA1 迭代次数最高可达 100 万次，放进阻塞池避免抢占 Tokio worker（H16 / P2-3）
+    let derived =
+      tokio::task::spawn_blocking(move || rfc5802_response(&password_owned, &payload, hash))
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    match derived {
       Ok(proof) => {
         let mut answer = vec![b'p'];
         answer.extend_from_slice(&((proof.len() + 5) as u32).to_be_bytes());

@@ -1,10 +1,7 @@
 use crate::models::{ConnectionProfile, DatabaseType};
-use crate::services::dameng::DamengRegistry;
-use crate::services::duckdb::DuckDbRegistry;
-use crate::services::mongodb::{MongoRegistry, MongoTarget};
-use crate::services::oracle::OracleRegistry;
+use crate::services::mongodb::MongoTarget;
 use crate::services::{
-  sql_server, ssh_tunnel, ConnectionService, SqlServerPool, SqlServerRegistry, SqlServerTarget,
+  sql_server, ssh_tunnel, ConnectionService, EngineRegistries, SqlServerPool, SqlServerTarget,
   TunnelRegistry,
 };
 use std::sync::{Arc, Mutex};
@@ -222,22 +219,12 @@ pub fn database_file_type(path: String) -> Option<crate::models::DatabaseType> {
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn test_connection(
   config: ConnectionProfile,
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, crate::services::SqlxRegistry>,
-  sql_server_registry: State<'_, SqlServerRegistry>,
-  oracle_registry: State<'_, OracleRegistry>,
-  dameng_registry: State<'_, DamengRegistry>,
-  mongo_registry: State<'_, MongoRegistry>,
-  redis_registry: State<'_, crate::services::redis::RedisRegistry>,
-  neo4j_registry: State<'_, crate::services::neo4j::Neo4jRegistry>,
-  es_registry: State<'_, crate::services::elasticsearch::EsRegistry>,
-  duckdb_registry: State<'_, DuckDbRegistry>,
-  clickhouse_registry: State<'_, crate::services::clickhouse::ClickHouseRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<String, String> {
   log::info!("测试连接: {}", config.name);
 
@@ -291,7 +278,7 @@ pub async fn test_connection(
       let client = sql_server::connect(&target).await.map_err(|error| error.message)?;
       if !is_draft {
         let pool = SqlServerPool::new(target, client).await.map_err(|error| error.message)?;
-        sql_server_registry.insert(connection_string.clone(), pool);
+        engines.sql_server.insert(connection_string.clone(), pool);
       }
     } else if resolved.db_type == DatabaseType::Oracle {
       #[cfg(feature = "oracle")]
@@ -305,12 +292,11 @@ pub async fn test_connection(
           crate::services::oracle::connect(&target).await.map_err(|error| error.message)?;
         let pool = crate::services::oracle::OraclePool::new(target, connection);
         if !is_draft {
-          oracle_registry.insert(connection_string.clone(), pool);
+          engines.oracle.insert(connection_string.clone(), pool);
         }
       }
       #[cfg(not(feature = "oracle"))]
       {
-        let _ = &oracle_registry;
         unreachable!(
           "resolve_for_connection already rejected Oracle when oracle feature is disabled"
         );
@@ -327,12 +313,11 @@ pub async fn test_connection(
           crate::services::dameng::connect(&target).await.map_err(|error| error.message)?;
         let pool = crate::services::dameng::DamengPool::new(target, connection);
         if !is_draft {
-          dameng_registry.insert(connection_string.clone(), pool);
+          engines.dameng.insert(connection_string.clone(), pool);
         }
       }
       #[cfg(not(feature = "odbc"))]
       {
-        let _ = &dameng_registry;
         unreachable!(
           "resolve_for_connection already rejected Dameng when odbc feature is disabled"
         );
@@ -345,7 +330,7 @@ pub async fn test_connection(
       let client =
         crate::services::mongodb::connect(&MongoTarget::from_profile(&reachable)).await?;
       if !is_draft {
-        mongo_registry.insert(connection_string.clone(), std::sync::Arc::new(client));
+        engines.mongo.insert(connection_string.clone(), std::sync::Arc::new(client));
       }
     } else if resolved.db_type == DatabaseType::Redis {
       let reachable = match local_port {
@@ -355,7 +340,7 @@ pub async fn test_connection(
       let target = crate::services::redis::RedisTarget::from_profile(&reachable)?;
       let pool = crate::services::redis::connect(target).await?;
       if !is_draft {
-        redis_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
+        engines.redis.insert(connection_string.clone(), std::sync::Arc::new(pool));
       }
     } else if resolved.db_type == DatabaseType::Neo4j {
       let reachable = match local_port {
@@ -365,17 +350,17 @@ pub async fn test_connection(
       let target = crate::services::neo4j::Neo4jTarget::from_profile(&reachable)?;
       let pool = crate::services::neo4j::connect(target).await?;
       if !is_draft {
-        neo4j_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
+        engines.neo4j.insert(connection_string.clone(), std::sync::Arc::new(pool));
       }
     } else if resolved.db_type == DatabaseType::DuckDB {
       // 已经开着就接着用：同一个文件在进程里只开一份，另开一份的话，两份各持一把锁、
       // 各有一份缓存，谁的写入先落盘说不清
-      if duckdb_registry.get(&connection_string).is_none() {
+      if engines.duckdb.get(&connection_string).is_none() {
         let path =
           duckdb_file_path(&app_handle, resolved.database.as_deref().unwrap_or(":memory:"))?;
         let pool = crate::services::duckdb::open(&path).await.map_err(|error| error.message)?;
         if !is_draft {
-          duckdb_registry.insert(connection_string.clone(), pool);
+          engines.duckdb.insert(connection_string.clone(), pool);
         }
       }
     } else if resolved.db_type == DatabaseType::Elasticsearch {
@@ -383,7 +368,7 @@ pub async fn test_connection(
       let target = crate::services::elasticsearch::EsTarget::from_profile(&resolved, local_port);
       let pool = crate::services::elasticsearch::connect(target).await?;
       if !is_draft {
-        es_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
+        engines.es.insert(connection_string.clone(), std::sync::Arc::new(pool));
       }
     } else if resolved.db_type == DatabaseType::ClickHouse {
       // 同 Elasticsearch：不换主机，经隧道的 HTTPS 仍按原来的主机名校验证书
@@ -391,7 +376,7 @@ pub async fn test_connection(
         crate::services::clickhouse::ClickHouseTarget::from_profile(&resolved, local_port);
       let pool = crate::services::clickhouse::connect(target).await?;
       if !is_draft {
-        clickhouse_registry.insert(connection_string.clone(), pool);
+        engines.clickhouse.insert(connection_string.clone(), pool);
       }
     } else if resolved.db_type == DatabaseType::SQLite {
       // 驱动打开时不读文件头，DuckDB 的库、CSV 都能「连上」。绝对路径先核验魔数
@@ -414,7 +399,7 @@ pub async fn test_connection(
       if is_draft {
         pool.close().await;
       } else {
-        crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
+        crate::services::sqlx_pool::register(&engines.sqlx, connection_string.clone(), pool);
       }
     } else if matches!(resolved.db_type, DatabaseType::MySQL | DatabaseType::PostgreSQL) {
       // 真实含口令 URL 留在 Rust 后端内部建连，池子按无口令的 `connection_string` 登记（H7 / S2）
@@ -423,7 +408,7 @@ pub async fn test_connection(
       if is_draft {
         pool.close().await;
       } else {
-        crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
+        crate::services::sqlx_pool::register(&engines.sqlx, connection_string.clone(), pool);
       }
     }
     Ok(())
@@ -444,10 +429,10 @@ pub async fn sqlx_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  database_instances: State<'_, crate::services::SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<Vec<indexmap::IndexMap<String, serde_json::Value>>, crate::services::QueryError> {
-  let pool = crate::services::sqlx_pool::shared(&database_instances, &connection_string)
-    .ok_or_else(|| {
+  let pool =
+    crate::services::sqlx_pool::shared(&engines.sqlx, &connection_string).ok_or_else(|| {
       crate::services::QueryError::message(
         crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
       )
@@ -459,9 +444,9 @@ pub async fn sqlx_select(
 #[tauri::command]
 pub async fn close_sqlx_pool(
   connection_string: String,
-  database_instances: State<'_, crate::services::SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<bool, String> {
-  Ok(crate::services::sqlx_pool::close(&database_instances, &connection_string))
+  Ok(crate::services::sqlx_pool::close(&engines.sqlx, &connection_string))
 }
 
 /// SQL Server 连接上的目录查询：前端对另外三家走插件的 `select`，对这一家走这里。
@@ -471,9 +456,9 @@ pub async fn sql_server_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  sql_server_registry: State<'_, SqlServerRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<Vec<crate::services::QueryRow>, crate::services::QueryError> {
-  let pool = sql_server_registry.get(&connection_string).ok_or_else(|| {
+  let pool = engines.sql_server.get(&connection_string).ok_or_else(|| {
     crate::services::QueryError::message(
       crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
     )
@@ -487,9 +472,9 @@ pub async fn oracle_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  oracle_registry: State<'_, OracleRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<Vec<crate::services::QueryRow>, crate::services::QueryError> {
-  let pool = oracle_registry.get(&connection_string).ok_or_else(|| {
+  let pool = engines.oracle.get(&connection_string).ok_or_else(|| {
     crate::services::QueryError::message(
       crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
     )
@@ -498,8 +483,8 @@ pub async fn oracle_select(
 }
 
 #[tauri::command]
-pub fn close_oracle(connection_string: String, oracle_registry: State<'_, OracleRegistry>) -> bool {
-  oracle_registry.remove(&connection_string)
+pub fn close_oracle(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.oracle.remove(&connection_string)
 }
 
 /// 达梦 DM8 连接上的目录查询。与 `oracle_select` 同一个角色、同一种返回形状
@@ -508,9 +493,9 @@ pub async fn dameng_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  dameng_registry: State<'_, DamengRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<Vec<crate::services::QueryRow>, crate::services::QueryError> {
-  let pool = dameng_registry.get(&connection_string).ok_or_else(|| {
+  let pool = engines.dameng.get(&connection_string).ok_or_else(|| {
     crate::services::QueryError::message(
       crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
     )
@@ -519,8 +504,8 @@ pub async fn dameng_select(
 }
 
 #[tauri::command]
-pub fn close_dameng(connection_string: String, dameng_registry: State<'_, DamengRegistry>) -> bool {
-  dameng_registry.remove(&connection_string)
+pub fn close_dameng(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.dameng.remove(&connection_string)
 }
 
 /// 相对路径落在应用的配置目录下，和插件对 SQLite 的处理一样——同一格表单，两种库
@@ -541,9 +526,9 @@ pub async fn duckdb_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  duckdb_registry: State<'_, DuckDbRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<Vec<crate::services::QueryRow>, crate::services::QueryError> {
-  let pool = duckdb_registry.get(&connection_string).ok_or_else(|| {
+  let pool = engines.duckdb.get(&connection_string).ok_or_else(|| {
     crate::services::QueryError::message(
       crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
     )
@@ -558,9 +543,9 @@ pub async fn clickhouse_select(
   connection_string: String,
   sql: String,
   params: Vec<serde_json::Value>,
-  clickhouse_registry: State<'_, crate::services::clickhouse::ClickHouseRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<Vec<crate::services::QueryRow>, crate::services::QueryError> {
-  let pool = clickhouse_registry.get(&connection_string).ok_or_else(|| {
+  let pool = engines.clickhouse.get(&connection_string).ok_or_else(|| {
     crate::services::QueryError::message(
       crate::commands::database_commands::DB_SESSION_NOT_CONNECTED,
     )
@@ -570,28 +555,22 @@ pub async fn clickhouse_select(
 
 /// 断开时去掉登记的客户端。会话连接由 `release_database_session` 另行释放
 #[tauri::command]
-pub fn close_clickhouse(
-  connection_string: String,
-  clickhouse_registry: State<'_, crate::services::clickhouse::ClickHouseRegistry>,
-) -> bool {
-  clickhouse_registry.remove(&connection_string)
+pub fn close_clickhouse(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.clickhouse.remove(&connection_string)
 }
 
 /// 断开：去掉登记的库。会话连接由 `release_database_session` 另行释放，两边都放掉之后
 /// 库才真的关上、文件锁才还回去
 #[tauri::command]
-pub fn close_duckdb(connection_string: String, duckdb_registry: State<'_, DuckDbRegistry>) -> bool {
-  duckdb_registry.remove(&connection_string)
+pub fn close_duckdb(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.duckdb.remove(&connection_string)
 }
 
 /// 断开时把登记的池子去掉。池子里的空闲连接随之关闭；会话连接由
 /// `release_database_session` 另行释放。
 #[tauri::command]
-pub fn close_sql_server(
-  connection_string: String,
-  sql_server_registry: State<'_, SqlServerRegistry>,
-) -> bool {
-  sql_server_registry.remove(&connection_string)
+pub fn close_sql_server(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.sql_server.remove(&connection_string)
 }
 
 /// 断开连接时拆掉隧道。

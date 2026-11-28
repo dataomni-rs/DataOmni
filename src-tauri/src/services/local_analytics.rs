@@ -471,13 +471,16 @@ impl LocalAnalyticsRegistry {
     Ok(true)
   }
 
-  /// 关闭并释放指定会话的内存
+  /// 关闭并释放指定会话的内存（在注册表锁外释放 DuckDB 连接，H16 / P2-3）
   pub fn close(&self, analytics_id: &str) -> Result<bool, QueryError> {
-    let mut inner = self.inner.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
-    let removed = inner.sessions.remove(analytics_id);
+    let removed = {
+      let mut inner = self.inner.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+      inner.sessions.remove(analytics_id)
+    };
     if let Some(entry) = removed {
       entry.session.cancelled.store(true, Ordering::SeqCst);
       entry.session.interrupt.interrupt();
+      drop(entry);
       return Ok(true);
     }
     Ok(false)
@@ -500,31 +503,37 @@ impl LocalAnalyticsRegistry {
       columns: session.columns.iter().map(ColumnPlan::meta).collect(),
     };
 
-    let mut inner = self.inner.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
-    inner.seq += 1;
-    let seq = inner.seq;
+    // 在锁内仅摘除被淘汰会话，把 DuckDB C++ 析构移到锁外（H16 / P2-3）
+    let mut evicted = Vec::new();
+    {
+      let mut inner = self.inner.lock().map_err(|_| QueryError::message(LOCK_POISONED))?;
+      inner.seq += 1;
+      let seq = inner.seq;
 
-    while inner.sessions.len() >= inner.max_sessions {
-      // 优先淘汰最久未用的非活跃会话；若全部正忙，淘汰最久未用的一条并打断
-      let victim = inner
-        .sessions
-        .iter()
-        .filter(|(_, entry)| !entry.session.busy.load(Ordering::Acquire))
-        .min_by_key(|(_, entry)| entry.last_used_seq)
-        .or_else(|| inner.sessions.iter().min_by_key(|(_, entry)| entry.last_used_seq))
-        .map(|(key, _)| key.clone());
-      let Some(key) = victim else {
-        break;
-      };
-      if let Some(removed) = inner.sessions.remove(&key) {
-        removed.session.cancelled.store(true, Ordering::SeqCst);
-        removed.session.interrupt.interrupt();
+      while inner.sessions.len() >= inner.max_sessions {
+        // 优先淘汰最久未用的非活跃会话；若全部正忙，淘汰最久未用的一条并打断
+        let victim = inner
+          .sessions
+          .iter()
+          .filter(|(_, entry)| !entry.session.busy.load(Ordering::Acquire))
+          .min_by_key(|(_, entry)| entry.last_used_seq)
+          .or_else(|| inner.sessions.iter().min_by_key(|(_, entry)| entry.last_used_seq))
+          .map(|(key, _)| key.clone());
+        let Some(key) = victim else {
+          break;
+        };
+        if let Some(removed) = inner.sessions.remove(&key) {
+          removed.session.cancelled.store(true, Ordering::SeqCst);
+          removed.session.interrupt.interrupt();
+          evicted.push(removed);
+        }
       }
-    }
 
-    inner
-      .sessions
-      .insert(analytics_id, RegistryEntry { session: Arc::new(session), last_used_seq: seq });
+      inner
+        .sessions
+        .insert(analytics_id, RegistryEntry { session: Arc::new(session), last_used_seq: seq });
+    }
+    drop(evicted);
     Ok(summary)
   }
 

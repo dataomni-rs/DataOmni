@@ -12,10 +12,11 @@ use crate::services::mongo_command::{self, CommandPlan, CommandReply};
 use crate::services::mongo_shell;
 use crate::services::mongodb::{
   self, CollectionEntry, ExtendedJson, FindRequest, ImportMode, MongoAggregatePage,
-  MongoCollectionAnalysis, MongoCollectionStructure, MongoFindPage, MongoRegistry,
-  UpdateManyResult, DEFAULT_MONGO_SAMPLE_SIZE, MONGO_NOT_CONNECTED,
+  MongoCollectionAnalysis, MongoCollectionStructure, MongoFindPage, UpdateManyResult,
+  DEFAULT_MONGO_SAMPLE_SIZE, MONGO_NOT_CONNECTED,
 };
 use crate::services::query_error::QueryError;
+use crate::services::EngineRegistries;
 use ::mongodb::Client;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -27,8 +28,8 @@ use tokio::sync::oneshot;
 /// 一页最多多少个文档。与网格的 `MAX_UNVIRTUALIZED_ROWS` 同值，理由相同
 const MAX_PAGE_SIZE: u64 = 200;
 
-fn client(registry: &MongoRegistry, connection_string: &str) -> Result<Arc<Client>, String> {
-  registry.get(connection_string).ok_or_else(|| MONGO_NOT_CONNECTED.to_string())
+fn client(engines: &EngineRegistries, connection_string: &str) -> Result<Arc<Client>, String> {
+  engines.mongo.get(connection_string).ok_or_else(|| MONGO_NOT_CONNECTED.to_string())
 }
 
 /// 与执行查询同一个范围（`execute_query`）
@@ -42,7 +43,7 @@ fn timeout(timeout_ms: u64) -> Result<Duration, String> {
 #[tauri::command]
 pub async fn mongodb_list_collections(
   connection_string: String,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<Vec<CollectionEntry>, String> {
   let client = client(&registry, &connection_string)?;
   mongodb::list_collections(&client).await
@@ -59,7 +60,7 @@ pub async fn mongodb_find(
   skip: u64,
   limit: u64,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<MongoFindPage, String> {
   let request = FindRequest {
     filter: mongo_shell::parse_document(&filter).map_err(|error| error.to_string())?,
@@ -79,7 +80,7 @@ pub async fn mongodb_count(
   collection: String,
   filter: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<u64, String> {
   let filter = mongo_shell::parse_document(&filter).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -97,7 +98,7 @@ pub async fn mongodb_analyze_collection(
   filter: String,
   sample_size: Option<usize>,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<MongoCollectionAnalysis, String> {
   let filter_doc = mongo_shell::parse_document(&filter).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -121,7 +122,7 @@ pub async fn mongodb_document(
   collection: String,
   id: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<Option<String>, String> {
   let id = mongo_shell::parse_value(&id).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -140,7 +141,7 @@ pub async fn mongodb_replace_document(
   original: String,
   replacement: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let original = mongo_shell::parse_document(&original).map_err(|error| error.to_string())?;
   let replacement = mongo_shell::parse_document(&replacement).map_err(|error| error.to_string())?;
@@ -157,7 +158,7 @@ pub async fn mongodb_insert_document(
   collection: String,
   document: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<String, String> {
   let document = mongo_shell::parse_document(&document).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -172,7 +173,7 @@ pub async fn mongodb_delete_document(
   collection: String,
   id: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let id = mongo_shell::parse_value(&id).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -190,7 +191,7 @@ pub async fn mongodb_update_many(
   filter: String,
   update: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<UpdateManyResult, String> {
   let filter = mongo_shell::parse_document(&filter).map_err(|error| error.to_string())?;
   let update = mongo_shell::parse_value(&update).map_err(|error| error.to_string())?;
@@ -206,7 +207,7 @@ pub async fn mongodb_delete_many(
   collection: String,
   filter: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<u64, String> {
   let filter = mongo_shell::parse_document(&filter).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -227,7 +228,7 @@ pub async fn mongodb_run_command(
   database: String,
   command: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<CommandReply, String> {
   let (command, _) = mongo_command::plan(&command)?;
   let timeout = timeout(timeout_ms)?;
@@ -246,7 +247,7 @@ pub async fn mongodb_aggregate(
   skip: u64,
   limit: u64,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<MongoAggregatePage, String> {
   let pipeline = mongo_shell::parse_value(&pipeline).map_err(|error| error.to_string())?;
   let pipeline = mongodb::parse_pipeline(pipeline)?;
@@ -271,7 +272,7 @@ pub async fn mongodb_collection_structure(
   database: String,
   collection: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<MongoCollectionStructure, String> {
   let timeout = timeout(timeout_ms)?;
   let client = client(&registry, &connection_string)?;
@@ -288,7 +289,7 @@ pub async fn mongodb_create_index(
   keys: String,
   options: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<String, String> {
   let keys = mongo_shell::parse_document(&keys).map_err(|error| error.to_string())?;
   let options = mongo_shell::parse_document(&options).map_err(|error| error.to_string())?;
@@ -304,7 +305,7 @@ pub async fn mongodb_drop_index(
   collection: String,
   name: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let timeout = timeout(timeout_ms)?;
   let client = client(&registry, &connection_string)?;
@@ -322,7 +323,7 @@ pub async fn mongodb_explain(
   sort: String,
   pipeline: Option<String>,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<mongodb::MongoExplain, String> {
   let target = match pipeline {
     Some(pipeline) => {
@@ -347,7 +348,7 @@ pub async fn mongodb_create_collection(
   collection: String,
   options: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let options = mongo_shell::parse_document(&options).map_err(|error| error.to_string())?;
   let timeout = timeout(timeout_ms)?;
@@ -361,7 +362,7 @@ pub async fn mongodb_drop_collection(
   database: String,
   collection: String,
   timeout_ms: u64,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let timeout = timeout(timeout_ms)?;
   let client = client(&registry, &connection_string)?;
@@ -370,8 +371,8 @@ pub async fn mongodb_drop_collection(
 
 /// 断开时去掉登记。`Client` 的最后一个引用没了，池子里的连接随之关闭
 #[tauri::command]
-pub fn close_mongodb(connection_string: String, registry: State<'_, MongoRegistry>) -> bool {
-  registry.remove(&connection_string)
+pub fn close_mongodb(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.mongo.remove(&connection_string)
 }
 
 #[derive(Deserialize)]
@@ -393,7 +394,7 @@ pub struct MongoExportRequest {
 pub async fn mongodb_export_to_file(
   request: MongoExportRequest,
   on_progress: Channel<ExportProgress>,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
   cancellation_state: State<'_, QueryCancellationState>,
 ) -> Result<ExportSummary, QueryError> {
   crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&request.path))
@@ -443,7 +444,7 @@ pub struct MongoImportRequest {
 pub async fn mongodb_import_file(
   request: MongoImportRequest,
   on_progress: Channel<ImportProgress>,
-  registry: State<'_, MongoRegistry>,
+  registry: State<'_, EngineRegistries>,
   cancellation_state: State<'_, QueryCancellationState>,
   pause_state: State<'_, ImportPauseState>,
 ) -> Result<ImportSummary, QueryError> {

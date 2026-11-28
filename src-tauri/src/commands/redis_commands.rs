@@ -5,10 +5,10 @@
 use crate::commands::database_commands::TIMEOUT_OUT_OF_RANGE;
 use crate::services::redis::{
   self, ElementChange, KeyChange, KeyspaceEntry, NewKey, RedisAnalysisState, RedisKeyspaceAnalysis,
-  RedisKeyspaceAnalysisRequest, RedisPool, RedisRegistry, RedisReply, RedisValue, ScanPage,
-  ScanRequest, ValueRequest, DEFAULT_REDIS_ANALYSIS_SAMPLE, MAX_REDIS_ANALYSIS_SAMPLE,
-  REDIS_NOT_CONNECTED,
+  RedisKeyspaceAnalysisRequest, RedisPool, RedisReply, RedisValue, ScanPage, ScanRequest,
+  ValueRequest, DEFAULT_REDIS_ANALYSIS_SAMPLE, MAX_REDIS_ANALYSIS_SAMPLE, REDIS_NOT_CONNECTED,
 };
+use crate::services::EngineRegistries;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
@@ -16,8 +16,8 @@ use tauri::State;
 /// 一页最多多少个键或元素。与网格的 `MAX_UNVIRTUALIZED_ROWS` 同值，理由相同
 const MAX_PAGE_SIZE: u64 = 200;
 
-fn pool(registry: &RedisRegistry, connection_string: &str) -> Result<Arc<RedisPool>, String> {
-  registry.get(connection_string).ok_or_else(|| REDIS_NOT_CONNECTED.to_string())
+fn pool(engines: &EngineRegistries, connection_string: &str) -> Result<Arc<RedisPool>, String> {
+  engines.redis.get(connection_string).ok_or_else(|| REDIS_NOT_CONNECTED.to_string())
 }
 
 /// 与执行查询同一个范围（`execute_query`）
@@ -31,7 +31,7 @@ fn timeout(timeout_ms: u64) -> Result<Duration, String> {
 #[tauri::command]
 pub async fn redis_list_keyspaces(
   connection_string: String,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<Vec<KeyspaceEntry>, String> {
   let pool = pool(&registry, &connection_string)?;
   redis::list_keyspaces(&pool).await
@@ -47,7 +47,7 @@ pub async fn redis_scan(
   kind: Option<String>,
   page: u64,
   timeout_ms: u64,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<ScanPage, String> {
   let request = ScanRequest {
     database,
@@ -72,7 +72,7 @@ pub async fn redis_analyze_keyspace(
   sample_limit: Option<usize>,
   timeout_ms: Option<u64>,
   request_id: Option<String>,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
   analysis_state: State<'_, RedisAnalysisState>,
 ) -> Result<RedisKeyspaceAnalysis, String> {
   let pool = pool(&registry, &connection_string)?;
@@ -120,7 +120,7 @@ pub async fn redis_read_value(
   position: Option<String>,
   page: u64,
   timeout_ms: u64,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<RedisValue, String> {
   let request = ValueRequest {
     database,
@@ -140,7 +140,7 @@ pub async fn redis_execute(
   database: i64,
   arguments: Vec<String>,
   timeout_ms: u64,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<RedisReply, String> {
   let arguments =
     arguments.iter().map(|argument| redis::decode_key(argument)).collect::<Result<Vec<_>, _>>()?;
@@ -174,7 +174,7 @@ pub async fn redis_change_key(
   key: String,
   change: KeyChangeRequest,
   timeout_ms: u64,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let change = match change {
     KeyChangeRequest::Delete => KeyChange::Delete,
@@ -249,7 +249,7 @@ pub async fn redis_change_element(
   key: String,
   change: ElementChangeRequest,
   timeout_ms: u64,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let change = change.decode()?;
   let key = redis::decode_key(&key)?;
@@ -274,7 +274,7 @@ pub async fn redis_create_key(
   database: i64,
   request: NewKeyRequest,
   timeout_ms: u64,
-  registry: State<'_, RedisRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<(), String> {
   let new_key = NewKey {
     kind: request.kind,
@@ -290,8 +290,8 @@ pub async fn redis_create_key(
 
 /// 断开时去掉登记。最后一个引用没了，各库号上的连接随之关闭
 #[tauri::command]
-pub fn close_redis(connection_string: String, registry: State<'_, RedisRegistry>) -> bool {
-  registry.remove(&connection_string)
+pub fn close_redis(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.redis.remove(&connection_string)
 }
 
 #[cfg(test)]

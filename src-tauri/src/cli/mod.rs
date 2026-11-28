@@ -2002,13 +2002,20 @@ fn unsupported(db_type: &crate::models::DatabaseType) -> CliError {
 static KEYCHAIN_DEADLINE_EXITS: AtomicBool = AtomicBool::new(true);
 
 /// 读口令可能卡在钥匙串的授权框上。到点还没回来就直接退出并说清楚，框留给人去点——
-/// 卡着不动的命令会让 Agent 一直等下去
+/// 卡着不动的命令会让 Agent 一直等下去。用 Condvar 在 `work` 返回时立刻唤醒看门狗线程，
+/// 避免长生命周期 MCP 进程里每次调用都遗留一条空睡 10 秒的线程（H16 / P2-3）。
 fn with_keychain_deadline<T>(work: impl FnOnce() -> T) -> T {
-  let done = Arc::new(AtomicBool::new(false));
-  let watched = Arc::clone(&done);
+  let pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+  let watched = Arc::clone(&pair);
   std::thread::spawn(move || {
-    std::thread::sleep(KEYCHAIN_DEADLINE);
-    if !watched.load(Ordering::SeqCst) {
+    let (lock, cvar) = &*watched;
+    let Ok(guard) = lock.lock() else {
+      return;
+    };
+    let Ok((done, _)) = cvar.wait_timeout_while(guard, KEYCHAIN_DEADLINE, |done| !*done) else {
+      return;
+    };
+    if !*done {
       let body = json!({
         "schema": OUTPUT_SCHEMA,
         "error": {
@@ -2023,7 +2030,11 @@ fn with_keychain_deadline<T>(work: impl FnOnce() -> T) -> T {
     }
   });
   let result = work();
-  done.store(true, Ordering::SeqCst);
+  let (lock, cvar) = &*pair;
+  if let Ok(mut done) = lock.lock() {
+    *done = true;
+    cvar.notify_one();
+  }
   result
 }
 

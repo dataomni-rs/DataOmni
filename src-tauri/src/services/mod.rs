@@ -64,6 +64,7 @@ pub use export_writer::{
   EXPORT_CANCELLED_CODE,
 };
 pub use object_catalog::{object_catalog_queries, ObjectCatalogQueries};
+pub use pool_registry::EngineRegistries;
 pub use query_error::QueryError;
 pub use query_executor::{
   execute_query, execute_query_with_limit, execute_query_with_limits, execute_query_with_timeout,

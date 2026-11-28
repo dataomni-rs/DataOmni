@@ -691,12 +691,13 @@ pub(crate) fn url_host(host: &str) -> std::borrow::Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-  const ALL_DATABASE_TYPES: [super::DatabaseType; 11] = [
+  const ALL_DATABASE_TYPES: [super::DatabaseType; 12] = [
     super::DatabaseType::MySQL,
     super::DatabaseType::PostgreSQL,
     super::DatabaseType::SQLite,
     super::DatabaseType::SqlServer,
     super::DatabaseType::Oracle,
+    super::DatabaseType::Dameng,
     super::DatabaseType::MongoDB,
     super::DatabaseType::Redis,
     super::DatabaseType::Neo4j,
