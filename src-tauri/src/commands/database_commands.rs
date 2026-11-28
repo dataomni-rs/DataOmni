@@ -8,6 +8,7 @@ use crate::services::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::{ipc::Channel, State};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::Duration;
@@ -34,6 +35,26 @@ pub const ROW_LIMIT_OUT_OF_RANGE: &str = "DATAOMNI_ROW_LIMIT_OUT_OF_RANGE";
 pub const BYTE_LIMIT_OUT_OF_RANGE: &str = "DATAOMNI_BYTE_LIMIT_OUT_OF_RANGE";
 /// 连接服务的锁拿不到 / 还没建起来
 pub const SERVICE_NOT_READY: &str = "DATAOMNI_SERVICE_NOT_READY";
+
+/// 在 `spawn_blocking` 中访问已初始化的 `ConnectionService`，避免钥匙串读取或锁竞争阻塞 Tokio 工作线程（B5）。
+async fn with_existing_service_blocking<T, F>(
+  service_state: &ConnectionServiceState,
+  action: F,
+) -> Result<T, QueryError>
+where
+  T: Send + 'static,
+  F: FnOnce(&crate::services::ConnectionService) -> Result<T, QueryError> + Send + 'static,
+{
+  let state = Arc::clone(service_state);
+  tokio::task::spawn_blocking(move || {
+    let guard =
+      state.lock().map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
+    let service = guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
+    action(service)
+  })
+  .await
+  .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?
+}
 /// 用户按了取消。不是失败，界面上不该标红
 pub const QUERY_CANCELLED: &str = "DATAOMNI_QUERY_CANCELLED";
 pub const CSV_DELIMITER_INVALID: &str = "DATAOMNI_CSV_DELIMITER_INVALID";
@@ -205,18 +226,15 @@ pub async fn execute_query(
     return Err(QueryError::message(BYTE_LIMIT_OUT_OF_RANGE));
   }
 
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let conn_id = request.connection_id.clone();
+  let connection_string =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)
+    })
+    .await?;
 
   let resolved = ResolvedPool::resolve(
     connection_string.clone(),
@@ -278,18 +296,16 @@ pub async fn execute_write_batch(
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<Vec<u64>, WriteBatchError> {
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| batch_error(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| batch_error(SERVICE_NOT_READY))?;
-    service.resolve_connection_string(&connection_id, tunnel_port).map_err(|message| {
-      WriteBatchError { statement_index: 0, error: QueryError::from_connection_service(message) }
-    })?
-  };
+  let conn_id = connection_id.clone();
+  let connection_string =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)
+    })
+    .await
+    .map_err(|error| WriteBatchError { statement_index: 0, error })?;
   if query_session_state.transaction_open_on(&connection_string).await {
     return Err(batch_error(SESSION_TRANSACTION_OPEN));
   }
@@ -348,18 +364,15 @@ pub async fn export_query_to_file(
 ) -> Result<ExportSummary, QueryError> {
   let target_path = std::path::Path::new(&request.path);
   crate::services::path_guard::refuse_reserved_path(target_path).map_err(QueryError::message)?;
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let conn_id = request.connection_id.clone();
+  let connection_string =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)
+    })
+    .await?;
 
   let resolved = ResolvedPool::resolve(
     connection_string,
@@ -420,30 +433,28 @@ pub async fn backup_database(
     .map_err(QueryError::message)?;
   let tunnel_port = tunnels.local_port(&connection_id).await;
   // PostgreSQL / MySQL / MongoDB 走外部工具：要的是补上凭据的 profile（主机、用户、TLS），不是连接池
-  let (connection_string, tool_profile) = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    let profile = service
-      .get_connection(&connection_id)
-      .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
-    let tool_profile = if matches!(
-      profile.db_type,
-      crate::models::DatabaseType::PostgreSQL
-        | crate::models::DatabaseType::MySQL
-        | crate::models::DatabaseType::MongoDB
-    ) {
-      Some(service.resolve_for_connection(profile).map_err(QueryError::message)?)
-    } else {
-      None
-    };
-    let connection_string = service
-      .resolve_connection_string(&connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?;
-    (connection_string, tool_profile)
-  };
+  let conn_id = connection_id.clone();
+  let (connection_string, tool_profile) =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      let profile = service
+        .get_connection(&conn_id)
+        .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
+      let tool_profile = if matches!(
+        profile.db_type,
+        crate::models::DatabaseType::PostgreSQL
+          | crate::models::DatabaseType::MySQL
+          | crate::models::DatabaseType::MongoDB
+      ) {
+        Some(service.resolve_for_connection(profile).map_err(QueryError::message)?)
+      } else {
+        None
+      };
+      let connection_string = service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)?;
+      Ok((connection_string, tool_profile))
+    })
+    .await?;
   if let Some(profile) = tool_profile {
     return crate::services::backup::backup_with_tool(
       &profile,
@@ -568,18 +579,15 @@ pub async fn import_csv_file(
 ) -> Result<ImportSummary, QueryError> {
   crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&request.import.path))
     .map_err(QueryError::message)?;
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let conn_id = request.connection_id.clone();
+  let connection_string =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)
+    })
+    .await?;
   // 导入与网格提交一样另开连接，事务开着时同样写在它外面
   if query_session_state.transaction_open_on(&connection_string).await {
     return Err(QueryError::message(SESSION_TRANSACTION_OPEN));
@@ -716,25 +724,20 @@ pub async fn explain_query(
   duckdb: State<'_, DuckDbRegistry>,
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::explain::QueryPlan, QueryError> {
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let (connection_string, db_type) = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    let connection = service
-      .get_connection(&request.connection_id)
-      .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
-    let db_type = connection.db_type.clone();
-    (
-      service
-        .resolve_connection_string(&request.connection_id, tunnel_port)
-        .map_err(QueryError::from_connection_service)?,
-      db_type,
-    )
-  };
+  let conn_id = request.connection_id.clone();
+  let (connection_string, db_type) =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      let connection = service
+        .get_connection(&conn_id)
+        .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
+      let db_type = connection.db_type.clone();
+      let cs = service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)?;
+      Ok((cs, db_type))
+    })
+    .await?;
 
   let resolved = ResolvedPool::resolve(
     connection_string.clone(),
@@ -895,16 +898,14 @@ pub async fn terminate_database_session(
   clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::TerminateSessionResult, QueryError> {
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let conn_id = request.connection_id.clone();
+  let connection_string =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)
+    })
+    .await?;
 
   let resolved = ResolvedPool::resolve(
     connection_string,

@@ -56,21 +56,25 @@ pub async fn write_text_file(
   contents: String,
   encoding: Option<TextEncoding>,
 ) -> Result<u64, String> {
-  let target = PathBuf::from(&path);
-  refuse_reserved_path(&target)?;
+  tokio::task::spawn_blocking(move || {
+    let target = PathBuf::from(&path);
+    refuse_reserved_path(&target)?;
 
-  // 目录不存在时 `fs::write` 报的是 "No such file or directory (os error 2)"，
-  // 指向的却是文件本身，看的人会以为路径拼错了。先点名说是父目录。
-  if let Some(parent) = target.parent() {
-    if !parent.as_os_str().is_empty() && !parent.exists() {
-      return Err(format!("{DIRECTORY_MISSING}: {}", parent.display()));
+    // 目录不存在时 `fs::write` 报的是 "No such file or directory (os error 2)"，
+    // 指向的却是文件本身，看的人会以为路径拼错了。先点名说是父目录。
+    if let Some(parent) = target.parent() {
+      if !parent.as_os_str().is_empty() && !parent.exists() {
+        return Err(format!("{DIRECTORY_MISSING}: {}", parent.display()));
+      }
     }
-  }
 
-  std::fs::write(&target, encode_text(&contents, encoding.unwrap_or(TextEncoding::Utf8)))
-    .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", target.display()))?;
+    std::fs::write(&target, encode_text(&contents, encoding.unwrap_or(TextEncoding::Utf8)))
+      .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", target.display()))?;
 
-  file_size(&target)
+    file_size(&target)
+  })
+  .await
+  .map_err(|e| format!("{FILE_WRITE_FAILED}: {e}"))?
 }
 
 fn file_size(path: &Path) -> Result<u64, String> {
@@ -85,21 +89,25 @@ fn file_size(path: &Path) -> Result<u64, String> {
 /// JS 数字数组：后者经 IPC 序列化成 JSON 会把体积撑到四倍左右。
 #[tauri::command]
 pub async fn write_binary_file(path: String, contents_base64: String) -> Result<u64, String> {
-  let bytes =
-    STANDARD.decode(contents_base64.as_bytes()).map_err(|e| format!("{BASE64_INVALID}: {e}"))?;
+  tokio::task::spawn_blocking(move || {
+    let bytes =
+      STANDARD.decode(contents_base64.as_bytes()).map_err(|e| format!("{BASE64_INVALID}: {e}"))?;
 
-  let target = PathBuf::from(&path);
-  refuse_reserved_path(&target)?;
-  if let Some(parent) = target.parent() {
-    if !parent.as_os_str().is_empty() && !parent.exists() {
-      return Err(format!("{DIRECTORY_MISSING}: {}", parent.display()));
+    let target = PathBuf::from(&path);
+    refuse_reserved_path(&target)?;
+    if let Some(parent) = target.parent() {
+      if !parent.as_os_str().is_empty() && !parent.exists() {
+        return Err(format!("{DIRECTORY_MISSING}: {}", parent.display()));
+      }
     }
-  }
 
-  std::fs::write(&target, &bytes)
-    .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", target.display()))?;
+    std::fs::write(&target, &bytes)
+      .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", target.display()))?;
 
-  file_size(&target)
+    file_size(&target)
+  })
+  .await
+  .map_err(|e| format!("{FILE_WRITE_FAILED}: {e}"))?
 }
 
 /// 一次读进来的文本上限。
@@ -115,44 +123,48 @@ const MAX_TEXT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// 选中的文件」，用插件就得把读权限的 scope 开到整个主目录。
 #[tauri::command]
 pub async fn read_text_file(path: String) -> Result<TextFile, String> {
-  let target = PathBuf::from(&path);
-  refuse_reserved_path(&target)?;
+  tokio::task::spawn_blocking(move || {
+    let target = PathBuf::from(&path);
+    refuse_reserved_path(&target)?;
 
-  let size = file_size(&target)?;
-  if size > MAX_TEXT_FILE_BYTES {
-    return Err(format!(
-      "{FILE_TOO_LARGE}: {} · {:.1} MB · {} MB",
-      target.display(),
-      size as f64 / (1024.0 * 1024.0),
-      MAX_TEXT_FILE_BYTES / (1024 * 1024)
-    ));
-  }
-
-  // 不是 UTF-8 时点名说是编码问题。`read_to_string` 的原话是
-  // "stream did not contain valid UTF-8"，看的人会以为文件坏了
-  let bytes = std::fs::read(&target)
-    .map_err(|e| format!("{FILE_READ_FAILED}: {} · {e}", target.display()))?;
-  let not_text = || format!("{FILE_NOT_UTF8}: {}", target.display());
-  let encoding = match encoding_rs::Encoding::for_bom(&bytes) {
-    Some((found, _)) if found == encoding_rs::UTF_16LE => TextEncoding::Utf16Le,
-    Some((found, _)) if found == encoding_rs::UTF_16BE => TextEncoding::Utf16Be,
-    _ => {
-      let contents = String::from_utf8(bytes).map_err(|_| not_text())?;
-      return Ok(TextFile { contents, encoding: TextEncoding::Utf8 });
+    let size = file_size(&target)?;
+    if size > MAX_TEXT_FILE_BYTES {
+      return Err(format!(
+        "{FILE_TOO_LARGE}: {} · {:.1} MB · {} MB",
+        target.display(),
+        size as f64 / (1024.0 * 1024.0),
+        MAX_TEXT_FILE_BYTES / (1024 * 1024)
+      ));
     }
-  };
-  // 奇数个字节就不是 UTF-16。BOM 本身也解码出来（U+FEFF），和 UTF-8 的 BOM 一样交给前端
-  if bytes.len() % 2 != 0 {
-    return Err(not_text());
-  }
-  let (pairs, _) = bytes.as_chunks::<2>();
-  let units = pairs.iter().map(|&pair| match encoding {
-    TextEncoding::Utf16Be => u16::from_be_bytes(pair),
-    _ => u16::from_le_bytes(pair),
-  });
-  let contents =
-    char::decode_utf16(units).collect::<Result<String, _>>().map_err(|_| not_text())?;
-  Ok(TextFile { contents, encoding })
+
+    // 不是 UTF-8 时点名说是编码问题。`read_to_string` 的原话是
+    // "stream did not contain valid UTF-8"，看的人会以为文件坏了
+    let bytes = std::fs::read(&target)
+      .map_err(|e| format!("{FILE_READ_FAILED}: {} · {e}", target.display()))?;
+    let not_text = || format!("{FILE_NOT_UTF8}: {}", target.display());
+    let encoding = match encoding_rs::Encoding::for_bom(&bytes) {
+      Some((found, _)) if found == encoding_rs::UTF_16LE => TextEncoding::Utf16Le,
+      Some((found, _)) if found == encoding_rs::UTF_16BE => TextEncoding::Utf16Be,
+      _ => {
+        let contents = String::from_utf8(bytes).map_err(|_| not_text())?;
+        return Ok(TextFile { contents, encoding: TextEncoding::Utf8 });
+      }
+    };
+    // 奇数个字节就不是 UTF-16。BOM 本身也解码出来（U+FEFF），和 UTF-8 的 BOM 一样交给前端
+    if !bytes.len().is_multiple_of(2) {
+      return Err(not_text());
+    }
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let units = pairs.iter().map(|&pair| match encoding {
+      TextEncoding::Utf16Be => u16::from_be_bytes(pair),
+      _ => u16::from_le_bytes(pair),
+    });
+    let contents =
+      char::decode_utf16(units).collect::<Result<String, _>>().map_err(|_| not_text())?;
+    Ok(TextFile { contents, encoding })
+  })
+  .await
+  .map_err(|e| format!("{FILE_READ_FAILED}: {e}"))?
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -172,41 +184,45 @@ pub async fn write_new_text_files(
   directory: String,
   files: Vec<NewTextFile>,
 ) -> Result<Vec<String>, String> {
-  let root = PathBuf::from(&directory);
-  refuse_reserved_path(&root)?;
-  if !root.is_dir() {
-    return Err(format!("{DIRECTORY_MISSING}: {}", root.display()));
-  }
-  let mut targets = Vec::with_capacity(files.len());
-  for file in &files {
-    let relative = Path::new(&file.path);
-    let safe = !file.path.is_empty()
-      && relative.components().all(|part| matches!(part, std::path::Component::Normal(_)));
-    if !safe {
-      return Err(format!("{RELATIVE_PATH_INVALID}: {}", file.path));
+  tokio::task::spawn_blocking(move || {
+    let root = PathBuf::from(&directory);
+    refuse_reserved_path(&root)?;
+    if !root.is_dir() {
+      return Err(format!("{DIRECTORY_MISSING}: {}", root.display()));
     }
-    let target = root.join(relative);
-    // 逐目标校验，阻断目录内已有子目录符号链接穿透至保留目录或逃逸 root（H5 / S6）
-    check_contained_target(&root, &target)?;
-    targets.push(target);
-  }
-  let existing: Vec<String> = targets
-    .iter()
-    .filter(|target| target.exists())
-    .map(|target| target.display().to_string())
-    .collect();
-  if !existing.is_empty() {
-    return Err(format!("{FILES_EXIST}: {}", existing.join(", ")));
-  }
-  for (target, file) in targets.iter().zip(&files) {
-    if let Some(parent) = target.parent() {
-      std::fs::create_dir_all(parent)
-        .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", parent.display()))?;
+    let mut targets = Vec::with_capacity(files.len());
+    for file in &files {
+      let relative = Path::new(&file.path);
+      let safe = !file.path.is_empty()
+        && relative.components().all(|part| matches!(part, std::path::Component::Normal(_)));
+      if !safe {
+        return Err(format!("{RELATIVE_PATH_INVALID}: {}", file.path));
+      }
+      let target = root.join(relative);
+      // 逐目标校验，阻断目录内已有子目录符号链接穿透至保留目录或逃逸 root（H5 / S6）
+      check_contained_target(&root, &target)?;
+      targets.push(target);
     }
-    std::fs::write(target, file.contents.as_bytes())
-      .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", target.display()))?;
-  }
-  Ok(targets.iter().map(|target| target.display().to_string()).collect())
+    let existing: Vec<String> = targets
+      .iter()
+      .filter(|target| target.exists())
+      .map(|target| target.display().to_string())
+      .collect();
+    if !existing.is_empty() {
+      return Err(format!("{FILES_EXIST}: {}", existing.join(", ")));
+    }
+    for (target, file) in targets.iter().zip(&files) {
+      if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+          .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", parent.display()))?;
+      }
+      std::fs::write(target, file.contents.as_bytes())
+        .map_err(|e| format!("{FILE_WRITE_FAILED}: {} · {e}", target.display()))?;
+    }
+    Ok(targets.iter().map(|target| target.display().to_string()).collect())
+  })
+  .await
+  .map_err(|e| format!("{FILE_WRITE_FAILED}: {e}"))?
 }
 
 #[cfg(test)]

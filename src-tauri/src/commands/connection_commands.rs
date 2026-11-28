@@ -7,11 +7,11 @@ use crate::services::{
   sql_server, ssh_tunnel, ConnectionService, SqlServerPool, SqlServerRegistry, SqlServerTarget,
   TunnelRegistry,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
-// 全局连接服务状态
-pub type ConnectionServiceState = Mutex<Option<ConnectionService>>;
+// 全局连接服务状态（Arc 包装以支持把钥匙串与磁盘 I/O 移入 spawn_blocking，B5）
+pub type ConnectionServiceState = Arc<Mutex<Option<ConnectionService>>>;
 
 /// 拿不到服务状态的锁——上一次持有它的线程 panic 了。用户无从下手，
 /// 但也不该看见一句中文
@@ -19,31 +19,34 @@ pub const SERVICE_STATE_UNAVAILABLE: &str = "DATAOMNI_SERVICE_STATE_UNAVAILABLE"
 /// 连接服务建不起来：读不到配置目录、配置文件坏了之类
 pub const SERVICE_INIT_FAILED: &str = "DATAOMNI_SERVICE_INIT_FAILED";
 
-/// 取连接服务，没初始化就地初始化。
-///
-/// 五个命令原来把同一段抄了五遍：加锁、没有就建、还是没有就报「未初始化」。
-/// 抄五遍的代价不只是行数——那一段里有三条错误串，于是同一句话在文件里有
-/// 十五处，而「未初始化」那一支在初始化刚刚成功之后根本不可能走到。
-///
-/// 这里用 `slot.insert(...)` 让「刚建好却还是 None」在类型上就不存在，
-/// 不需要再写一条永远不会执行的错误分支。
-fn with_service<T>(
-  service_state: &State<'_, ConnectionServiceState>,
+/// 取连接服务，没初始化就地初始化，并在 `spawn_blocking` 线程池中执行，
+/// 避免系统钥匙串 IPC（macOS `/usr/bin/security` / Keychain）与配置文件磁盘 I/O 卡住 Tokio 工作线程（B5）。
+pub(crate) async fn with_service_blocking<T, F>(
+  service_state: &ConnectionServiceState,
   app_handle: &AppHandle,
-  action: impl FnOnce(&mut ConnectionService) -> Result<T, String>,
-) -> Result<T, String> {
-  let mut guard =
-    service_state.lock().map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))?;
+  action: F,
+) -> Result<T, String>
+where
+  T: Send + 'static,
+  F: FnOnce(&mut ConnectionService) -> Result<T, String> + Send + 'static,
+{
+  let state = Arc::clone(service_state);
+  let app = app_handle.clone();
+  tokio::task::spawn_blocking(move || {
+    let mut guard =
+      state.lock().map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))?;
 
-  let service = match &mut *guard {
-    Some(service) => service,
-    slot => slot.insert(
-      ConnectionService::new(app_handle)
-        .map_err(|error| format!("{SERVICE_INIT_FAILED}: {error}"))?,
-    ),
-  };
+    let service = match &mut *guard {
+      Some(service) => service,
+      slot => slot.insert(
+        ConnectionService::new(&app).map_err(|error| format!("{SERVICE_INIT_FAILED}: {error}"))?,
+      ),
+    };
 
-  action(service)
+    action(service)
+  })
+  .await
+  .map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))?
 }
 
 #[tauri::command]
@@ -54,7 +57,10 @@ pub async fn create_connection(
 ) -> Result<String, String> {
   log::info!("创建连接: {}", config.name);
 
-  with_service(&service_state, &app_handle, |service| service.create_connection(config))
+  with_service_blocking(&service_state, &app_handle, move |service| {
+    service.create_connection(config)
+  })
+  .await
 }
 
 #[tauri::command]
@@ -66,7 +72,10 @@ pub async fn update_connection(
 ) -> Result<(), String> {
   log::info!("更新连接: {} ({id})", config.name);
 
-  with_service(&service_state, &app_handle, |service| service.update_connection(&id, config))
+  with_service_blocking(&service_state, &app_handle, move |service| {
+    service.update_connection(&id, config)
+  })
+  .await
 }
 
 #[tauri::command]
@@ -78,7 +87,11 @@ pub async fn delete_connection(
 ) -> Result<(), String> {
   log::info!("删除连接: {id}");
 
-  with_service(&service_state, &app_handle, |service| service.delete_connection(&id))?;
+  let target_id = id.clone();
+  with_service_blocking(&service_state, &app_handle, move |service| {
+    service.delete_connection(&target_id)
+  })
+  .await?;
   // 删除配置后同步拆掉该连接残留的活动 SSH 隧道（B4）
   tunnels.close(&id).await;
   Ok(())
@@ -89,7 +102,7 @@ pub async fn get_connections(
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
 ) -> Result<Vec<ConnectionProfile>, String> {
-  with_service(&service_state, &app_handle, |service| Ok(service.get_connections()))
+  with_service_blocking(&service_state, &app_handle, |service| Ok(service.get_connections())).await
 }
 
 /// 读取连接级本地业务语义备注（`semantics/<id>.md`，CM4）
@@ -100,7 +113,11 @@ pub async fn get_connection_semantics(id: String, app_handle: AppHandle) -> Resu
     .path()
     .app_config_dir()
     .map_err(|error| format!("DATAOMNI_CONFIG_DIR_UNAVAILABLE: {error}"))?;
-  Ok(crate::services::connection_semantics::read_semantics(&config_dir, &id)?.unwrap_or_default())
+  tokio::task::spawn_blocking(move || {
+    Ok(crate::services::connection_semantics::read_semantics(&config_dir, &id)?.unwrap_or_default())
+  })
+  .await
+  .map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))?
 }
 
 /// 保存连接级本地业务语义备注（上限 32 KB，不修改 `connections.json` 与 `<id>#agent` 指纹，CM4）
@@ -112,17 +129,23 @@ pub async fn save_connection_semantics(
   service_state: State<'_, ConnectionServiceState>,
 ) -> Result<(), String> {
   use tauri::Manager;
-  with_service(&service_state, &app_handle, |service| {
-    if service.get_connection(&id).is_none() {
+  let check_id = id.clone();
+  with_service_blocking(&service_state, &app_handle, move |service| {
+    if service.get_connection(&check_id).is_none() {
       return Err(crate::services::connection_service::CONNECTION_NOT_FOUND.to_string());
     }
     Ok(())
-  })?;
+  })
+  .await?;
   let config_dir = app_handle
     .path()
     .app_config_dir()
     .map_err(|error| format!("DATAOMNI_CONFIG_DIR_UNAVAILABLE: {error}"))?;
-  crate::services::connection_semantics::save_semantics(&config_dir, &id, &content)
+  tokio::task::spawn_blocking(move || {
+    crate::services::connection_semantics::save_semantics(&config_dir, &id, &content)
+  })
+  .await
+  .map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))?
 }
 
 /// 把所有连接导出到 `path`（不含口令，见 `ConnectionService::export_document`），返回导出了几个
@@ -134,14 +157,19 @@ pub async fn export_connections(
 ) -> Result<usize, String> {
   let target = std::path::PathBuf::from(&path);
   crate::services::path_guard::refuse_reserved_path_with_app(&target, Some(&app_handle))?;
-  let (document, count) = with_service(&service_state, &app_handle, |service| {
+  let (document, count) = with_service_blocking(&service_state, &app_handle, |service| {
     Ok((service.export_document()?, service.get_connections().len()))
-  })?;
-  // 和连接配置、导出、备份一样先写 .part 再改名：覆盖一份旧的导出时，写到一半不会把它弄坏
-  let part = target.with_extension("json.part");
-  std::fs::write(&part, document).map_err(|error| format!("{}: {error}", part.display()))?;
-  std::fs::rename(&part, &target).map_err(|error| format!("{path}: {error}"))?;
-  Ok(count)
+  })
+  .await?;
+  tokio::task::spawn_blocking(move || {
+    // 和连接配置、导出、备份一样先写 .part 再改名：覆盖一份旧的导出时，写到一半不会把它弄坏
+    let part = target.with_extension("json.part");
+    std::fs::write(&part, document).map_err(|error| format!("{}: {error}", part.display()))?;
+    std::fs::rename(&part, &target).map_err(|error| format!("{path}: {error}"))?;
+    Ok(count)
+  })
+  .await
+  .map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))?
 }
 
 #[tauri::command]
@@ -150,10 +178,17 @@ pub async fn import_connections(
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
 ) -> Result<crate::services::connection_service::ConnectionImport, String> {
-  let target = std::path::Path::new(&path);
-  crate::services::path_guard::refuse_reserved_path_with_app(target, Some(&app_handle))?;
-  let content = std::fs::read_to_string(target).map_err(|error| format!("{path}: {error}"))?;
-  with_service(&service_state, &app_handle, |service| service.import_document(&content))
+  let target = std::path::PathBuf::from(&path);
+  crate::services::path_guard::refuse_reserved_path_with_app(&target, Some(&app_handle))?;
+  let content = tokio::task::spawn_blocking(move || {
+    std::fs::read_to_string(&target).map_err(|error| format!("{path}: {error}"))
+  })
+  .await
+  .map_err(|error| format!("{SERVICE_STATE_UNAVAILABLE}: {error}"))??;
+  with_service_blocking(&service_state, &app_handle, move |service| {
+    service.import_document(&content)
+  })
+  .await
 }
 
 #[tauri::command]
@@ -162,7 +197,10 @@ pub async fn import_connection_profiles(
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
 ) -> Result<crate::services::connection_service::ConnectionImport, String> {
-  with_service(&service_state, &app_handle, |service| service.import_profiles(profiles))
+  with_service_blocking(&service_state, &app_handle, move |service| {
+    service.import_profiles(profiles)
+  })
+  .await
 }
 
 /// 连接失败之后查一遍断在哪一段。
@@ -203,10 +241,11 @@ pub async fn test_connection(
 ) -> Result<String, String> {
   log::info!("测试连接: {}", config.name);
 
-  // 校验与读钥匙串都是同步的，锁在这个块里拿了就还——下面建隧道要 await,
-  // 而跨 await 持有 std 的 MutexGuard 会把整个命令变成不可 Send
-  let resolved =
-    with_service(&service_state, &app_handle, |service| service.resolve_for_connection(&config))?;
+  // 校验与读钥匙串移入 spawn_blocking，不阻塞 Tokio 工作线程（B5）
+  let resolved = with_service_blocking(&service_state, &app_handle, move |service| {
+    service.resolve_for_connection(&config)
+  })
+  .await?;
 
   // 未保存草稿（表单「测试连接」）不向 TunnelRegistry 或任何持久 PoolRegistry 写入状态，
   // 测完即拆临时隧道与临时连接，避免孤儿隧道与池泄漏（B4）。
