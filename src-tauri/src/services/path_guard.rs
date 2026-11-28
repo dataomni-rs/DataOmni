@@ -60,6 +60,7 @@ pub fn refuse_reserved_path_with_app(
   refuse_inside_any(target, &reserved)
 }
 
+#[cfg(test)]
 pub(crate) fn refuse_inside(target: &Path, reserved: &Path) -> Result<(), String> {
   refuse_inside_any(target, &[reserved.to_path_buf()])
 }

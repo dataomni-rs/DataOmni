@@ -186,6 +186,7 @@ pub async fn test_connection(
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
+  database_instances: State<'_, crate::services::SqlxRegistry>,
   sql_server_registry: State<'_, SqlServerRegistry>,
   oracle_registry: State<'_, OracleRegistry>,
   dameng_registry: State<'_, DamengRegistry>,
@@ -318,7 +319,7 @@ pub async fn test_connection(
     let pool = crate::services::clickhouse::connect(target).await?;
     clickhouse_registry.insert(connection_string.clone(), pool);
   } else if resolved.db_type == DatabaseType::SQLite {
-    // 插件打开时不读文件头，DuckDB 的库、CSV 都能「连上」。相对路径由插件按应用目录解析，这里不猜
+    // 驱动打开时不读文件头，DuckDB 的库、CSV 都能「连上」。绝对路径先核验魔数
     if let Some(path) =
       resolved.database.as_deref().filter(|path| std::path::Path::new(path).is_absolute())
     {
@@ -326,29 +327,23 @@ pub async fn test_connection(
         return Err(format!("{}: {path}", crate::services::connection_probe::NOT_SQLITE_FILE));
       }
     }
+    let connect_url = match connection_string.strip_prefix("sqlite:") {
+      Some(rest) if rest != ":memory:" && !std::path::Path::new(rest).is_absolute() => {
+        use tauri::Manager;
+        let base = app_handle.path().app_config_dir().map_err(|error| error.to_string())?;
+        crate::services::sqlite_path::sqlite_connection_string(&base.join(rest).to_string_lossy())
+      }
+      _ => connection_string.clone(),
+    };
+    let pool = crate::services::sqlx_pool::open(&connect_url).await?;
+    crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
+  } else if matches!(resolved.db_type, DatabaseType::MySQL | DatabaseType::PostgreSQL) {
+    // 真实含口令 URL 留在 Rust 后端内部建连，池子按无口令的 `connection_string` 登记（H7 / S2）
+    let connect_url = resolved.sqlx_connect_url_via(local_port);
+    let pool = crate::services::sqlx_pool::open(&connect_url).await?;
+    crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
   }
   Ok(connection_string)
-}
-
-/// 为 MySQL / PostgreSQL / SQLite 开池子并登记进 `SqlxRegistry`。
-/// 池子配置与超时原因见 `services::sqlx_pool`
-#[tauri::command]
-pub async fn open_database_pool(
-  connection_string: String,
-  app_handle: AppHandle,
-  database_instances: State<'_, crate::services::SqlxRegistry>,
-) -> Result<(), String> {
-  let resolved = match connection_string.strip_prefix("sqlite:") {
-    Some(rest) if rest != ":memory:" && !std::path::Path::new(rest).is_absolute() => {
-      use tauri::Manager;
-      let base = app_handle.path().app_config_dir().map_err(|error| error.to_string())?;
-      crate::services::sqlite_path::sqlite_connection_string(&base.join(rest).to_string_lossy())
-    }
-    _ => connection_string.clone(),
-  };
-  let pool = crate::services::sqlx_pool::open(&resolved).await?;
-  crate::services::sqlx_pool::register(&database_instances, connection_string, pool);
-  Ok(())
 }
 
 /// MySQL / PostgreSQL / SQLite 的目录查询（取出池子副本后立即释放注册表锁）

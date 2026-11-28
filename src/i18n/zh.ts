@@ -1491,6 +1491,7 @@ export const zh = {
   'error.backend.credentialStoreLocked': '系统钥匙串锁着，或者解锁被取消了。再试一次，在弹出的对话框里解锁即可，不用重启 DataOmni。Linux 上如果连对话框都没有，多半是还没有默认的密钥环：用「密码和密钥」（Seahorse）新建一个并设为默认。也可以不保存密码，每次连接时输入。技术细节：{detail}',
   'error.backend.credentialDeleteFailed': '没能从系统钥匙串删掉这条密码，它可能还留在钥匙串里。技术细节：{detail}',
   'error.backend.credentialMissing': '系统钥匙串里没有这个连接的密码，请重新输入。',
+  'error.backend.agentGrantUpgradeRequired': '该连接的外部 Agent 只读授权为旧版格式，请在 DataOmni 界面重新保存以升级到 v2 授权。',
   'error.backend.aiKeyMissing': '还没有填 API Key：到「设置 → AI 设计」里填上并保存。',
   'error.backend.aiKeySaveFailed': 'API Key 没能存进系统钥匙串，存进去之前用不了 AI 设计。钥匙串锁着的话，再按一次保存、在弹出的对话框里解锁；Linux 上连对话框都没有，多半是还没有默认的密钥环：用「密码和密钥」（Seahorse）新建一个并设为默认。技术细节：{detail}',
   'error.backend.credentialMigrationFailed': '把旧配置里的明文密码迁进系统钥匙串时失败：{detail}',

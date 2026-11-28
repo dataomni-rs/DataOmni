@@ -105,7 +105,6 @@ pub fn run() {
       import_connections,
       import_connection_profiles,
       test_connection,
-      open_database_pool,
       sqlx_select,
       close_sqlx_pool,
       diagnose_connection,

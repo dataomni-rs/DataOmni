@@ -114,13 +114,14 @@ describe('断线之后', () => {
     invokeMock.mockResolvedValue(undefined);
     await useQueryStore.getState().connectToDatabase('sqlite:memory', 'profile-a', SESSION);
 
-    expect(invokeMock).toHaveBeenCalledWith('open_database_pool', { connectionString: 'sqlite:memory' });
+    expect(invokeMock).toHaveBeenCalledWith('release_database_session', { sessionId: 'session-a' });
+    expect(invokeMock).not.toHaveBeenCalledWith('open_database_pool', expect.anything());
     expect(useQueryStore.getState().connectionLost).toBe(false);
   });
 
   it('连着的时候切回同一条连接仍然不重连——那道短路本身是对的', async () => {
     await useQueryStore.getState().connectToDatabase('sqlite:memory', 'profile-a', SESSION);
-    expect(invokeMock).not.toHaveBeenCalledWith('open_database_pool', expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith('release_database_session', expect.anything());
   });
 
   it('断开连接会把这个标记清掉', async () => {
@@ -190,11 +191,11 @@ describe('新旧句柄是同一个后端池子', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('池子由前端打开的（MySQL / PostgreSQL）照常关：接下来 openDatabase 会重开', async () => {
+  it('MySQL / PostgreSQL 同样由后端 test_connection 登记池子，切到同串配置不摘掉新池子', async () => {
     const mysql = 'mysql://root@127.0.0.1:3306/app';
     const close = connectedTo(mysql);
     await useQueryStore.getState().disconnect({ keepPoolFor: mysql });
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('同一条断线重连：test_connection 刚换上的新池子不能被旧句柄关掉', async () => {

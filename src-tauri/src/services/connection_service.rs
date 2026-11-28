@@ -108,7 +108,7 @@ fn agent_grant(profile: &ConnectionProfile, signing_key: &str) -> String {
 }
 
 fn verify_mac_hex(secret: &str, payload: &[u8], grant: &str) -> bool {
-  if grant.len() % 2 != 0 {
+  if !grant.len().is_multiple_of(2) {
     return false;
   }
   let bytes: Option<Vec<u8>> = (0..grant.len())
@@ -1137,7 +1137,7 @@ fn validate_tls_configuration(config: &ConnectionProfile) -> Result<(), String> 
   Ok(())
 }
 
-fn redact_connection_string(connection_string: &str) -> String {
+pub(crate) fn redact_connection_string(connection_string: &str) -> String {
   let redacted_credentials = redact_url_credentials(connection_string);
   let Some((base, query)) = redacted_credentials.split_once('?') else {
     return redacted_credentials;
@@ -1587,8 +1587,13 @@ mod tests {
 
     let saved = service.get_connection("profile-1").unwrap();
     assert!(saved.password.is_empty());
+    // 返回前端的池键绝不带明文口令，真实含口令 URL 仅留在 Rust 后端内部（H7 / S2）
     assert_eq!(
       service.test_connection(saved).unwrap(),
+      "postgres://postgres@localhost:5432/postgres?sslmode=disable"
+    );
+    assert_eq!(
+      service.resolve_for_connection(saved).unwrap().sqlx_connect_url_via(None),
       "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable"
     );
 
@@ -1608,8 +1613,13 @@ mod tests {
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(!content.contains("legacy-secret"));
     assert!(!content.contains("\"password\""));
+    let saved = service.get_connection("profile-1").unwrap();
     assert_eq!(
-      service.test_connection(service.get_connection("profile-1").unwrap()).unwrap(),
+      service.test_connection(saved).unwrap(),
+      "postgres://postgres@localhost:5432/postgres?sslmode=disable"
+    );
+    assert_eq!(
+      service.resolve_for_connection(saved).unwrap().sqlx_connect_url_via(None),
       "postgres://postgres:legacy-secret@localhost:5432/postgres?sslmode=disable"
     );
 
@@ -1630,9 +1640,12 @@ mod tests {
     assert!(!content.contains("session-secret"));
     assert!(!content.contains("system-keyring://"));
     assert!(content.contains("\"save_password\": false"));
+    let saved = service.get_connection("profile-1").unwrap();
+    assert!(!service.test_connection(saved).unwrap().contains("session-secret"));
     assert!(service
-      .test_connection(service.get_connection("profile-1").unwrap())
+      .resolve_for_connection(saved)
       .unwrap()
+      .sqlx_connect_url_via(None)
       .contains("session-secret"));
 
     let restarted_service =

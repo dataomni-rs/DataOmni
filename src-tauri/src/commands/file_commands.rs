@@ -17,9 +17,6 @@ pub const FILE_TOO_LARGE: &str = "DATAOMNI_FILE_TOO_LARGE";
 pub const FILES_EXIST: &str = "DATAOMNI_FILES_EXIST";
 /// 相对路径不合规矩（绝对路径、带 `..`、空的）。数据里带的是那条路径
 pub const RELATIVE_PATH_INVALID: &str = "DATAOMNI_RELATIVE_PATH_INVALID";
-/// 路径落在应用自己的配置或日志保留目录里。数据里带的是那条路径
-pub use crate::services::path_guard::PATH_RESERVED;
-
 use crate::services::path_guard::{check_contained_target, refuse_reserved_path};
 
 /// 把导出内容写到用户在保存对话框里选定的路径。
@@ -215,7 +212,7 @@ pub async fn write_new_text_files(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::services::path_guard::refuse_inside;
+  use crate::services::path_guard::{refuse_inside, PATH_RESERVED};
 
   #[test]
   fn refuses_paths_inside_the_reserved_directory_even_through_dot_dot_and_symlinks() {

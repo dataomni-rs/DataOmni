@@ -794,10 +794,11 @@ fn valid_type_name(name: &str) -> bool {
         }
         "interval" => {
           let units = ["year", "month", "day", "hour", "minute", "second"];
-          if parser.eat_space_any_word(&units) && parser.eat_space_word("to") {
-            if !parser.eat_space_any_word(&units) {
-              return false;
-            }
+          if parser.eat_space_any_word(&units)
+            && parser.eat_space_word("to")
+            && !parser.eat_space_any_word(&units)
+          {
+            return false;
           }
           if !parser.eat_optional_typmod() {
             return false;

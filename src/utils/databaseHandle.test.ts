@@ -38,9 +38,9 @@ describe('SQLite 句柄', () => {
     invokeMock.mockResolvedValue(true);
   });
 
-  it('走后端 sqlx 池且关的时候只按自身连接串关，不影响其他 SQLite 句柄', async () => {
+  it('走后端 sqlx 池且不再向前端暴露原始 URL 的 open_database_pool，关的时候只按自身连接串关', async () => {
     const handle = await openDatabase('sqlite:/tmp/other.db');
-    expect(invokeMock).toHaveBeenCalledWith('open_database_pool', { connectionString: 'sqlite:/tmp/other.db' });
+    expect(invokeMock).not.toHaveBeenCalledWith('open_database_pool', expect.anything());
     await handle.close();
     expect(invokeMock).toHaveBeenCalledWith('close_sqlx_pool', { connectionString: 'sqlite:/tmp/other.db' });
   });
@@ -64,6 +64,7 @@ describe('Tauri 安全边界配置', () => {
     expect(cargoToml).not.toContain('tauri-plugin-sql');
     const libRs = readFileSync('src-tauri/src/lib.rs', 'utf8');
     expect(libRs).not.toContain('tauri_plugin_sql');
+    expect(libRs).not.toContain('open_database_pool');
   });
   // 权限和前端依赖都要有消费者：插件的 JS 包在 src 里没人 import，前端就调不到它的命令，
   // 那条权限只是白白放大一旦脚本注入后能做的事（opener / window-state 都是这样留下来的）

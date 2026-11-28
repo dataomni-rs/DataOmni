@@ -43,6 +43,7 @@ const MESSAGES: Readonly<Record<string, TranslationKey>> = {
   DATAOMNI_CREDENTIAL_STORE_LOCKED: 'error.backend.credentialStoreLocked',
   DATAOMNI_CREDENTIAL_DELETE_FAILED: 'error.backend.credentialDeleteFailed',
   DATAOMNI_CREDENTIAL_MISSING: 'error.backend.credentialMissing',
+  DATAOMNI_AGENT_GRANT_UPGRADE_REQUIRED: 'error.backend.agentGrantUpgradeRequired',
   // 不带前缀：连接流程按这个原串认出「去要口令」（`useProfileConnector`），改名要两头一起改
   SESSION_PASSWORD_REQUIRED: 'connect.passwordRequired',
   DATAOMNI_AI_KEY_MISSING: 'error.backend.aiKeyMissing',

@@ -23,7 +23,10 @@ impl<P> PoolRegistry<P> {
       Ok(mut pools) => {
         pools.insert(key, pool);
       }
-      Err(_) => log::error!("连接池注册表锁已中毒，无法登记连接池: {key}"),
+      Err(_) => log::error!(
+        "连接池注册表锁已中毒，无法登记连接池: {}",
+        crate::services::connection_service::redact_connection_string(&key)
+      ),
     }
   }
 
@@ -31,7 +34,10 @@ impl<P> PoolRegistry<P> {
     match self.pools.lock() {
       Ok(pools) => pools.get(key).cloned(),
       Err(_) => {
-        log::error!("连接池注册表锁已中毒，无法读取连接池: {key}");
+        log::error!(
+          "连接池注册表锁已中毒，无法读取连接池: {}",
+          crate::services::connection_service::redact_connection_string(key)
+        );
         None
       }
     }
@@ -41,7 +47,10 @@ impl<P> PoolRegistry<P> {
     match self.pools.lock() {
       Ok(mut pools) => pools.remove(key),
       Err(_) => {
-        log::error!("连接池注册表锁已中毒，无法移除连接池: {key}");
+        log::error!(
+          "连接池注册表锁已中毒，无法移除连接池: {}",
+          crate::services::connection_service::redact_connection_string(key)
+        );
         None
       }
     }
