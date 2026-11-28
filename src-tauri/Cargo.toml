@@ -1,6 +1,6 @@
 [package]
 name = "dataomni"
-version = "1.3.3"
+version = "1.3.4"
 description = "Native desktop client for relational databases, MongoDB, Redis, Neo4j, and Elasticsearch"
 authors = ["DataOmni Contributors"]
 license = "MIT"

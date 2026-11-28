@@ -597,6 +597,17 @@ bun install
 
 （暂无）
 
+### v1.3.4（2026-11-28）
+
+- **全仓安全信任边界与纵深防线加固**：
+  - **IPC 路径守卫与连接凭据隔离**：建立统一 `path_guard` 覆盖所有文件读写、日志、导入导出与备份命令；Agent 授权升级为 HMAC v2（覆盖 SSH 隧道目标、连接选项、TLS 与无口令连接）；剥离 MySQL / PostgreSQL 连接池键中的密码并移除裸连接串命令 `open_database_pool`；
+  - **全引擎只读门禁与注入封堵**：收紧 Elasticsearch CLI 路径门禁（阻断双编码、反斜杠与路径穿越）；CSV 建表列类型升级为严格 SQL 类型语法解析器；补齐 SQL（PG `U&"..."`、高危函数族与 Oracle 包调用）、ClickHouse（fail-closed `readonly=1`）、Redis（显式高危命令黑名单）、MongoDB（递归 BSON 拦截 `$where`/`$function`/`$accumulator`/`$out`/`$merge`）与 DuckDB 备份回放沙盒防线；
+  - **AI / Pickle / 导出与导入安全加固**：AI 端点强制非回环 HTTPS、禁重定向、禁 URL 凭据并按 Origin 绑定 Key（无损兼容旧 Key），SQL / 报错 / EXPLAIN 提示词外发前统一脱敏；Redis Pickle 解析器增加操作码步数、节点数、字符数、深度上限与防自引用循环保护；补齐 SVG 背景属性转义、`.ncx` XML 数值实体码点上限及 PostgreSQL / ClickHouse 列类型声明防注入校验；
+  - **国产库与本地中继安全收口**：openGauss 本地转发中继新增 1 MB 帧上限、随机会话口令鉴权并与连接池生命周期绑定；达梦 `DM_SVC_PATH` 迁至单线程启动期 0700 私有目录。
+- **并发稳定性、前端竞态修复与架构减债**：
+  - **前端竞态与状态正确性**：修复 `QueryResultScrollTable` 改写重跑语句未清空 6 项编辑暂存态的跨表误提交风险；`SessionManager` 引入单调递增 `switchEpoch` 与过期孤儿连接清理，`queryStore` / `TableDataViewer` / `DatabaseExplorer` / `RedisKeyBrowser` 全面补齐请求序号守卫；引入编译期穷尽的 `SQL_DIALECT_TRAITS` 一次收口达梦 5 处方言漏网；消除 `queryStore`↔`connectionStore` 循环依赖，新增 64 MB 跨标签结果集 LRU 淘汰与连接级 `serverVersion` 缓存；
+  - **后端零阻塞与结构整洁**：Oracle / 达梦阻塞 `Drop` 与 `BreakOnDrop` 迁至后台线程，达梦查询改为有界 `mpsc` 真流式并支持互斥保护 `SQLCancel`，三引擎优先复用新鲜 `idle` 连接；`QuerySessionState` 无锁事务镜像消除跨标签队头阻塞，草稿 `test_connection` 改用瞬态隧道/池零泄漏；Keychain / `ConnectionService` / `file_commands` 阻塞 I/O 全量移入 `spawn_blocking`；10 类引擎注册表收拢为 `EngineRegistries`，顺带补齐达梦 `EXPLAIN` 执行计划解析，并按真实变化边界拆分 `sqlx_decode`、`local_analytics/*` 与 `cli/*`。
+
 ### v1.3.3（2026-11-27）
 
 - **类 Excel 网格交互增强（表数据视图与 SQL 查询结果共用）**：
