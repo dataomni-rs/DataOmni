@@ -30,6 +30,16 @@ pub enum DbPool {
   Postgres(sqlx::PgPool),
 }
 
+impl DbPool {
+  pub async fn close(&self) {
+    match self {
+      Self::Sqlite(pool) => pool.close().await,
+      Self::MySql(pool) => pool.close().await,
+      Self::Postgres(pool) => pool.close().await,
+    }
+  }
+}
+
 pub type SqlxRegistry = PoolRegistry<DbPool>;
 
 /// 空闲连接留多久。要比常见的空闲回收短：AWS NLB 350 秒、Azure 负载均衡 4 分钟、

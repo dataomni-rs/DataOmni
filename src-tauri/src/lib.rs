@@ -203,6 +203,16 @@ pub fn run() {
       write_binary_file,
       read_text_file,
     ])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application")
+    .run(|app_handle, event| {
+      if let tauri::RunEvent::Exit = event {
+        use tauri::Manager;
+        let tunnels = app_handle.state::<services::TunnelRegistry>();
+        tauri::async_runtime::block_on(async {
+          let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(3), tunnels.close_all()).await;
+        });
+      }
+    });
 }

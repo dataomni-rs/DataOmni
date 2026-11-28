@@ -74,10 +74,14 @@ pub async fn delete_connection(
   id: String,
   app_handle: AppHandle,
   service_state: State<'_, ConnectionServiceState>,
+  tunnels: State<'_, TunnelRegistry>,
 ) -> Result<(), String> {
   log::info!("删除连接: {id}");
 
-  with_service(&service_state, &app_handle, |service| service.delete_connection(&id))
+  with_service(&service_state, &app_handle, |service| service.delete_connection(&id))?;
+  // 删除配置后同步拆掉该连接残留的活动 SSH 隧道（B4）
+  tunnels.close(&id).await;
+  Ok(())
 }
 
 #[tauri::command]
@@ -204,18 +208,33 @@ pub async fn test_connection(
   let resolved =
     with_service(&service_state, &app_handle, |service| service.resolve_for_connection(&config))?;
 
+  // 未保存草稿（表单「测试连接」）不向 TunnelRegistry 或任何持久 PoolRegistry 写入状态，
+  // 测完即拆临时隧道与临时连接，避免孤儿隧道与池泄漏（B4）。
+  let is_draft = resolved.id.trim().is_empty();
+  let mut ephemeral_tunnel: Option<ssh_tunnel::ActiveTunnel> = None;
+
   let local_port = match resolved.ssh_tunnel.clone() {
     None => None,
     Some(tunnel) => {
       let Some(known_hosts) = ssh_tunnel::default_known_hosts() else {
         return Err(crate::services::connection_service::KNOWN_HOSTS_NO_HOME.to_string());
       };
-      let port = tunnels
-        .ensure(&resolved, &tunnel, &known_hosts)
-        .await
-        .map_err(|error| error.to_string())?;
-      log::info!("SSH 隧道已就绪: 127.0.0.1:{port} → {}:{}", tunnel.host, tunnel.port);
-      Some(port)
+      if is_draft {
+        let opened = ssh_tunnel::open(&resolved, &tunnel, &known_hosts)
+          .await
+          .map_err(|error| error.to_string())?;
+        let port = opened.local_port;
+        ephemeral_tunnel = Some(opened);
+        log::info!("草稿临时 SSH 隧道已就绪: 127.0.0.1:{port} → {}:{}", tunnel.host, tunnel.port);
+        Some(port)
+      } else {
+        let port = tunnels
+          .ensure(&resolved, &tunnel, &known_hosts)
+          .await
+          .map_err(|error| error.to_string())?;
+        log::info!("SSH 隧道已就绪: 127.0.0.1:{port} → {}:{}", tunnel.host, tunnel.port);
+        Some(port)
+      }
     }
   };
 
@@ -223,126 +242,160 @@ pub async fn test_connection(
   // 端口）——两边都走 `connection_string_via`，就没有第二份实现可以走偏
   let connection_string = resolved.connection_string_via(local_port);
 
-  // 另外三家到这里就够了：前端拿连接串去 `Database.load`，由插件去连。
-  // SQL Server 不归插件管，在这里真的连上，连接留给后面的命令用
-  if resolved.db_type == DatabaseType::SqlServer {
-    let reachable = match local_port {
-      Some(port) => resolved.redirected_to("127.0.0.1", port),
-      None => resolved,
-    };
-    let target = SqlServerTarget::from_profile(&reachable);
-    let client = sql_server::connect(&target).await.map_err(|error| error.message)?;
-    let pool = SqlServerPool::new(target, client).await.map_err(|error| error.message)?;
-    sql_server_registry.insert(connection_string.clone(), pool);
-  } else if resolved.db_type == DatabaseType::Oracle {
-    #[cfg(feature = "oracle")]
-    {
-      // Oracle 同样由后端持有
+  let outcome: Result<(), String> = async {
+    if resolved.db_type == DatabaseType::SqlServer {
       let reachable = match local_port {
         Some(port) => resolved.redirected_to("127.0.0.1", port),
         None => resolved,
       };
-      let target = crate::services::oracle::OracleTarget::from_profile(&reachable);
-      let connection =
-        crate::services::oracle::connect(&target).await.map_err(|error| error.message)?;
-      oracle_registry.insert(
-        connection_string.clone(),
-        crate::services::oracle::OraclePool::new(target, connection),
-      );
-    }
-    #[cfg(not(feature = "oracle"))]
-    {
-      let _ = &oracle_registry;
-      unreachable!(
-        "resolve_for_connection already rejected Oracle when oracle feature is disabled"
-      );
-    }
-  } else if resolved.db_type == DatabaseType::Dameng {
-    #[cfg(feature = "odbc")]
-    {
+      let target = SqlServerTarget::from_profile(&reachable);
+      let client = sql_server::connect(&target).await.map_err(|error| error.message)?;
+      if !is_draft {
+        let pool = SqlServerPool::new(target, client).await.map_err(|error| error.message)?;
+        sql_server_registry.insert(connection_string.clone(), pool);
+      }
+    } else if resolved.db_type == DatabaseType::Oracle {
+      #[cfg(feature = "oracle")]
+      {
+        let reachable = match local_port {
+          Some(port) => resolved.redirected_to("127.0.0.1", port),
+          None => resolved,
+        };
+        let target = crate::services::oracle::OracleTarget::from_profile(&reachable);
+        let connection =
+          crate::services::oracle::connect(&target).await.map_err(|error| error.message)?;
+        let pool = crate::services::oracle::OraclePool::new(target, connection);
+        if !is_draft {
+          oracle_registry.insert(connection_string.clone(), pool);
+        }
+      }
+      #[cfg(not(feature = "oracle"))]
+      {
+        let _ = &oracle_registry;
+        unreachable!(
+          "resolve_for_connection already rejected Oracle when oracle feature is disabled"
+        );
+      }
+    } else if resolved.db_type == DatabaseType::Dameng {
+      #[cfg(feature = "odbc")]
+      {
+        let reachable = match local_port {
+          Some(port) => resolved.redirected_to("127.0.0.1", port),
+          None => resolved,
+        };
+        let target = crate::services::dameng::DamengTarget::from_profile(&reachable)?;
+        let connection =
+          crate::services::dameng::connect(&target).await.map_err(|error| error.message)?;
+        let pool = crate::services::dameng::DamengPool::new(target, connection);
+        if !is_draft {
+          dameng_registry.insert(connection_string.clone(), pool);
+        }
+      }
+      #[cfg(not(feature = "odbc"))]
+      {
+        let _ = &dameng_registry;
+        unreachable!(
+          "resolve_for_connection already rejected Dameng when odbc feature is disabled"
+        );
+      }
+    } else if resolved.db_type == DatabaseType::MongoDB {
       let reachable = match local_port {
         Some(port) => resolved.redirected_to("127.0.0.1", port),
         None => resolved,
       };
-      let target = crate::services::dameng::DamengTarget::from_profile(&reachable)?;
-      let connection =
-        crate::services::dameng::connect(&target).await.map_err(|error| error.message)?;
-      dameng_registry.insert(
-        connection_string.clone(),
-        crate::services::dameng::DamengPool::new(target, connection),
-      );
-    }
-    #[cfg(not(feature = "odbc"))]
-    {
-      let _ = &dameng_registry;
-      unreachable!("resolve_for_connection already rejected Dameng when odbc feature is disabled");
-    }
-  } else if resolved.db_type == DatabaseType::MongoDB {
-    let reachable = match local_port {
-      Some(port) => resolved.redirected_to("127.0.0.1", port),
-      None => resolved,
-    };
-    let client = crate::services::mongodb::connect(&MongoTarget::from_profile(&reachable)).await?;
-    mongo_registry.insert(connection_string.clone(), std::sync::Arc::new(client));
-  } else if resolved.db_type == DatabaseType::Redis {
-    let reachable = match local_port {
-      Some(port) => resolved.redirected_to("127.0.0.1", port),
-      None => resolved,
-    };
-    let target = crate::services::redis::RedisTarget::from_profile(&reachable)?;
-    let pool = crate::services::redis::connect(target).await?;
-    redis_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
-  } else if resolved.db_type == DatabaseType::Neo4j {
-    let reachable = match local_port {
-      Some(port) => resolved.redirected_to("127.0.0.1", port),
-      None => resolved,
-    };
-    let target = crate::services::neo4j::Neo4jTarget::from_profile(&reachable)?;
-    let pool = crate::services::neo4j::connect(target).await?;
-    neo4j_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
-  } else if resolved.db_type == DatabaseType::DuckDB {
-    // 已经开着就接着用：同一个文件在进程里只开一份，另开一份的话，两份各持一把锁、
-    // 各有一份缓存，谁的写入先落盘说不清
-    if duckdb_registry.get(&connection_string).is_none() {
-      let path = duckdb_file_path(&app_handle, resolved.database.as_deref().unwrap_or(":memory:"))?;
-      let pool = crate::services::duckdb::open(&path).await.map_err(|error| error.message)?;
-      duckdb_registry.insert(connection_string.clone(), pool);
-    }
-  } else if resolved.db_type == DatabaseType::Elasticsearch {
-    // 不换主机：经隧道的 HTTPS 仍按原来的主机名校验证书（见 `EsTarget::from_profile`）
-    let target = crate::services::elasticsearch::EsTarget::from_profile(&resolved, local_port);
-    let pool = crate::services::elasticsearch::connect(target).await?;
-    es_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
-  } else if resolved.db_type == DatabaseType::ClickHouse {
-    // 同 Elasticsearch：不换主机，经隧道的 HTTPS 仍按原来的主机名校验证书
-    let target = crate::services::clickhouse::ClickHouseTarget::from_profile(&resolved, local_port);
-    let pool = crate::services::clickhouse::connect(target).await?;
-    clickhouse_registry.insert(connection_string.clone(), pool);
-  } else if resolved.db_type == DatabaseType::SQLite {
-    // 驱动打开时不读文件头，DuckDB 的库、CSV 都能「连上」。绝对路径先核验魔数
-    if let Some(path) =
-      resolved.database.as_deref().filter(|path| std::path::Path::new(path).is_absolute())
-    {
-      if crate::services::connection_probe::is_non_sqlite_file(path) {
-        return Err(format!("{}: {path}", crate::services::connection_probe::NOT_SQLITE_FILE));
+      let client =
+        crate::services::mongodb::connect(&MongoTarget::from_profile(&reachable)).await?;
+      if !is_draft {
+        mongo_registry.insert(connection_string.clone(), std::sync::Arc::new(client));
+      }
+    } else if resolved.db_type == DatabaseType::Redis {
+      let reachable = match local_port {
+        Some(port) => resolved.redirected_to("127.0.0.1", port),
+        None => resolved,
+      };
+      let target = crate::services::redis::RedisTarget::from_profile(&reachable)?;
+      let pool = crate::services::redis::connect(target).await?;
+      if !is_draft {
+        redis_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
+      }
+    } else if resolved.db_type == DatabaseType::Neo4j {
+      let reachable = match local_port {
+        Some(port) => resolved.redirected_to("127.0.0.1", port),
+        None => resolved,
+      };
+      let target = crate::services::neo4j::Neo4jTarget::from_profile(&reachable)?;
+      let pool = crate::services::neo4j::connect(target).await?;
+      if !is_draft {
+        neo4j_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
+      }
+    } else if resolved.db_type == DatabaseType::DuckDB {
+      // 已经开着就接着用：同一个文件在进程里只开一份，另开一份的话，两份各持一把锁、
+      // 各有一份缓存，谁的写入先落盘说不清
+      if duckdb_registry.get(&connection_string).is_none() {
+        let path =
+          duckdb_file_path(&app_handle, resolved.database.as_deref().unwrap_or(":memory:"))?;
+        let pool = crate::services::duckdb::open(&path).await.map_err(|error| error.message)?;
+        if !is_draft {
+          duckdb_registry.insert(connection_string.clone(), pool);
+        }
+      }
+    } else if resolved.db_type == DatabaseType::Elasticsearch {
+      // 不换主机：经隧道的 HTTPS 仍按原来的主机名校验证书（见 `EsTarget::from_profile`）
+      let target = crate::services::elasticsearch::EsTarget::from_profile(&resolved, local_port);
+      let pool = crate::services::elasticsearch::connect(target).await?;
+      if !is_draft {
+        es_registry.insert(connection_string.clone(), std::sync::Arc::new(pool));
+      }
+    } else if resolved.db_type == DatabaseType::ClickHouse {
+      // 同 Elasticsearch：不换主机，经隧道的 HTTPS 仍按原来的主机名校验证书
+      let target =
+        crate::services::clickhouse::ClickHouseTarget::from_profile(&resolved, local_port);
+      let pool = crate::services::clickhouse::connect(target).await?;
+      if !is_draft {
+        clickhouse_registry.insert(connection_string.clone(), pool);
+      }
+    } else if resolved.db_type == DatabaseType::SQLite {
+      // 驱动打开时不读文件头，DuckDB 的库、CSV 都能「连上」。绝对路径先核验魔数
+      if let Some(path) =
+        resolved.database.as_deref().filter(|path| std::path::Path::new(path).is_absolute())
+      {
+        if crate::services::connection_probe::is_non_sqlite_file(path) {
+          return Err(format!("{}: {path}", crate::services::connection_probe::NOT_SQLITE_FILE));
+        }
+      }
+      let connect_url = match connection_string.strip_prefix("sqlite:") {
+        Some(rest) if rest != ":memory:" && !std::path::Path::new(rest).is_absolute() => {
+          use tauri::Manager;
+          let base = app_handle.path().app_config_dir().map_err(|error| error.to_string())?;
+          crate::services::sqlite_path::sqlite_connection_string(&base.join(rest).to_string_lossy())
+        }
+        _ => connection_string.clone(),
+      };
+      let pool = crate::services::sqlx_pool::open(&connect_url).await?;
+      if is_draft {
+        pool.close().await;
+      } else {
+        crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
+      }
+    } else if matches!(resolved.db_type, DatabaseType::MySQL | DatabaseType::PostgreSQL) {
+      // 真实含口令 URL 留在 Rust 后端内部建连，池子按无口令的 `connection_string` 登记（H7 / S2）
+      let connect_url = resolved.sqlx_connect_url_via(local_port);
+      let pool = crate::services::sqlx_pool::open(&connect_url).await?;
+      if is_draft {
+        pool.close().await;
+      } else {
+        crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
       }
     }
-    let connect_url = match connection_string.strip_prefix("sqlite:") {
-      Some(rest) if rest != ":memory:" && !std::path::Path::new(rest).is_absolute() => {
-        use tauri::Manager;
-        let base = app_handle.path().app_config_dir().map_err(|error| error.to_string())?;
-        crate::services::sqlite_path::sqlite_connection_string(&base.join(rest).to_string_lossy())
-      }
-      _ => connection_string.clone(),
-    };
-    let pool = crate::services::sqlx_pool::open(&connect_url).await?;
-    crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
-  } else if matches!(resolved.db_type, DatabaseType::MySQL | DatabaseType::PostgreSQL) {
-    // 真实含口令 URL 留在 Rust 后端内部建连，池子按无口令的 `connection_string` 登记（H7 / S2）
-    let connect_url = resolved.sqlx_connect_url_via(local_port);
-    let pool = crate::services::sqlx_pool::open(&connect_url).await?;
-    crate::services::sqlx_pool::register(&database_instances, connection_string.clone(), pool);
+    Ok(())
   }
+  .await;
+
+  if let Some(tunnel) = ephemeral_tunnel {
+    tunnel.disconnect().await;
+  }
+
+  outcome?;
   Ok(connection_string)
 }
 

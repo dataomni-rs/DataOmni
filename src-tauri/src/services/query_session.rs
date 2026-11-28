@@ -7,7 +7,13 @@ use crate::services::{
   SessionConnection, StreamOptions, QUERY_TIMEOUT_CODE,
 };
 use sqlx::Executor;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+  collections::HashMap,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
+};
 use tokio::{
   sync::Mutex,
   task::JoinHandle,
@@ -160,16 +166,22 @@ struct TerminateOnDrop {
   /// 语句的开头，见 [`Terminator::run`]
   statement: String,
   pending: PendingTermination,
+  /// 非 SQLite 网络连接被丢弃时会强制断连并回滚事务，析构时同步把外层无锁事务镜像置 false
+  clear_transaction_on_drop: Option<Arc<AtomicBool>>,
 }
 
 impl TerminateOnDrop {
   fn finish(mut self) {
     self.terminator = None;
+    self.clear_transaction_on_drop = None;
   }
 }
 
 impl Drop for TerminateOnDrop {
   fn drop(&mut self) {
+    if let Some(flag) = self.clear_transaction_on_drop.take() {
+      flag.store(false, Ordering::Release);
+    }
     let Some(terminator) = self.terminator.take() else {
       return;
     };
@@ -221,7 +233,15 @@ fn should_revalidate(idle: Duration, in_transaction: bool) -> bool {
 
 struct SessionEntry {
   pool_key: String,
+  /// 本会话当前是否持有未提交事务的无锁镜像，供 `transaction_open_on` 避免被慢查询队头阻塞（B3）
+  in_transaction: Arc<AtomicBool>,
   runtime: Mutex<SessionRuntime>,
+}
+
+impl SessionEntry {
+  fn sync_transaction_flag(&self, runtime: &SessionRuntime) {
+    self.in_transaction.store(runtime.current_transaction().in_transaction(), Ordering::Release);
+  }
 }
 
 impl SessionRuntime {
@@ -289,12 +309,18 @@ impl SessionRuntime {
   }
 
   /// 语句开始执行。守卫在语句回来之后交给 `statement_returned`
-  fn statement_started(&mut self, sql: &str) -> TerminateOnDrop {
-    self.in_flight = breaks_when_abandoned(&self.connection) || self.terminator.is_some();
+  fn statement_started(
+    &mut self,
+    sql: &str,
+    in_transaction_flag: &Arc<AtomicBool>,
+  ) -> TerminateOnDrop {
+    let breaks = breaks_when_abandoned(&self.connection);
+    self.in_flight = breaks || self.terminator.is_some();
     TerminateOnDrop {
       terminator: if self.in_flight { self.terminator.clone() } else { None },
       statement: statement_fingerprint(sql),
       pending: Arc::clone(&self.pending_termination),
+      clear_transaction_on_drop: breaks.then(|| Arc::clone(in_transaction_flag)),
     }
   }
 
@@ -400,11 +426,13 @@ impl QuerySessionState {
     timeout(timeout_duration, async {
       let mut runtime = entry.runtime.lock().await;
       runtime.recover_if_abandoned(pool.into()).await?;
-      let guard = runtime.statement_started(sql);
+      entry.sync_transaction_flag(&runtime);
+      let guard = runtime.statement_started(sql, &entry.in_transaction);
       let result = runtime.connection.execute(sql, row_limit).await;
       runtime.statement_returned(guard);
       runtime.connection_gone = result.as_ref().is_err_and(connection_is_gone);
       runtime.record(sql, result.is_ok());
+      entry.sync_transaction_flag(&runtime);
       result
     })
     .await
@@ -430,6 +458,7 @@ impl QuerySessionState {
       Some(entry) => {
         let mut runtime = entry.runtime.lock().await;
         runtime.settle_interrupted().await;
+        entry.sync_transaction_flag(&runtime);
         runtime.current_transaction()
       }
       None => TransactionState::default(),
@@ -441,8 +470,11 @@ impl QuerySessionState {
   /// 网格提交、结构变更与导入走池里另一条连接：事务开着时它们写在事务外面——
   /// 状态栏说在事务里，回滚却撤不掉它们；还会去等那个事务手里的锁（SQLite
   /// 五秒后报 `database is locked`，PostgreSQL 一直等）。
+  ///
+  /// 用 `try_lock` + 原子镜像 `in_transaction` 避免队头阻塞（B3）：
+  /// - 空闲会话直接拿到锁，顺手结算可能未落定的 SQLite 中断状态；
+  /// - 正执行长查询的会话立刻读取无锁原子镜像，绝不等待慢查询结束。
   pub async fn transaction_open_on(&self, pool_key: &str) -> bool {
-    // 先放掉表锁再逐个等：会话锁可能正被一条跑着的语句拿着
     let entries: Vec<_> = self
       .sessions
       .lock()
@@ -452,9 +484,15 @@ impl QuerySessionState {
       .cloned()
       .collect();
     for entry in entries {
-      let mut runtime = entry.runtime.lock().await;
-      runtime.settle_interrupted().await;
-      if runtime.current_transaction().in_transaction() {
+      if let Ok(mut runtime) = entry.runtime.try_lock() {
+        if runtime.in_flight {
+          runtime.settle_interrupted().await;
+          entry.sync_transaction_flag(&runtime);
+        }
+        if runtime.current_transaction().in_transaction() {
+          return true;
+        }
+      } else if entry.in_transaction.load(Ordering::Acquire) {
         return true;
       }
     }
@@ -488,16 +526,19 @@ impl QuerySessionState {
     timeout(options.timeout_duration, async {
       let mut runtime = entry.runtime.lock().await;
       runtime.recover_if_abandoned(options.pool).await?;
+      entry.sync_transaction_flag(&runtime);
       let idle = runtime.last_used.elapsed();
       if should_revalidate(idle, runtime.current_transaction().in_transaction())
         && !runtime.connection.responds_within(PING_LIMIT).await
       {
         // 连接本来就死了，上面的会话变量留着它也拿不回来
         runtime.replace_connection(options.pool).await?;
+        entry.sync_transaction_flag(&runtime);
       }
       runtime.last_used = std::time::Instant::now();
       runtime.begin_if_needed(options.autocommit, options.sql).await?;
-      let guard = runtime.statement_started(options.sql);
+      entry.sync_transaction_flag(&runtime);
+      let guard = runtime.statement_started(options.sql, &entry.in_transaction);
       let result = runtime
         .connection
         .execute_streaming_with_params(
@@ -511,6 +552,7 @@ impl QuerySessionState {
       runtime.statement_returned(guard);
       runtime.connection_gone = result.as_ref().is_err_and(connection_is_gone);
       runtime.record(options.sql, result.is_ok());
+      entry.sync_transaction_flag(&runtime);
       result
     })
     .await
@@ -534,6 +576,7 @@ impl QuerySessionState {
 
     let entry = Arc::new(SessionEntry {
       pool_key: pool_key.to_string(),
+      in_transaction: Arc::new(AtomicBool::new(false)),
       runtime: Mutex::new(SessionRuntime::open(pool).await?),
     });
     let mut sessions = self.sessions.lock().await;
@@ -767,5 +810,34 @@ mod tests {
       .expect_err("reject another pool");
 
     assert_eq!(error.message, SESSION_BOUND_ELSEWHERE);
+  }
+
+  /// 回归门（B3）：某会话正持锁执行长查询时，同库 `transaction_open_on` 必须无锁立即返回，
+  /// 不得被慢查询队头阻塞，且准确反映事务状态镜像。
+  #[tokio::test]
+  async fn transaction_open_on_does_not_block_while_another_session_holds_runtime_lock() {
+    let pool = memory_pool().await;
+    let sessions = QuerySessionState::default();
+    run(&sessions, &pool, "SELECT 1", true).await.expect("open idle session");
+
+    let entry = sessions.sessions.lock().await.get("s1").cloned().expect("session exists");
+    {
+      let _busy = entry.runtime.lock().await;
+      let open =
+        timeout(Duration::from_millis(50), sessions.transaction_open_on("sqlite::memory:"))
+          .await
+          .expect("transaction_open_on must not wait for busy session lock");
+      assert!(!open);
+    }
+
+    run(&sessions, &pool, "BEGIN", true).await.expect("begin tx");
+    {
+      let _busy = entry.runtime.lock().await;
+      let open =
+        timeout(Duration::from_millis(50), sessions.transaction_open_on("sqlite::memory:"))
+          .await
+          .expect("transaction_open_on must not wait for busy session lock in tx");
+      assert!(open);
+    }
   }
 }
