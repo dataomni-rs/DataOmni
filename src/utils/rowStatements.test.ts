@@ -554,3 +554,67 @@ describe('SQLite 没声明类型的列', () => {
     expect(buildUpdateStatement(typed, key, { anything: value('43') }).sql).toContain('"anything" = ?');
   });
 });
+
+describe('列类型声明语法校验（H18 / P2-5）', () => {
+  it('拦截恶意列类型声明防止 ::type 与 {pN:type} SQL 注入，并放行合法复合类型', () => {
+    const maliciousPg: TableTarget = {
+      schema: 'public',
+      table: 'users',
+      columns: [
+        { ...column('id', 'bigint'), is_primary_key: true },
+        column('payload', 'int; DROP TABLE users --')
+      ],
+      dialect: 'postgresql'
+    };
+    expect(() =>
+      buildUpdateStatement(maliciousPg, { columns: ['id'], values: { id: 1 } }, { payload: value('1') })
+    ).toThrow(/Unsafe column type declaration/);
+
+    const maliciousCh: TableTarget = {
+      schema: 'default',
+      table: 'events',
+      columns: [
+        { ...column('id', 'UInt64'), is_primary_key: true },
+        column('payload', 'String} OR 1=1 --')
+      ],
+      dialect: 'clickhouse'
+    };
+    expect(() =>
+      buildUpdateStatement(maliciousCh, { columns: ['id'], values: { id: 1 } }, { payload: value('x') })
+    ).toThrow(/Unsafe column type declaration/);
+
+    const validPg: TableTarget = {
+      schema: 'public',
+      table: 'events',
+      columns: [
+        { ...column('id', 'bigint'), is_primary_key: true },
+        column('ts', 'timestamp(6) with time zone'),
+        column('tags', 'text[]')
+      ],
+      dialect: 'postgresql'
+    };
+    const pgStmt = buildUpdateStatement(
+      validPg,
+      { columns: ['id'], values: { id: 1 } },
+      { ts: value('2026-11-28T00:00:00Z'), tags: value('{a,b}') }
+    );
+    expect(pgStmt.sql).toContain('$1::timestamp(6) with time zone');
+    expect(pgStmt.sql).toContain('$2::text[]');
+
+    const validCh: TableTarget = {
+      schema: 'default',
+      table: 'events',
+      columns: [
+        { ...column('id', 'UInt64'), is_primary_key: true },
+        column('ts', "Nullable(DateTime64(3, 'UTC'))")
+      ],
+      dialect: 'clickhouse'
+    };
+    const chStmt = buildUpdateStatement(
+      validCh,
+      { columns: ['id'], values: { id: 1 } },
+      { ts: value('2026-11-28 00:00:00') }
+    );
+    expect(chStmt.sql).toContain("{p1:Nullable(DateTime64(3, 'UTC'))}");
+  });
+});

@@ -197,6 +197,85 @@ impl DatabaseType {
   ///
   /// MongoDB 之前这和 [`Self::has_driver`] 是同一个集合，TODOs 4.1 说过「有驱动但某张
   /// 查询表没有」的类型一出现，就是第一个真实的能力维度——它就是 MongoDB。
+  /// 仅在 Rust 后端内部传给 `sqlx_pool::open` 的真实建连 URL（MySQL/PostgreSQL 含口令），绝不返回前端
+  pub(crate) fn to_sqlx_connect_url(&self, config: &ConnectionProfile) -> String {
+    match self {
+      DatabaseType::MySQL => self.format_mysql_url(config, true),
+      DatabaseType::PostgreSQL => self.format_postgres_url(config, true),
+      _ => self.to_connection_string(config),
+    }
+  }
+
+  fn format_mysql_url(&self, config: &ConnectionProfile, include_password: bool) -> String {
+    let authority = if include_password {
+      format!("{}:{}", encode(&config.username), encode(&config.password))
+    } else {
+      encode(&config.username).into_owned()
+    };
+    let base_url = format!(
+      "mysql://{}@{}:{}/{}",
+      authority,
+      url_host(&config.host),
+      config.port,
+      encode(config.database.as_deref().unwrap_or("mysql"))
+    );
+
+    let mut params = Vec::new();
+    params.push(format!(
+      "ssl-mode={}",
+      match config.effective_tls_mode() {
+        TlsMode::Disabled => "DISABLED",
+        TlsMode::Preferred => "PREFERRED",
+        TlsMode::Required => "REQUIRED",
+        TlsMode::VerifyCa => "VERIFY_CA",
+        TlsMode::VerifyFull => "VERIFY_IDENTITY",
+      }
+    ));
+    if config.effective_tls_mode() != TlsMode::Disabled {
+      push_parameter(&mut params, "ssl-ca", config.ca_certificate_path.as_deref());
+      push_parameter(&mut params, "ssl-cert", config.client_certificate_path.as_deref());
+      push_parameter(&mut params, "ssl-key", config.client_key_path.as_deref());
+    }
+    params.push("connectTimeout=30000".to_string());
+    params.push("acquireTimeout=30000".to_string());
+    format!("{base_url}?{}", params.join("&"))
+  }
+
+  fn format_postgres_url(&self, config: &ConnectionProfile, include_password: bool) -> String {
+    let authority = if include_password {
+      format!("{}:{}", encode(&config.username), encode(&config.password))
+    } else {
+      encode(&config.username).into_owned()
+    };
+    let base_url = format!(
+      "postgres://{}@{}:{}/{}",
+      authority,
+      url_host(&config.host),
+      config.port,
+      encode(config.database.as_deref().unwrap_or("postgres"))
+    );
+
+    let mut params = Vec::new();
+    params.push(format!(
+      "sslmode={}",
+      match config.effective_tls_mode() {
+        TlsMode::Disabled => "disable",
+        TlsMode::Preferred => "prefer",
+        TlsMode::Required => "require",
+        TlsMode::VerifyCa => "verify-ca",
+        TlsMode::VerifyFull => "verify-full",
+      }
+    ));
+    if config.effective_tls_mode() != TlsMode::Disabled {
+      push_parameter(&mut params, "sslrootcert", config.ca_certificate_path.as_deref());
+      push_parameter(&mut params, "sslcert", config.client_certificate_path.as_deref());
+      push_parameter(&mut params, "sslkey", config.client_key_path.as_deref());
+    }
+    // 不带 connect_timeout：sqlx 的 PostgreSQL 驱动不认它，每次连接只在日志里留一条
+    // 「ignoring unrecognized connect parameter」。等待上限在池子的 acquire_timeout 与前端的连接超时上
+    format!("{base_url}?{}", params.join("&"))
+  }
+
   /// 界面上对应的是 `databaseSupport.ts` 的 `speaksSql`
   pub fn speaks_sql(&self) -> bool {
     matches!(
@@ -230,80 +309,14 @@ impl DatabaseType {
     }
   }
 
-  /// MySQL 与 PostgreSQL 的串是给 sqlx 解析的 URL：库名要编码（`#` 之后会被当成片段，
-  /// 连到另一个库、TLS 参数一起丢掉），IPv6 地址要加方括号（不加 sqlx 报 `EmptyHost`）
+  /// 池子键与前端识别串：**所有 12 类数据库均不带明文口令**（H7 / S2），避免口令回传 WebView
+  /// 或落入前端状态；MySQL / PostgreSQL 实际给 sqlx 建连用的含口令 URL 由内部
+  /// [`Self::to_sqlx_connect_url`] 生成，绝不离开 Rust 后端。
+  /// 库名仍做 URL 编码（`#` 之后会被当成片段），IPv6 地址加方括号。
   pub fn to_connection_string(&self, config: &ConnectionProfile) -> String {
     match self {
-      DatabaseType::MySQL => {
-        let base_url = format!(
-          "mysql://{}:{}@{}:{}/{}",
-          encode(&config.username),
-          encode(&config.password),
-          url_host(&config.host),
-          config.port,
-          encode(config.database.as_deref().unwrap_or("mysql"))
-        );
-
-        let mut params = Vec::new();
-
-        params.push(format!(
-          "ssl-mode={}",
-          match config.effective_tls_mode() {
-            TlsMode::Disabled => "DISABLED",
-            TlsMode::Preferred => "PREFERRED",
-            TlsMode::Required => "REQUIRED",
-            TlsMode::VerifyCa => "VERIFY_CA",
-            TlsMode::VerifyFull => "VERIFY_IDENTITY",
-          }
-        ));
-        if config.effective_tls_mode() != TlsMode::Disabled {
-          push_parameter(&mut params, "ssl-ca", config.ca_certificate_path.as_deref());
-          push_parameter(&mut params, "ssl-cert", config.client_certificate_path.as_deref());
-          push_parameter(&mut params, "ssl-key", config.client_key_path.as_deref());
-        }
-
-        // Add connection timeout and other stability parameters
-        params.push("connectTimeout=30000".to_string());
-        params.push("acquireTimeout=30000".to_string());
-
-        if !params.is_empty() {
-          format!("{}?{}", base_url, params.join("&"))
-        } else {
-          base_url
-        }
-      }
-      DatabaseType::PostgreSQL => {
-        let base_url = format!(
-          "postgres://{}:{}@{}:{}/{}",
-          encode(&config.username),
-          encode(&config.password),
-          url_host(&config.host),
-          config.port,
-          encode(config.database.as_deref().unwrap_or("postgres"))
-        );
-
-        let mut params = Vec::new();
-
-        params.push(format!(
-          "sslmode={}",
-          match config.effective_tls_mode() {
-            TlsMode::Disabled => "disable",
-            TlsMode::Preferred => "prefer",
-            TlsMode::Required => "require",
-            TlsMode::VerifyCa => "verify-ca",
-            TlsMode::VerifyFull => "verify-full",
-          }
-        ));
-        if config.effective_tls_mode() != TlsMode::Disabled {
-          push_parameter(&mut params, "sslrootcert", config.ca_certificate_path.as_deref());
-          push_parameter(&mut params, "sslcert", config.client_certificate_path.as_deref());
-          push_parameter(&mut params, "sslkey", config.client_key_path.as_deref());
-        }
-
-        // 不带 connect_timeout：sqlx 的 PostgreSQL 驱动不认它，每次连接只在日志里留一条
-        // 「ignoring unrecognized connect parameter」。等待上限在池子的 acquire_timeout 与前端的连接超时上
-        format!("{}?{}", base_url, params.join("&"))
-      }
+      DatabaseType::MySQL => self.format_mysql_url(config, false),
+      DatabaseType::PostgreSQL => self.format_postgres_url(config, false),
       // 路径里的 `%`、`?` 与 Windows 的超长路径怎么写进连接串，见 `sqlite_path`
       DatabaseType::SQLite => crate::services::sqlite_path::sqlite_connection_string(
         config.database.as_deref().unwrap_or(":memory:"),
@@ -533,6 +546,17 @@ impl ConnectionProfile {
     }
   }
 
+  /// 仅在后端内部用于 `sqlx_pool::open` 的真实连接串（含口令，经隧道时同样指向本机端口）
+  pub fn sqlx_connect_url_via(&self, tunnel_port: Option<u16>) -> String {
+    match tunnel_port {
+      Some(port) => {
+        let local = self.redirected_to("127.0.0.1", port);
+        local.db_type.to_sqlx_connect_url(&local)
+      }
+      None => self.db_type.to_sqlx_connect_url(self),
+    }
+  }
+
   /// 换一份 host / port，其余照抄。
   ///
   /// 有隧道时连接串要指向本地那个转发端口，而不是 profile 里的主机。用换掉
@@ -667,12 +691,13 @@ pub(crate) fn url_host(host: &str) -> std::borrow::Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-  const ALL_DATABASE_TYPES: [super::DatabaseType; 11] = [
+  const ALL_DATABASE_TYPES: [super::DatabaseType; 12] = [
     super::DatabaseType::MySQL,
     super::DatabaseType::PostgreSQL,
     super::DatabaseType::SQLite,
     super::DatabaseType::SqlServer,
     super::DatabaseType::Oracle,
+    super::DatabaseType::Dameng,
     super::DatabaseType::MongoDB,
     super::DatabaseType::Redis,
     super::DatabaseType::Neo4j,
@@ -877,7 +902,12 @@ mod tests {
         database: Some("a#b?c d".to_string()),
         ..mysql_config(Some(TlsMode::Required), false)
       };
-      let mysql = DatabaseType::MySQL.to_connection_string(&config);
+      let mysql_key = DatabaseType::MySQL.to_connection_string(&config);
+      assert!(
+        !mysql_key.contains(&config.password),
+        "pool key must not embed password: {mysql_key}"
+      );
+      let mysql = config.sqlx_connect_url_via(None);
       let options = match sqlx::mysql::MySqlConnectOptions::from_str(&mysql) {
         Ok(options) => options,
         Err(error) => panic!("{mysql}: {error}"),
@@ -886,11 +916,13 @@ mod tests {
       assert!(described.contains("database: Some(\"a#b?c d\")"), "{mysql} → {described}");
       assert!(described.contains("ssl_mode: Required"), "{mysql} → {described}");
 
-      let postgres = DatabaseType::PostgreSQL.to_connection_string(&ConnectionProfile {
-        db_type: DatabaseType::PostgreSQL,
-        port: 5432,
-        ..config
-      });
+      let pg_config = ConnectionProfile { db_type: DatabaseType::PostgreSQL, port: 5432, ..config };
+      let postgres_key = DatabaseType::PostgreSQL.to_connection_string(&pg_config);
+      assert!(
+        !postgres_key.contains(&pg_config.password),
+        "pool key must not embed password: {postgres_key}"
+      );
+      let postgres = pg_config.sqlx_connect_url_via(None);
       let options = match sqlx::postgres::PgConnectOptions::from_str(&postgres) {
         Ok(options) => options,
         Err(error) => panic!("{postgres}: {error}"),
@@ -965,6 +997,41 @@ mod tests {
     assert!(connection_string.contains("sslrootcert=%2Fcerts%2Froot%20ca.pem"));
     assert!(connection_string.contains("sslcert=%2Fcerts%2Fclient.pem"));
     assert!(connection_string.contains("sslkey=%2Fcerts%2Fclient.key"));
+    assert!(!connection_string.contains("password"), "pool key must never embed password");
+  }
+
+  /// H7 (S2)：全部 12 类数据库的 `to_connection_string`（返回前端并作池子键）绝不能包含明文口令
+  #[test]
+  fn no_database_type_embeds_password_in_pool_key() {
+    let secret = "Super$ecret#Pass99";
+    let encoded = encode(secret);
+    for db_type in [
+      DatabaseType::MySQL,
+      DatabaseType::PostgreSQL,
+      DatabaseType::SQLite,
+      DatabaseType::SqlServer,
+      DatabaseType::Oracle,
+      DatabaseType::Dameng,
+      DatabaseType::MongoDB,
+      DatabaseType::Redis,
+      DatabaseType::Neo4j,
+      DatabaseType::DuckDB,
+      DatabaseType::ClickHouse,
+      DatabaseType::Elasticsearch,
+    ] {
+      let profile = ConnectionProfile {
+        db_type: db_type.clone(),
+        host: "db.internal".to_string(),
+        port: db_type.get_default_port(),
+        database: Some("appdb".to_string()),
+        username: "alice".to_string(),
+        password: secret.to_string(),
+        ..ConnectionProfile::default()
+      };
+      let key = db_type.to_connection_string(&profile);
+      assert!(!key.contains(secret), "{db_type:?} leaked raw password in {key}");
+      assert!(!key.contains(encoded.as_ref()), "{db_type:?} leaked encoded password in {key}");
+    }
   }
 
   #[test]

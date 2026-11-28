@@ -26,8 +26,52 @@ fn agent_grant_id(profile_id: &str) -> String {
   format!("{profile_id}#agent")
 }
 
-/// 凭证覆盖的那些字段：改了其中任何一项（比如把开发连接的主机换成生产库），旧凭证作废
+/// 安装级独立随机 HMAC 密钥在钥匙串里的账号名（H6 / S1）：
+/// 使无口令/SQLite/DuckDB/X.509 连接同样受系统钥匙串保护，且即便知道弱库口令也无法伪造授权。
+const AGENT_GRANT_KEY_ID: &str = "#agent-grant-key";
+
+/// 旧版 v1 授权在升级后不再放行（v1 未覆盖 `ssh_tunnel.remote_host`、`options` 与 TLS 字段），
+/// 提示用户在界面重新保存该连接以升级到 v2 授权。
+pub const AGENT_GRANT_UPGRADE_REQUIRED: &str = "DATAOMNI_AGENT_GRANT_UPGRADE_REQUIRED";
+
+/// v2 授权覆盖的全部安全敏感字段：改了其中任何一项（主机、跳板机远端目标、ODBC 驱动路径、
+/// TLS 模式与证书、任意驱动 options、环境档位、开放状态），旧凭证立即作废（H6 / S1）
 fn agent_fingerprint(profile: &ConnectionProfile) -> String {
+  let tunnel = profile.ssh_tunnel.as_ref();
+  let mut sorted_options: Vec<(&str, &str)> =
+    profile.options.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+  sorted_options.sort_unstable();
+  serde_json::json!([
+    "dataomni-agent-read-v2",
+    profile.id,
+    profile.db_type,
+    profile.host,
+    profile.port,
+    profile.database,
+    profile.username,
+    profile.environment,
+    profile.agent_access,
+    profile.ssl,
+    profile.tls_mode,
+    profile.ca_certificate_path,
+    profile.client_certificate_path,
+    profile.client_key_path,
+    sorted_options,
+    tunnel.map(|tunnel| (
+      &tunnel.host,
+      tunnel.port,
+      &tunnel.username,
+      tunnel.auth,
+      &tunnel.private_key_path,
+      &tunnel.remote_host,
+      tunnel.remote_port,
+    )),
+  ])
+  .to_string()
+}
+
+/// 仅用于识别升级前遗留的 v1 凭证以给出明确升级提示，绝不放行执行
+fn agent_fingerprint_v1(profile: &ConnectionProfile) -> String {
   let tunnel = profile.ssh_tunnel.as_ref();
   serde_json::json!([
     "dataomni-agent-read-v1",
@@ -52,22 +96,37 @@ fn agent_mac(secret: &str) -> Hmac<Sha256> {
   }
 }
 
-/// 用这个连接自己的口令签它的指纹。Agent 不知道口令，就造不出凭证
-fn agent_grant(profile: &ConnectionProfile, secret: &str) -> String {
-  let mut mac = agent_mac(secret);
+fn agent_signing_key(install_key: &str, stored_secret: Option<&str>) -> String {
+  format!("{install_key}\u{0}{}", stored_secret.unwrap_or(""))
+}
+
+/// 用安装密钥与该连接的口令共同签出 v2 指纹。Agent 拿不到钥匙串密钥，就造不出凭证
+fn agent_grant(profile: &ConnectionProfile, signing_key: &str) -> String {
+  let mut mac = agent_mac(signing_key);
   mac.update(agent_fingerprint(profile).as_bytes());
   mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn agent_grant_matches(profile: &ConnectionProfile, secret: &str, grant: &str) -> bool {
+fn verify_mac_hex(secret: &str, payload: &[u8], grant: &str) -> bool {
+  if !grant.len().is_multiple_of(2) {
+    return false;
+  }
   let bytes: Option<Vec<u8>> = (0..grant.len())
     .step_by(2)
     .map(|index| grant.get(index..index + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()))
     .collect();
   let Some(bytes) = bytes else { return false };
   let mut mac = agent_mac(secret);
-  mac.update(agent_fingerprint(profile).as_bytes());
+  mac.update(payload);
   mac.verify_slice(&bytes).is_ok()
+}
+
+fn agent_grant_matches(profile: &ConnectionProfile, signing_key: &str, grant: &str) -> bool {
+  verify_mac_hex(signing_key, agent_fingerprint(profile).as_bytes(), grant)
+}
+
+fn agent_grant_v1_matches(profile: &ConnectionProfile, legacy_secret: &str, grant: &str) -> bool {
+  verify_mac_hex(legacy_secret, agent_fingerprint_v1(profile).as_bytes(), grant)
 }
 const CREDENTIAL_REF_PREFIX: &str = "system-keyring://connection/";
 const SESSION_PASSWORD_REQUIRED: &str = "SESSION_PASSWORD_REQUIRED";
@@ -301,12 +360,37 @@ impl ConnectionService {
     Self::read_only_at(&config_dir.join(CONNECTIONS_FILE), Box::new(SystemCredentialStore))
   }
 
-  /// 同 `open_read_only`，凭据库是空的内存实现
+  /// 同 `open_read_only`，凭据库是内存实现（如测试目录含 `.test-keychain.json` 则加载之，绝不碰系统钥匙串）
   #[cfg(test)]
   pub(crate) fn open_read_only_without_keychain(
     config_dir: &std::path::Path,
   ) -> Result<Self, Box<dyn std::error::Error>> {
-    Self::read_only_at(&config_dir.join(CONNECTIONS_FILE), Box::<MemoryCredentialStore>::default())
+    let store = MemoryCredentialStore::from_test_dir(config_dir);
+    Self::read_only_at(&config_dir.join(CONNECTIONS_FILE), Box::new(store))
+  }
+
+  /// 测试辅助：按真实的 v2 HMAC 算法为测试夹具里的免密开放连接签发 `.test-keychain.json`
+  #[cfg(test)]
+  pub(crate) fn write_test_agent_grants(
+    config_dir: &std::path::Path,
+    connections: &[serde_json::Value],
+  ) {
+    let install_key = "test-install-grant-key-0123456789abcdef0123456789abcdef".to_string();
+    let mut entries = HashMap::new();
+    entries.insert(AGENT_GRANT_KEY_ID.to_string(), install_key.clone());
+    for entry in connections {
+      if let Ok(profile) = ConnectionProfile::deserialize(entry) {
+        if profile.open_to_agents()
+          && profile.password.is_empty()
+          && profile.credential_ref.is_none()
+        {
+          let signing_key = agent_signing_key(&install_key, None);
+          entries.insert(agent_grant_id(&profile.id), agent_grant(&profile, &signing_key));
+        }
+      }
+    }
+    let body = serde_json::to_string(&entries).unwrap_or_default();
+    let _ = fs::write(config_dir.join(".test-keychain.json"), body);
   }
 
   fn read_only_at(
@@ -473,7 +557,25 @@ impl ConnectionService {
     Ok(())
   }
 
-  /// 按这个连接现在的样子重写开放凭证；不开放、或者没有要保护的口令，就删掉。
+  /// 取或懒生成安装级 256-bit 随机 HMAC 密钥，存进系统钥匙串（`#agent-grant-key`）。
+  fn ensure_agent_install_key(&self) -> Result<String, String> {
+    match self.credential_store.get_password(AGENT_GRANT_KEY_ID) {
+      Ok(key) if !key.is_empty() => Ok(key),
+      Ok(_) => {
+        let key = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        self.credential_store.set_password(AGENT_GRANT_KEY_ID, &key)?;
+        Ok(key)
+      }
+      Err(error) if error == CREDENTIAL_MISSING => {
+        let key = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        self.credential_store.set_password(AGENT_GRANT_KEY_ID, &key)?;
+        Ok(key)
+      }
+      Err(error) => Err(error),
+    }
+  }
+
+  /// 按这个连接现在的样子重写 v2 开放凭证（含无口令/文件连接）；不开放或已删就清理掉。
   /// 在配置写盘之后做：凭证写不进去时，命令行看不见这个连接（往关的方向错）
   fn refresh_agent_grant(&self, id: &str) -> Result<(), String> {
     let grant_id = agent_grant_id(id);
@@ -481,9 +583,10 @@ impl ConnectionService {
       return self.credential_store.delete_password(&grant_id);
     };
     if connection.open_to_agents() {
-      if let Some(secret) = self.stored_secret(connection)? {
-        return self.credential_store.set_password(&grant_id, &agent_grant(connection, &secret));
-      }
+      let install_key = self.ensure_agent_install_key()?;
+      let secret = self.stored_secret(connection)?;
+      let signing_key = agent_signing_key(&install_key, secret.as_deref());
+      return self.credential_store.set_password(&grant_id, &agent_grant(connection, &signing_key));
     }
     self.credential_store.delete_password(&grant_id)
   }
@@ -509,8 +612,9 @@ impl ConnectionService {
     Ok(Some(format!("{password}\u{0}{tunnel}")))
   }
 
-  /// 命令行用：这个连接开放了、而且开放凭证对得上，才交出补好凭据的连接；否则 `None`，
-  /// 调用方当作没有这个连接。只改配置文件开不了门（`rfcs/agent-cli.md` §5.4）
+  /// 命令行用：这个连接开放了、而且 v2 开放凭证对得上，才交出补好凭据的连接；否则 `None`，
+  /// 调用方当作没有这个连接。无口令/SQLite/DuckDB/X.509 连接同样强制核验 `#agent` 凭证；
+  /// 升级遗留的 v1 凭证拒绝执行并返回明确升级错误码（`rfcs/agent-cli.md` §5.4，H6 / S1）
   pub fn resolve_for_agents(
     &self,
     connection: &ConnectionProfile,
@@ -518,17 +622,30 @@ impl ConnectionService {
     if !connection.open_to_agents() {
       return Ok(None);
     }
-    if let Some(secret) = self.stored_secret(connection)? {
-      let grant = match self.credential_store.get_password(&agent_grant_id(&connection.id)) {
-        Ok(grant) => grant,
-        Err(error) if error == CREDENTIAL_MISSING => return Ok(None),
-        Err(error) => return Err(error),
-      };
-      if !agent_grant_matches(connection, &secret, &grant) {
-        return Ok(None);
+    let stored = self.stored_secret(connection)?;
+    let grant = match self.credential_store.get_password(&agent_grant_id(&connection.id)) {
+      Ok(grant) => grant,
+      Err(error) if error == CREDENTIAL_MISSING => return Ok(None),
+      Err(error) => return Err(error),
+    };
+    let install_key = match self.credential_store.get_password(AGENT_GRANT_KEY_ID) {
+      Ok(key) if !key.is_empty() => Some(key),
+      Ok(_) => None,
+      Err(error) if error == CREDENTIAL_MISSING => None,
+      Err(error) => return Err(error),
+    };
+    if let Some(install_key) = install_key.as_deref() {
+      let signing_key = agent_signing_key(install_key, stored.as_deref());
+      if agent_grant_matches(connection, &signing_key, &grant) {
+        return self.resolve_for_connection(connection).map(Some);
       }
     }
-    self.resolve_for_connection(connection).map(Some)
+    if stored.as_deref().is_some_and(|secret| agent_grant_v1_matches(connection, secret, &grant)) {
+      return Err(format!(
+        "{AGENT_GRANT_UPGRADE_REQUIRED}: open and re-save this connection in DataOmni to upgrade agent authorization to v2"
+      ));
+    }
+    Ok(None)
   }
 
   /// 删除数据库连接配置
@@ -1020,7 +1137,7 @@ fn validate_tls_configuration(config: &ConnectionProfile) -> Result<(), String> 
   Ok(())
 }
 
-fn redact_connection_string(connection_string: &str) -> String {
+pub(crate) fn redact_connection_string(connection_string: &str) -> String {
   let redacted_credentials = redact_url_credentials(connection_string);
   let Some((base, query)) = redacted_credentials.split_once('?') else {
     return redacted_credentials;
@@ -1079,6 +1196,18 @@ fn is_sensitive_parameter(key: &str) -> bool {
 #[derive(Default)]
 struct MemoryCredentialStore {
   passwords: std::sync::Mutex<HashMap<String, String>>,
+}
+
+#[cfg(test)]
+impl MemoryCredentialStore {
+  fn from_test_dir(config_dir: &std::path::Path) -> Self {
+    let path = config_dir.join(".test-keychain.json");
+    let entries: HashMap<String, String> = fs::read_to_string(&path)
+      .ok()
+      .and_then(|body| serde_json::from_str(&body).ok())
+      .unwrap_or_default();
+    Self { passwords: std::sync::Mutex::new(entries) }
+  }
 }
 
 #[cfg(test)]
@@ -1458,8 +1587,13 @@ mod tests {
 
     let saved = service.get_connection("profile-1").unwrap();
     assert!(saved.password.is_empty());
+    // 返回前端的池键绝不带明文口令，真实含口令 URL 仅留在 Rust 后端内部（H7 / S2）
     assert_eq!(
       service.test_connection(saved).unwrap(),
+      "postgres://postgres@localhost:5432/postgres?sslmode=disable"
+    );
+    assert_eq!(
+      service.resolve_for_connection(saved).unwrap().sqlx_connect_url_via(None),
       "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable"
     );
 
@@ -1479,8 +1613,13 @@ mod tests {
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(!content.contains("legacy-secret"));
     assert!(!content.contains("\"password\""));
+    let saved = service.get_connection("profile-1").unwrap();
     assert_eq!(
-      service.test_connection(service.get_connection("profile-1").unwrap()).unwrap(),
+      service.test_connection(saved).unwrap(),
+      "postgres://postgres@localhost:5432/postgres?sslmode=disable"
+    );
+    assert_eq!(
+      service.resolve_for_connection(saved).unwrap().sqlx_connect_url_via(None),
       "postgres://postgres:legacy-secret@localhost:5432/postgres?sslmode=disable"
     );
 
@@ -1501,9 +1640,12 @@ mod tests {
     assert!(!content.contains("session-secret"));
     assert!(!content.contains("system-keyring://"));
     assert!(content.contains("\"save_password\": false"));
+    let saved = service.get_connection("profile-1").unwrap();
+    assert!(!service.test_connection(saved).unwrap().contains("session-secret"));
     assert!(service
-      .test_connection(service.get_connection("profile-1").unwrap())
+      .resolve_for_connection(saved)
       .unwrap()
+      .sqlx_connect_url_via(None)
       .contains("session-secret"));
 
     let restarted_service =
@@ -1979,15 +2121,101 @@ mod tests {
     assert_eq!(grant(&service), None);
   }
 
-  /// 没有口令的连接（SQLite 文件、免密的库）不需要凭证：Agent 不经过命令行也能直接用它们
+  /// H6 (S1)：无口令/文件/X.509 连接同样强制签发并校验 v2 开放凭证，防止改文件打开或篡改路径
   #[test]
-  fn connections_without_secrets_need_no_grant() {
+  fn connections_without_secrets_also_require_v2_grant() {
     let mut service = service_at(&temporary_config_path());
     if let Err(error) = service.create_connection(open_profile("p1", "")) {
       panic!("{error}");
     }
     assert!(agent_view(&service, "p1").is_some());
-    assert_eq!(service.credential_store.get_password(&agent_grant_id("p1")).ok(), None);
+    assert!(service.credential_store.get_password(&agent_grant_id("p1")).is_ok());
+    assert!(service.credential_store.get_password(AGENT_GRANT_KEY_ID).is_ok());
+
+    // 仅改文件把数据库换成别的路径或删掉凭证，立刻不可见
+    let Some(stored) = service.connections.get_mut("p1") else { panic!("连接应当在") };
+    stored.database = Some("/etc/other.db".to_string());
+    assert!(agent_view(&service, "p1").is_none());
+
+    // 仅改文件把未开放的无口令连接改为开放，没有凭证也不可见
+    let mut closed = profile("p2", "");
+    closed.agent_access = crate::models::AgentAccess::Off;
+    service.create_connection(closed).expect("create closed");
+    let Some(stored2) = service.connections.get_mut("p2") else { panic!("连接应当在") };
+    stored2.agent_access = crate::models::AgentAccess::Read;
+    assert!(agent_view(&service, "p2").is_none());
+  }
+
+  /// H6 (S1)：篡改 ssh_tunnel.remote_host/remote_port、options.odbcDriver 或 TLS 字段均使凭证失效；
+  /// 遗留 v1 凭证拒绝执行并提示重新保存升级，绝不静默放行
+  #[test]
+  fn v2_grant_covers_tunnel_target_options_tls_and_refuses_legacy_v1() {
+    use crate::models::{SshAuthMethod, SshTunnelConfig};
+
+    let mut config = open_profile("p1", "s3cret");
+    config.ssl = true;
+    config.tls_mode = Some(TlsMode::VerifyFull);
+    config.ca_certificate_path = Some("/etc/ssl/ca.pem".to_string());
+    config.options.insert("odbcDriver".to_string(), "/opt/dm8/libdodbc.so".to_string());
+    config.ssh_tunnel = Some(SshTunnelConfig {
+      host: "bastion.internal".to_string(),
+      port: 22,
+      username: "jump".to_string(),
+      private_key_path: "/home/dev/.ssh/id_ed25519".to_string(),
+      auth: SshAuthMethod::PrivateKey,
+      secret: String::new(),
+      secret_ref: None,
+      remote_host: Some("dev-db.internal".to_string()),
+      remote_port: Some(5432),
+    });
+
+    let mut service = service_at(&temporary_config_path());
+    service.create_connection(config).expect("create open profile");
+    assert!(agent_view(&service, "p1").is_some(), "未篡改时应通过 v2 校验");
+
+    // 1) 篡改 ssh_tunnel.remote_host 跳转至 PROD
+    {
+      let mut tampered = service.connections["p1"].clone();
+      tampered.ssh_tunnel.as_mut().expect("tunnel").remote_host =
+        Some("prod-db.internal".to_string());
+      assert!(service.resolve_for_agents(&tampered).expect("resolve").is_none());
+    }
+    // 2) 篡改 ssh_tunnel.remote_port
+    {
+      let mut tampered = service.connections["p1"].clone();
+      tampered.ssh_tunnel.as_mut().expect("tunnel").remote_port = Some(5433);
+      assert!(service.resolve_for_agents(&tampered).expect("resolve").is_none());
+    }
+    // 3) 篡改 options.odbcDriver（防 macOS disable-library-validation 动态库注入提权）
+    {
+      let mut tampered = service.connections["p1"].clone();
+      tampered.options.insert("odbcDriver".to_string(), "/tmp/evil.dylib".to_string());
+      assert!(service.resolve_for_agents(&tampered).expect("resolve").is_none());
+    }
+    // 4) 静默降级 TLS 模式或移除 CA 证书路径
+    {
+      let mut tampered = service.connections["p1"].clone();
+      tampered.tls_mode = Some(TlsMode::Disabled);
+      assert!(service.resolve_for_agents(&tampered).expect("resolve").is_none());
+    }
+    {
+      let mut tampered = service.connections["p1"].clone();
+      tampered.ca_certificate_path = None;
+      assert!(service.resolve_for_agents(&tampered).expect("resolve").is_none());
+    }
+    // 5) 即使攻击者知道数据库明文口令，不知道 #agent-grant-key 仍无法伪造有效 v2 凭证
+    {
+      let legacy_secret = "s3cret\u{0}";
+      let mut mac = agent_mac(legacy_secret);
+      mac.update(agent_fingerprint_v1(&service.connections["p1"]).as_bytes());
+      let v1_grant: String =
+        mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+      service.credential_store.set_password(&agent_grant_id("p1"), &v1_grant).expect("set v1");
+      let err = service
+        .resolve_for_agents(&service.connections["p1"])
+        .expect_err("legacy v1 grant must fail closed with upgrade error");
+      assert!(err.starts_with(AGENT_GRANT_UPGRADE_REQUIRED), "{err}");
+    }
   }
 
   /// 文件是别人给的：里面写着「开放给 Agent」也不认，导进来一律是关

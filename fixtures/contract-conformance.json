@@ -46,5 +46,16 @@
     "hint": "Use ON CONFLICT DO NOTHING to skip duplicates.",
     "constraint": "users_email_key",
     "table": "users"
+  },
+  "query_column_metadata": {
+    "name": "total_amount",
+    "ordinal": 2,
+    "database_type": "NUMERIC",
+    "logical_type": "decimal",
+    "nullable": false
+  },
+  "transaction_state": {
+    "status": "active",
+    "startedAt": "2026-11-28T08:00:00Z"
   }
 }

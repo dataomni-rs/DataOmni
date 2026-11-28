@@ -5,7 +5,9 @@ import {
   type ConnectionProfile,
   type SshTunnelConfig
 } from './connection';
+import type { DriverQueryColumn } from './query';
 import type { QueryExecutionError } from './queryExecution';
+import type { TransactionContext } from './session';
 import { toQueryExecutionError } from '../utils/queryError';
 
 /**
@@ -69,10 +71,31 @@ const QUERY_ERROR_KEYS = {
 type ExtraQueryErrorKey = Exclude<keyof typeof QUERY_ERROR_KEYS, keyof QueryExecutionError>;
 const NO_EXTRA_QUERY_ERROR_KEY: ExtraQueryErrorKey extends never ? true : never = true;
 
+const QUERY_COLUMN_METADATA_KEYS = {
+  name: true,
+  ordinal: true,
+  database_type: true,
+  logical_type: true,
+  nullable: true
+} satisfies Record<keyof Required<DriverQueryColumn>, true>;
+
+type ExtraQueryColumnMetadataKey = Exclude<keyof typeof QUERY_COLUMN_METADATA_KEYS, keyof DriverQueryColumn>;
+const NO_EXTRA_QUERY_COLUMN_METADATA_KEY: ExtraQueryColumnMetadataKey extends never ? true : never = true;
+
+const TRANSACTION_STATE_KEYS = {
+  status: true,
+  startedAt: true
+} satisfies Record<keyof Required<TransactionContext>, true>;
+
+type ExtraTransactionStateKey = Exclude<keyof typeof TRANSACTION_STATE_KEYS, keyof TransactionContext>;
+const NO_EXTRA_TRANSACTION_STATE_KEY: ExtraTransactionStateKey extends never ? true : never = true;
+
 describe('Rust ↔ TS 跨层契约夹具 (fixtures/contract-conformance.json)', () => {
   const fixture = JSON.parse(CONTRACT_RAW) as {
     connection_profile: Record<string, unknown>;
     query_error: Record<string, unknown>;
+    query_column_metadata: Record<string, unknown>;
+    transaction_state: Record<string, unknown>;
   };
 
   it('ConnectionProfile 与 SshTunnelConfig 的字段集合与共用夹具完全一致', () => {
@@ -128,5 +151,30 @@ describe('Rust ↔ TS 跨层契约夹具 (fixtures/contract-conformance.json)', 
 
     const parsed = toQueryExecutionError(fixture.query_error);
     expect(parsed).toEqual(fixture.query_error);
+  });
+
+  it('QueryColumnMetadata 与 TransactionContext 的字段集合与共用夹具一致（H18）', () => {
+    expect(NO_EXTRA_QUERY_COLUMN_METADATA_KEY).toBe(true);
+    expect(Object.keys(fixture.query_column_metadata).sort()).toEqual(
+      Object.keys(QUERY_COLUMN_METADATA_KEYS).sort()
+    );
+    const col: DriverQueryColumn = {
+      name: 'total_amount',
+      ordinal: 2,
+      database_type: 'NUMERIC',
+      logical_type: 'decimal',
+      nullable: false
+    };
+    expect(col).toEqual(fixture.query_column_metadata);
+
+    expect(NO_EXTRA_TRANSACTION_STATE_KEY).toBe(true);
+    expect(Object.keys(fixture.transaction_state).sort()).toEqual(
+      Object.keys(TRANSACTION_STATE_KEYS).sort()
+    );
+    const tx: TransactionContext = {
+      status: 'active',
+      startedAt: '2026-11-28T08:00:00Z'
+    };
+    expect(tx).toEqual(fixture.transaction_state);
   });
 });

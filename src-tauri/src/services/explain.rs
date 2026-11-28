@@ -124,6 +124,7 @@ pub enum PlanDialect {
   Sqlite,
   SqlServer,
   Oracle,
+  Dameng,
   DuckDb,
   ClickHouse,
   /// 没有 EXPLAIN 的类型；带着类型名，报错时说得出是谁
@@ -141,6 +142,7 @@ impl From<&DatabaseType> for PlanDialect {
       DatabaseType::SQLite => Self::Sqlite,
       DatabaseType::SqlServer => Self::SqlServer,
       DatabaseType::Oracle => Self::Oracle,
+      DatabaseType::Dameng => Self::Dameng,
       DatabaseType::DuckDB => Self::DuckDb,
       DatabaseType::ClickHouse => Self::ClickHouse,
       other => Self::Unsupported(format!("{other:?}")),
@@ -179,6 +181,7 @@ impl PlanDialect {
       Self::Sqlite => "SQLite",
       Self::SqlServer => "SqlServer",
       Self::Oracle => "Oracle",
+      Self::Dameng => "Dameng",
       Self::DuckDb => "DuckDB",
       Self::ClickHouse => "ClickHouse",
       Self::Unsupported(name) => name,
@@ -224,6 +227,8 @@ pub fn explain_statement(
     // 同样原样：`EXPLAIN PLAN` 要写进 PLAN_TABLE 再读出来、再撤掉，是执行那一侧的
     // 几步（见 `oracle::explain_plan`）
     PlanDialect::Oracle => Ok(sql.to_string()),
+    // 达梦 DM8 直接支持 `EXPLAIN <sql>` 返回缩进编号文本执行计划树
+    PlanDialect::Dameng => Ok(format!("EXPLAIN {sql}")),
     PlanDialect::DuckDb => Ok(format!("EXPLAIN (FORMAT JSON) {sql}")),
     // `indexes = 1` 给出每个读表步骤上主键、分区、跳数索引各筛掉了多少 granule——
     // 「用上索引没有」看的就是这个。它不估行数（那是另一条 `EXPLAIN ESTIMATE`）
@@ -293,12 +298,78 @@ pub fn parse_plan(
     PlanDialect::Sqlite => Ok(parse_sqlite(rows)),
     PlanDialect::SqlServer => parse_sql_server(rows, analyze),
     PlanDialect::Oracle => parse_oracle(rows),
+    PlanDialect::Dameng => parse_dameng(rows),
     PlanDialect::DuckDb => parse_duckdb(rows),
     PlanDialect::ClickHouse => parse_clickhouse(rows),
     PlanDialect::Unsupported(name) => {
       Err(QueryError::message(format!("{EXPLAIN_UNSUPPORTED}: {name}")))
     }
   }
+}
+
+/// 达梦 DM8 `EXPLAIN <sql>` 返回形如 `1   #NSET2: [1, 1, 0]`、`2     #PRJT2: [1, 1, 0]; exp_num(1)` 的缩进文本树。
+fn parse_dameng(rows: &[Map<String, JsonValue>]) -> Result<QueryPlan, QueryError> {
+  let lines: Vec<String> = rows
+    .iter()
+    .filter_map(first_cell)
+    .flat_map(|cell| cell.lines().map(str::to_string).collect::<Vec<_>>())
+    .filter(|line| !line.trim().is_empty())
+    .collect();
+  if lines.is_empty() {
+    return Err(QueryError::message(EXPLAIN_EMPTY));
+  }
+  let raw = lines.join("\n");
+  let mut stack: Vec<(usize, PlanNode)> = Vec::new();
+  let mut roots: Vec<PlanNode> = Vec::new();
+
+  for line in &lines {
+    // 跳过开头的行号（如 `1   #NSET2: ...`），以 `#` 之前的空格数作为树缩进层级
+    let trimmed_start = line.trim_start();
+    let after_num = trimmed_start.trim_start_matches(|c: char| c.is_ascii_digit());
+    let indent = after_num.len() - after_num.trim_start().len();
+    let body = after_num.trim_start();
+    let (op_part, rest) = match body.split_once(':') {
+      Some((left, right)) => (left.trim().trim_start_matches('#'), right.trim()),
+      None => (body.trim_start_matches('#'), ""),
+    };
+    let mut node = PlanNode::new(if op_part.is_empty() { body } else { op_part });
+    if let Some(bracket_end) = rest.strip_prefix('[').and_then(|s| s.find(']')) {
+      let metrics = &rest[1..=bracket_end];
+      let nums: Vec<f64> =
+        metrics.split(',').filter_map(|p| p.trim().parse::<f64>().ok()).collect();
+      if let Some(&cost) = nums.first() {
+        node.cost = Some(cost);
+      }
+      if let Some(&est_rows) = nums.get(1) {
+        node.estimated_rows = Some(est_rows);
+      }
+      let extra = rest[bracket_end + 2..].trim().trim_start_matches(';').trim();
+      if !extra.is_empty() {
+        node.detail.push(PlanDetail { key: "detail".to_string(), value: extra.to_string() });
+      }
+    } else if !rest.is_empty() {
+      node.detail.push(PlanDetail { key: "detail".to_string(), value: rest.to_string() });
+    }
+
+    while stack.last().is_some_and(|(top_indent, _)| *top_indent >= indent) {
+      if let Some((_, finished)) = stack.pop() {
+        if let Some((_, parent)) = stack.last_mut() {
+          parent.children.push(finished);
+        } else {
+          roots.push(finished);
+        }
+      }
+    }
+    stack.push((indent, node));
+  }
+  while let Some((_, finished)) = stack.pop() {
+    if let Some((_, parent)) = stack.last_mut() {
+      parent.children.push(finished);
+    } else {
+      roots.push(finished);
+    }
+  }
+  Ok(QueryPlan { roots, analyzed: false, planning_ms: None, execution_ms: None, raw })
 }
 
 fn parse_json_payload(rows: &[Map<String, JsonValue>]) -> Result<(JsonValue, String), QueryError> {

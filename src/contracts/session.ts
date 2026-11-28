@@ -17,6 +17,8 @@ export interface TransactionContext {
 export interface DatabaseSession {
   id: string;
   profileId: string;
+  profileName?: string;
+  dbType?: DatabaseType;
   database: string | null;
   connectedAt: string;
   capabilities: SessionCapabilities;
@@ -43,6 +45,8 @@ export function createDatabaseSession(
   return {
     id,
     profileId: profile.id,
+    profileName: profile.name,
+    dbType: profile.db_type,
     database: profile.database ?? null,
     connectedAt: new Date().toISOString(),
     capabilities: {

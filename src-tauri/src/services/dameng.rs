@@ -146,6 +146,49 @@ fn is_plsql(sql: &str) -> bool {
   }
 }
 
+/// 生成达梦 `dm_svc.conf` 内容，按当前本地时区偏移写入并钉死 `CHAR_CODE=(PG_UTF8)`。
+#[cfg(any(feature = "odbc", test))]
+fn dm_svc_conf_contents(utc_offset_minutes: i32) -> String {
+  format!("TIME_ZONE=({utc_offset_minutes})\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n")
+}
+
+/// 在用户私有配置目录下原子写入 `dm8/dm_svc.conf`，避免使用公共 `/tmp` 目录产生抢占或符号链接风险。
+#[cfg(any(feature = "odbc", test))]
+fn write_dm_svc_conf_in(base_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+  let dir = base_dir.join("dm8");
+  std::fs::create_dir_all(&dir)?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+  }
+  let offset_minutes = chrono::Local::now().offset().local_minus_utc() / 60;
+  let contents = dm_svc_conf_contents(offset_minutes);
+  let conf = dir.join("dm_svc.conf");
+  let part = dir.join("dm_svc.conf.part");
+  std::fs::write(&part, contents)?;
+  std::fs::rename(&part, &conf)?;
+  Ok(dir)
+}
+
+/// 在进程仍处于单线程的启动阶段（`main()` 开头）初始化达梦官方驱动的 `DM_SVC_PATH`。
+///
+/// 若外部环境已显式设置 `DM_SVC_PATH`，完全尊重不覆盖；否则写入用户私有配置目录
+/// `<app_config_dir>/dm8/dm_svc.conf` 并设置环境变量。严禁在多线程工作线程中调用 `set_var`。
+pub fn init_dm_svc_env() {
+  #[cfg(feature = "odbc")]
+  {
+    if std::env::var_os("DM_SVC_PATH").is_some() {
+      return;
+    }
+    if let Some(config_dir) = crate::services::connection_service::app_config_dir() {
+      if let Ok(dir) = write_dm_svc_conf_in(&config_dir) {
+        std::env::set_var("DM_SVC_PATH", &dir);
+      }
+    }
+  }
+}
+
 /// 判断是否属于达梦原生「只读事务内禁止写」等连接或驱动错误
 #[cfg(feature = "odbc")]
 fn format_odbc_error(error: &odbc_api::Error) -> QueryError {
@@ -260,21 +303,24 @@ mod enabled {
   use super::*;
   use crate::services::query_error::{CONNECTION_LOST, CONNECTION_LOST_CODE};
   use crate::services::query_executor::{
-    admit_row_bytes, binary_json, flush_remaining_batch, number_duplicate_columns,
-    refuse_non_query, refuse_use_statement, tagged_value, NonQueryHandling, QueryColumnMetadata,
-    QueryExecutionSummary, QueryResultBatch, QueryRow, QueryTruncationReason, StreamOptions,
+    admit_row_bytes, binary_json, flush_full_batch, flush_remaining_batch,
+    number_duplicate_columns, refuse_non_query, refuse_use_statement, tagged_value,
+    NonQueryHandling, QueryColumnMetadata, QueryExecutionSummary, QueryResultBatch, QueryRow,
+    QueryTruncationReason, StreamOptions,
   };
   use crate::services::transaction_state::{TransactionState, TransactionStatus};
   use crate::services::write_batch::{
     WriteBatchError, WriteStatement, ROW_COUNT_MISMATCH, ROW_COUNT_MISMATCH_CODE,
     UNSUPPORTED_PARAMETER_TYPE,
   };
+  use odbc_api::handles::{AsStatementRef, Statement};
   use odbc_api::parameter::InputParameter;
   use odbc_api::{
     ColumnDescription, Connection, ConnectionOptions, Cursor, DataType, Environment, IntoParameter,
     ResultSetMetadata,
   };
   use serde_json::Map;
+  use std::sync::atomic::{AtomicBool, Ordering};
   use std::sync::{Arc, Mutex, OnceLock};
   use std::time::Duration;
 
@@ -285,27 +331,8 @@ mod enabled {
   type SharedOdbcConn = Arc<Mutex<Connection<'static>>>;
 
   static ODBC_ENV: OnceLock<Result<&'static Environment, String>> = OnceLock::new();
-  static DM_SVC_INIT: OnceLock<()> = OnceLock::new();
-
-  /// 确保达梦官方驱动在未配置 `/etc/dm_svc.conf` 时仍以 `PG_UTF8` 编解码中文（见 cu 真库实测）。
-  /// 若外部环境已经显式配置了 `DM_SVC_PATH`，完全尊重不覆盖。
-  fn ensure_dm_svc_utf8() {
-    DM_SVC_INIT.get_or_init(|| {
-      if std::env::var_os("DM_SVC_PATH").is_some() {
-        return;
-      }
-      let dir = std::env::temp_dir().join("dataomni-dm8");
-      if std::fs::create_dir_all(&dir).is_ok() {
-        let conf = dir.join("dm_svc.conf");
-        if std::fs::write(&conf, "TIME_ZONE=(480)\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n").is_ok() {
-          std::env::set_var("DM_SVC_PATH", &dir);
-        }
-      }
-    });
-  }
 
   fn environment() -> Result<&'static Environment, QueryError> {
-    ensure_dm_svc_utf8();
     match ODBC_ENV.get_or_init(|| {
       Environment::new()
         .map(|env| Box::leak(Box::new(env)) as &'static Environment)
@@ -366,6 +393,12 @@ mod enabled {
     idle: crate::services::pool_registry::IdleConnections<SharedOdbcConn>,
   }
 
+  impl Drop for DamengPool {
+    fn drop(&mut self) {
+      release_in_background(self.idle.drain());
+    }
+  }
+
   impl DamengPool {
     pub fn new(target: DamengTarget, first: SharedOdbcConn) -> Arc<Self> {
       Arc::new(Self {
@@ -375,8 +408,14 @@ mod enabled {
     }
 
     pub async fn acquire_for_session(&self) -> Result<DamengConnection, QueryError> {
+      let (idle, stale) = self.idle.take();
+      release_in_background(stale);
+      let connection = match idle {
+        Some(conn) => conn,
+        None => connect(&self.target).await?,
+      };
       Ok(DamengConnection {
-        connection: Some(connect(&self.target).await?),
+        connection: Some(connection),
         target: self.target.clone(),
         autocommit: true,
         transaction: TransactionState::default(),
@@ -412,7 +451,11 @@ mod enabled {
       let worker = Arc::clone(&connection);
       let result = blocking(move || select_rows(&worker, &sql, &params)).await;
       if keeps_connection(&result) {
-        self.idle.put(connection);
+        if let Some(excess) = self.idle.put(connection) {
+          release_in_background(vec![excess]);
+        }
+      } else {
+        release_in_background(vec![connection]);
       }
       result
     }
@@ -443,9 +486,13 @@ mod enabled {
         Err((_, error)) => error.code.as_deref() != Some(CONNECTION_LOST_CODE),
       };
       if reusable {
-        self.idle.put(connection);
+        if let Some(excess) = self.idle.put(connection) {
+          release_in_background(vec![excess]);
+        }
       } else {
-        release_in_background(self.idle.drain());
+        let mut dead = self.idle.drain();
+        dead.push(connection);
+        release_in_background(dead);
       }
       outcome.map_err(|(index, error)| WriteBatchError::at(index, error))
     }
@@ -741,6 +788,103 @@ mod enabled {
     transaction: TransactionState,
   }
 
+  impl Drop for DamengConnection {
+    fn drop(&mut self) {
+      if let Some(connection) = self.connection.take() {
+        release_in_background(vec![connection]);
+      }
+    }
+  }
+
+  /// 包装原始 `HStmt` 以便在受互斥锁保护的取消槽中跨线程传递。
+  struct SendHStmt(odbc_api::sys::HStmt);
+
+  // SAFETY: 仅在 `ActiveStmtCancel::handle` 互斥锁保护下供跨线程 `SQLCancel` 使用；
+  // `StmtCancelGuard::drop` 在 `Prepared` 释放前必先持锁将其清零，符合 ODBC 多线程取消约定。
+  unsafe impl Send for SendHStmt {}
+
+  /// 正在执行的 ODBC 语句句柄槽，仅在 `Prepared` 存活期间登记原始 `HStmt`。
+  ///
+  /// 取消时通过独立 OS 线程持锁调用 `SQLCancel`，而工作线程必须在析构 `Prepared` 前
+  /// 先拿同一把锁清零句柄，确保绝无 UAF 且不阻塞 Tokio worker。
+  struct ActiveStmtCancel {
+    cancelled: AtomicBool,
+    handle: Mutex<Option<SendHStmt>>,
+  }
+
+  impl ActiveStmtCancel {
+    fn new() -> Arc<Self> {
+      Arc::new(Self { cancelled: AtomicBool::new(false), handle: Mutex::new(None) })
+    }
+
+    fn is_cancelled(&self) -> bool {
+      self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn cancel_in_background(self: &Arc<Self>) {
+      self.cancelled.store(true, Ordering::Release);
+      let slot = Arc::clone(self);
+      std::thread::spawn(move || {
+        let Ok(guard) = slot.handle.lock() else {
+          return;
+        };
+        if let Some(SendHStmt(hstmt)) = *guard {
+          // SAFETY: `hstmt` 来自工作线程上仍存活的 `Prepared::as_stmt_ref().as_sys()`；
+          // 持有 `slot.handle` 期间工作线程的 `StmtCancelGuard::drop` 无法放行并释放 `stmt`，
+          // 且 ODBC 规范允许跨线程对正在执行的 `HStmt` 调用 `SQLCancel`。
+          unsafe {
+            let _ = odbc_api::sys::SQLCancel(hstmt);
+          }
+        }
+      });
+    }
+  }
+
+  struct StmtCancelGuard {
+    slot: Arc<ActiveStmtCancel>,
+  }
+
+  impl StmtCancelGuard {
+    fn arm(slot: Arc<ActiveStmtCancel>, hstmt: odbc_api::sys::HStmt) -> Option<Self> {
+      {
+        let Ok(mut guard) = slot.handle.lock() else {
+          return None;
+        };
+        if slot.is_cancelled() {
+          return None;
+        }
+        *guard = Some(SendHStmt(hstmt));
+      }
+      Some(Self { slot })
+    }
+  }
+
+  impl Drop for StmtCancelGuard {
+    fn drop(&mut self) {
+      if let Ok(mut guard) = self.slot.handle.lock() {
+        *guard = None;
+      }
+    }
+  }
+
+  struct CancelOnDrop {
+    slot: Arc<ActiveStmtCancel>,
+    finished: bool,
+  }
+
+  impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+      if !self.finished {
+        self.slot.cancel_in_background();
+      }
+    }
+  }
+
+  enum DamengFetched {
+    Columns(Vec<QueryColumnMetadata>, Vec<String>),
+    Row(QueryRow),
+  }
+
   impl DamengConnection {
     async fn take_connection(&mut self) -> Result<SharedOdbcConn, QueryError> {
       match self.connection.take() {
@@ -815,82 +959,123 @@ mod enabled {
       let is_commit = first_kw == "COMMIT";
       let is_rollback = first_kw == "ROLLBACK";
       let is_begin = first_kw == "BEGIN" || (first_kw == "SET" && controls_transaction(&statement));
-
-      let row_limit = options.row_limit;
-      let byte_limit = options.byte_limit;
       let non_query = options.non_query;
 
-      let outcome = blocking(move || {
+      let cancel_slot = ActiveStmtCancel::new();
+      let mut cancel_guard = CancelOnDrop { slot: Arc::clone(&cancel_slot), finished: false };
+
+      let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<DamengFetched>(options.batch_size.max(1) * 2);
+
+      let task = tokio::task::spawn_blocking(move || -> Result<(Option<u64>, bool), QueryError> {
         let guard = lock_conn(&worker)?;
         // 显式控制 ODBC 连接的 autocommit 状态
         let desired_auto = autocommit && !was_in_tx && !is_begin;
         if is_commit {
           guard.commit().map_err(|err| format_odbc_error(&err))?;
           let _ = guard.set_autocommit(autocommit);
-          return Ok((StreamResult::Affected(0), false));
+          return Ok((Some(0), false));
         }
         if is_rollback {
           guard.rollback().map_err(|err| format_odbc_error(&err))?;
           let _ = guard.set_autocommit(autocommit);
-          return Ok((StreamResult::Affected(0), false));
+          return Ok((Some(0), false));
         }
         guard.set_autocommit(desired_auto).map_err(|err| format_odbc_error(&err))?;
         let odbc_params = build_odbc_params(&params)?;
         let mut stmt = guard.prepare(&statement).map_err(|err| format_odbc_error(&err))?;
+        // 声明顺序保证 `_stmt_cancel` 早于 `stmt` 析构，退出前清零 `HStmt`
+        let Some(_stmt_cancel) =
+          StmtCancelGuard::arm(Arc::clone(&cancel_slot), stmt.as_stmt_ref().as_sys())
+        else {
+          return Err(QueryError::message("Query cancelled"));
+        };
         let num_cols = stmt.num_result_cols().map_err(|err| format_odbc_error(&err))?;
         if num_cols == 0 && non_query == NonQueryHandling::Refuse {
           refuse_non_query(non_query)?;
         }
-        let maybe_rows = {
+        let now_in_tx = !desired_auto;
+        let has_cursor = {
           let cursor_opt = stmt.execute(&odbc_params[..]).map_err(|err| format_odbc_error(&err))?;
           if let Some(mut cursor) = cursor_opt {
             let columns = describe_cursor_columns(&mut cursor)?;
             let (column_metadata, names) = column_header(&columns);
-            let mut rows = Vec::new();
-            let mut bytes_read = 0usize;
-            let mut truncation_reason = None;
-
+            if sender.blocking_send(DamengFetched::Columns(column_metadata, names.clone())).is_err()
+            {
+              return Ok((None, now_in_tx));
+            }
             while let Some(mut row) = cursor.next_row().map_err(|err| format_odbc_error(&err))? {
-              if rows.len() >= row_limit {
-                truncation_reason = Some(QueryTruncationReason::RowLimit);
-                break;
-              }
               let mut map = Map::new();
               for (idx, ((_, data_type, _), name)) in columns.iter().zip(&names).enumerate() {
                 let cell = decode_cell(&mut row, u16::try_from(idx + 1).unwrap_or(1), data_type)?;
                 map.insert(name.clone(), cell);
               }
-              if !admit_row_bytes(&map, byte_limit, &mut bytes_read)? && !rows.is_empty() {
-                truncation_reason = Some(QueryTruncationReason::ByteLimit);
+              if sender.blocking_send(DamengFetched::Row(map)).is_err() {
                 break;
               }
-              rows.push(map);
             }
-            Some(StreamResult::Rows {
-              columns: names,
-              column_metadata,
-              rows,
-              bytes_read,
-              truncation_reason,
-            })
+            true
           } else {
-            None
+            false
           }
         };
 
-        let now_in_tx = !desired_auto;
-        if let Some(rows_result) = maybe_rows {
-          Ok((rows_result, now_in_tx))
+        if has_cursor {
+          Ok((None, now_in_tx))
         } else {
           let affected =
             stmt.row_count().map_err(|err| format_odbc_error(&err))?.unwrap_or(0) as u64;
-          Ok((StreamResult::Affected(affected), now_in_tx))
+          Ok((Some(affected), now_in_tx))
         }
-      })
-      .await;
+      });
+
+      let mut header: Option<(Vec<QueryColumnMetadata>, Vec<String>)> = None;
+      let mut rows = Vec::with_capacity(options.batch_size);
+      let mut row_count = 0usize;
+      let mut batch_count = 0usize;
+      let mut bytes_read = 0usize;
+      let mut truncation_reason = None;
+      let mut sink_error = None;
+
+      while let Some(fetched) = receiver.recv().await {
+        match fetched {
+          DamengFetched::Columns(metadata, names) => header = Some((metadata, names)),
+          DamengFetched::Row(values) => {
+            if row_count >= options.row_limit {
+              truncation_reason = Some(QueryTruncationReason::RowLimit);
+              break;
+            }
+            match admit_row_bytes(&values, options.byte_limit, &mut bytes_read) {
+              Ok(true) => {}
+              Ok(false) => {
+                truncation_reason = Some(QueryTruncationReason::ByteLimit);
+                break;
+              }
+              Err(error) => {
+                sink_error = Some(error);
+                break;
+              }
+            }
+            rows.push(values);
+            row_count += 1;
+            if let Err(error) =
+              flush_full_batch(&mut rows, options.batch_size, &mut batch_count, row_count, sink)
+            {
+              sink_error = Some(error);
+              break;
+            }
+          }
+        }
+      }
+      // 到了上限或下游报错就立即释放接收端，工作线程下一次 blocking_send 立刻退出并关游标
+      drop(receiver);
+      let outcome = task.await.map_err(|error| {
+        QueryError::with_code(CONNECTION_LOST_CODE, format!("{CONNECTION_LOST}: {error}"))
+      })?;
+      cancel_guard.finished = true;
 
       match outcome {
-        Ok((result, now_in_tx)) => {
+        Ok((affected, now_in_tx)) => {
           self.connection = Some(connection);
           if now_in_tx {
             let started_at =
@@ -899,48 +1084,29 @@ mod enabled {
           } else {
             self.transaction = TransactionState::default();
           }
-          match result {
-            StreamResult::Affected(rows_affected) => {
-              Ok(QueryExecutionSummary::Affected { rows_affected })
-            }
-            StreamResult::Rows {
-              columns,
-              column_metadata,
-              rows,
-              bytes_read,
-              truncation_reason,
-            } => {
-              let row_count = rows.len();
-              let mut batch_count = 0usize;
-              let mut emitted = 0usize;
-              let mut pending = Vec::new();
-              for row in rows {
-                pending.push(row);
-                if pending.len() >= options.batch_size {
-                  let batch_rows = std::mem::take(&mut pending);
-                  let offset = emitted;
-                  emitted += batch_rows.len();
-                  let index = batch_count;
-                  batch_count += 1;
-                  sink(QueryResultBatch { index, offset, rows: batch_rows })?;
-                }
-              }
-              flush_remaining_batch(&mut pending, &mut batch_count, row_count, sink)?;
-              Ok(QueryExecutionSummary::Rows {
-                columns,
-                column_metadata,
-                row_count,
-                batch_count,
-                truncated: truncation_reason.is_some(),
-                truncation_reason,
-                row_limit: options.row_limit,
-                byte_limit: options.byte_limit,
-                bytes_read,
-                omitted_result_sets: 0,
-                extra_result_sets: Vec::new(),
-              })
-            }
+          if let Some(error) = sink_error {
+            return Err(error);
           }
+          if let Some(rows_affected) = affected {
+            return Ok(QueryExecutionSummary::Affected { rows_affected });
+          }
+          let Some((column_metadata, columns)) = header else {
+            return Ok(QueryExecutionSummary::Affected { rows_affected: 0 });
+          };
+          flush_remaining_batch(&mut rows, &mut batch_count, row_count, sink)?;
+          Ok(QueryExecutionSummary::Rows {
+            columns,
+            column_metadata,
+            row_count,
+            batch_count,
+            truncated: truncation_reason.is_some(),
+            truncation_reason,
+            row_limit: options.row_limit,
+            byte_limit: options.byte_limit,
+            bytes_read,
+            omitted_result_sets: 0,
+            extra_result_sets: Vec::new(),
+          })
         }
         Err(error) => {
           if error.code.as_deref() != Some(CONNECTION_LOST_CODE) {
@@ -1056,17 +1222,6 @@ mod enabled {
       outcome
     }
   }
-
-  enum StreamResult {
-    Affected(u64),
-    Rows {
-      columns: Vec<String>,
-      column_metadata: Vec<QueryColumnMetadata>,
-      rows: Vec<QueryRow>,
-      bytes_read: usize,
-      truncation_reason: Option<QueryTruncationReason>,
-    },
-  }
 }
 
 #[cfg(feature = "odbc")]
@@ -1139,5 +1294,28 @@ mod tests {
       statement_text("CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"),
       "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"
     );
+  }
+
+  #[test]
+  fn dm_svc_conf_writes_to_private_dir_with_utf8_and_local_offset() {
+    assert_eq!(dm_svc_conf_contents(480), "TIME_ZONE=(480)\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n");
+    assert_eq!(
+      dm_svc_conf_contents(-300),
+      "TIME_ZONE=(-300)\nLANGUAGE=(cn)\nCHAR_CODE=(PG_UTF8)\n"
+    );
+
+    let root = std::env::temp_dir().join(format!("dataomni-dm8-test-{}", std::process::id()));
+    let dir = write_dm_svc_conf_in(&root).expect("write dm_svc.conf");
+    assert_eq!(dir, root.join("dm8"));
+    let body = std::fs::read_to_string(dir.join("dm_svc.conf")).expect("read dm_svc.conf");
+    assert!(body.contains("CHAR_CODE=(PG_UTF8)\n"), "{body}");
+    assert!(body.starts_with("TIME_ZONE=("), "{body}");
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let mode = std::fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
+      assert_eq!(mode, 0o700, "dm8 config dir must be owner-only");
+    }
+    std::fs::remove_dir_all(&root).ok();
   }
 }

@@ -99,3 +99,103 @@ describe('切到算出同一个串的另一条配置', () => {
     expect(order).toEqual([`disconnect:${MSSQL}`, 'connect']);
   });
 });
+
+describe('跨连接切换竞态（switchEpoch，H9 / C2）', () => {
+  const base = {
+    ...createDefaultConfig(DatabaseType.PostgreSQL),
+    created_at: '2026-11-28T00:00:00Z',
+    updated_at: '2026-11-28T00:00:00Z'
+  };
+  const slowProfile = { ...base, id: 'slow-a', name: 'Slow A' };
+  const healthyProfile = { ...base, id: 'fast-b', name: 'Fast B' };
+  const SLOW_URL = 'postgres://user@127.0.0.1:5432/slow';
+  const FAST_URL = 'postgres://user@127.0.0.1:5432/fast';
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    useAppStore.setState({ activeConnection: null, connectionReady: false });
+    useQueryStore.setState({
+      database: null,
+      connectionString: null,
+      connectionId: null,
+      session: null,
+      connectionLost: false,
+      error: null
+    });
+  });
+
+  it('慢连接 A 晚到成功时不会劫持已经连好的 B，并主动关闭 A 的孤儿池子', async () => {
+    let resolveSlow!: (value: string) => void;
+    const slowPending = new Promise<string>((resolve) => {
+      resolveSlow = resolve;
+    });
+
+    invokeMock.mockImplementation(async (command: string, payload?: { config?: { id: string } }) => {
+      if (command === 'test_connection') {
+        return payload?.config?.id === 'slow-a' ? slowPending : FAST_URL;
+      }
+      return true;
+    });
+
+    const connectToDatabase = vi.fn(async (cs: string, id: string) => {
+      useQueryStore.setState({
+        database: { close: vi.fn() } as unknown as DatabaseHandle,
+        connectionString: cs,
+        connectionId: id,
+        error: null
+      });
+    });
+    useQueryStore.setState({ connectToDatabase });
+
+    const manager = SessionManager.getInstance();
+    const slowTask = manager.manualReconnect(slowProfile);
+    await manager.switchConnection(healthyProfile, FAST_URL);
+    expect(useAppStore.getState().activeConnection?.config.id).toBe('fast-b');
+
+    resolveSlow(SLOW_URL);
+    await slowTask;
+
+    expect(useAppStore.getState().activeConnection?.config.id).toBe('fast-b');
+    expect(useAppStore.getState().activeConnection?.connectionString).toBe(FAST_URL);
+    expect(useQueryStore.getState().connectionId).toBe('fast-b');
+    expect(invokeMock).toHaveBeenCalledWith('close_sqlx_pool', { connectionString: SLOW_URL });
+  });
+
+  it('慢连接 A 晚到失败时绝不清空已经连好的 B', async () => {
+    let rejectSlow!: (reason: unknown) => void;
+    const slowPending = new Promise<string>((_, reject) => {
+      rejectSlow = reject;
+    });
+
+    invokeMock.mockImplementation(async (command: string, payload?: { config?: { id: string } }) => {
+      if (command === 'test_connection') {
+        return payload?.config?.id === 'slow-a' ? slowPending : FAST_URL;
+      }
+      return true;
+    });
+
+    const connectToDatabase = vi.fn(async (cs: string, id: string) => {
+      useQueryStore.setState({
+        database: { close: vi.fn() } as unknown as DatabaseHandle,
+        connectionString: cs,
+        connectionId: id,
+        session: { id: `session-${id}`, profileId: id, database: null, transaction: { status: 'idle', startedAt: null } } as never,
+        error: null
+      });
+    });
+    useQueryStore.setState({ connectToDatabase });
+
+    const manager = SessionManager.getInstance();
+    const slowTask = manager.manualReconnect(slowProfile);
+    await manager.switchConnection(healthyProfile, FAST_URL);
+
+    rejectSlow('DATAOMNI_CONNECT_TIMED_OUT');
+    await slowTask;
+
+    expect(useAppStore.getState().activeConnection?.config.id).toBe('fast-b');
+    expect(useAppStore.getState().connectionReady).toBe(true);
+    expect(useQueryStore.getState().database).not.toBeNull();
+    expect(useQueryStore.getState().session?.id).toBe('session-fast-b');
+    expect(useQueryStore.getState().error).toBeNull();
+  });
+});

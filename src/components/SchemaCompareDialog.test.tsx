@@ -62,8 +62,6 @@ beforeEach(() => {
     switch (command) {
       case 'test_connection':
         return 'sqlite:/data/prod.db';
-      case 'open_database_pool':
-        return undefined;
       case 'sqlx_select': {
         const payload = args[1] as { sql: string; params: unknown[] };
         return otherHandle.select(payload.sql, payload.params);

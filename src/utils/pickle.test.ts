@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodePickle, pickleView } from './pickle';
+import { decodePickle, formatPickle, pickleView } from './pickle';
 
 // 语料都是 CPython 3.14 `pickle.dumps(obj, protocol=N)` 的真实输出（base64）
 const TASKIQ = {
@@ -178,5 +178,43 @@ describe('decodePickle', () => {
 
   it('returns null rather than throwing on garbage base64', () => {
     expect(pickleView('%%%')).toBeNull();
+  });
+
+  it('bounds billion-laughs DUP DAG pickles without hanging or OOM (H15 / S12)', () => {
+    // PROTO 4, SHORT_BINUNICODE "x", then 30 rounds of (DUP, TUPLE2) = 2^30 leaf nodes in 66 bytes
+    const payload = [0x80, 0x04, 0x8c, 0x01, 0x78];
+    for (let i = 0; i < 30; i += 1) {
+      payload.push(0x32, 0x86); // DUP, TUPLE2
+    }
+    payload.push(0x2e); // STOP
+    const b64 = btoa(String.fromCharCode(...payload));
+    const started = performance.now();
+    const view = pickleView(b64);
+    const elapsed = performance.now() - started;
+    expect(view).not.toBeNull();
+    expect(elapsed).toBeLessThan(1000);
+    expect(view?.text).toContain('...');
+  });
+
+  it('handles self-referential datetime tzinfo and deeply nested lists without stack overflow (H15 / S12)', () => {
+    const dt: Record<string, unknown> = {
+      kind: 'object',
+      callable: { kind: 'global', module: 'datetime', name: 'datetime' },
+      args: [
+        { kind: 'bytes', value: Uint8Array.from([0x07, 0xea, 0x09, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00]), mutable: false },
+      ],
+    };
+    (dt.args as unknown[]).push(dt);
+    // 直接把循环 datetime 喂给 formatPickle，验证 temporal 透传 open 集不会栈溢出
+    const text = formatPickle(dt as unknown as Parameters<typeof formatPickle>[0]).map((s) => s.text).join('');
+    expect(text).toContain('[...]');
+
+    // 200 层嵌套 list：触发最大深度上限而非栈溢出
+    let deep: Parameters<typeof formatPickle>[0] = { kind: 'int', value: 1n };
+    for (let i = 0; i < 200; i += 1) {
+      deep = { kind: 'list', items: [deep] };
+    }
+    const deepText = formatPickle(deep).map((s) => s.text).join('');
+    expect(deepText).toContain('max depth');
   });
 });

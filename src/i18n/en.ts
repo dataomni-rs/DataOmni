@@ -1476,6 +1476,7 @@ export const en: Translations = {
   'error.backend.credentialSaveFailed': 'The password could not be saved to the system keychain and will not be remembered. Details: {detail}',
   'error.backend.credentialDeleteFailed': 'The password could not be removed from the system keychain and may still be stored there. Details: {detail}',
   'error.backend.credentialMissing': 'The system keychain has no password for this connection; enter it again.',
+  'error.backend.agentGrantUpgradeRequired': 'This connection uses a legacy agent read grant; open and save it in DataOmni to upgrade to v2.',
   'error.backend.aiKeyMissing': 'No API key yet: enter one under Settings → AI design and save it.',
   'error.backend.aiKeySaveFailed': 'The API key could not be saved to the system keychain, and AI design cannot be used until it is. If the keychain is locked, press Save again and unlock it in the dialog; on Linux, if no dialog appears, there is probably no default keyring yet: create one in Passwords and Keys (Seahorse) and make it the default. Details: {detail}',
   'error.backend.credentialMigrationFailed': 'Failed to migrate a plaintext password from the old config into the system keychain: {detail}',

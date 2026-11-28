@@ -114,13 +114,14 @@ describe('断线之后', () => {
     invokeMock.mockResolvedValue(undefined);
     await useQueryStore.getState().connectToDatabase('sqlite:memory', 'profile-a', SESSION);
 
-    expect(invokeMock).toHaveBeenCalledWith('open_database_pool', { connectionString: 'sqlite:memory' });
+    expect(invokeMock).toHaveBeenCalledWith('release_database_session', { sessionId: 'session-a' });
+    expect(invokeMock).not.toHaveBeenCalledWith('open_database_pool', expect.anything());
     expect(useQueryStore.getState().connectionLost).toBe(false);
   });
 
   it('连着的时候切回同一条连接仍然不重连——那道短路本身是对的', async () => {
     await useQueryStore.getState().connectToDatabase('sqlite:memory', 'profile-a', SESSION);
-    expect(invokeMock).not.toHaveBeenCalledWith('open_database_pool', expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith('release_database_session', expect.anything());
   });
 
   it('断开连接会把这个标记清掉', async () => {
@@ -190,11 +191,11 @@ describe('新旧句柄是同一个后端池子', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('池子由前端打开的（MySQL / PostgreSQL）照常关：接下来 openDatabase 会重开', async () => {
+  it('MySQL / PostgreSQL 同样由后端 test_connection 登记池子，切到同串配置不摘掉新池子', async () => {
     const mysql = 'mysql://root@127.0.0.1:3306/app';
     const close = connectedTo(mysql);
     await useQueryStore.getState().disconnect({ keepPoolFor: mysql });
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('同一条断线重连：test_connection 刚换上的新池子不能被旧句柄关掉', async () => {
@@ -203,5 +204,112 @@ describe('新旧句柄是同一个后端池子', () => {
     await useQueryStore.getState().connectToDatabase(MSSQL, 'profile-a', SESSION);
     expect(close).not.toHaveBeenCalled();
     expect(useQueryStore.getState().database).not.toBeNull();
+  });
+});
+
+describe('异步竞态防护（H9 / F1）', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    connectedStore();
+  });
+
+  it('refreshTransaction 晚到时不覆盖已切换的新 session 事务状态', async () => {
+    let resolveTx!: (tx: { status: string; startedAt: string | null }) => void;
+    invokeMock.mockImplementation(() => new Promise((resolve) => { resolveTx = resolve; }));
+
+    const pending = useQueryStore.getState().refreshTransaction();
+    // 切换到新会话
+    useQueryStore.setState({
+      session: { id: 'session-b', profileId: 'profile-b', database: null, transaction: { status: 'idle', startedAt: null } } as never
+    });
+
+    resolveTx({ status: 'active', startedAt: '2026-11-28T00:00:00Z' });
+    await pending;
+
+    expect(useQueryStore.getState().session?.id).toBe('session-b');
+    expect(useQueryStore.getState().session?.transaction.status).toBe('idle');
+  });
+
+  it('事务内语句失败只刷新一次事务状态（不重复发两次 get_session_transaction）', async () => {
+    useQueryStore.setState({
+      session: { id: 'session-a', profileId: 'profile-a', database: null, transaction: { status: 'active', startedAt: '2026-11-28T00:00:00Z' } } as never
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'execute_query') {
+        throw { code: '42601', message: 'syntax error' };
+      }
+      if (command === 'get_session_transaction') {
+        return { status: 'failed', startedAt: '2026-11-28T00:00:00Z' };
+      }
+      return undefined;
+    });
+
+    const store = useQueryStore.getState();
+    store.openDocument('tab-tx');
+    store.setSqlInput('BAD SQL;');
+    store.parseStatements();
+    const stmt = selectActiveSqlDocument(useQueryStore.getState()).statements[0];
+    await useQueryStore.getState().executeStatement(stmt.id);
+
+    const txCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'get_session_transaction');
+    expect(txCalls).toHaveLength(1);
+  });
+
+  it('executeAllStatements 中途切到别的 SQL 标签仍会执行完发起标签里的全部语句', async () => {
+    const executedSql: string[] = [];
+    invokeMock.mockImplementation(async (command: string, payload?: { request?: { sql: string } }) => {
+      if (command === 'execute_query') {
+        executedSql.push(payload?.request?.sql ?? '');
+        if (executedSql.length === 1) {
+          // 第一条语句运行期间用户切到了另一个标签
+          useQueryStore.getState().openDocument('tab-other');
+        }
+        return { kind: 'affected', rows_affected: 1 };
+      }
+      if (command === 'get_session_transaction') {
+        return { status: 'idle', startedAt: null };
+      }
+      return undefined;
+    });
+
+    const store = useQueryStore.getState();
+    store.openDocument('tab-batch');
+    store.setSqlInput('SELECT 1; SELECT 2;');
+    await useQueryStore.getState().executeAllStatements();
+
+    expect(executedSql).toEqual(['SELECT 1;', 'SELECT 2;']);
+  });
+
+  it('跨标签结果集总字节超过上限时优先淘汰非活动标签的旧结果（H18 / P2-4）', async () => {
+    const { evictExcessDocumentResults } = await import('./queryStore');
+    const makeDoc = (stmtId: string, bytesRead: number) => ({
+      sqlInput: 'SELECT 1;',
+      latestExecutionIdByStatement: {},
+      parameters: {},
+      statements: [
+        {
+          id: stmtId,
+          sql: 'SELECT 1;',
+          isExecuting: false,
+          result: {
+            columns: ['a'],
+            rows: [[1]],
+            affected_rows: 1,
+            execution_time: 10,
+            bytes_read: bytesRead
+          }
+        }
+      ]
+    });
+
+    const docs = {
+      'tab-old-1': makeDoc('s1', 40_000_000),
+      'tab-old-2': makeDoc('s2', 30_000_000),
+      'tab-active': makeDoc('s3', 20_000_000)
+    };
+    const trimmed = evictExcessDocumentResults(docs, 'tab-active', 64 * 1024 * 1024);
+    expect(trimmed['tab-old-1'].statements[0].result).toBeUndefined();
+    expect(trimmed['tab-old-2'].statements[0].result).toBeDefined();
+    expect(trimmed['tab-active'].statements[0].result).toBeDefined();
   });
 });

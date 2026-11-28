@@ -439,8 +439,13 @@ impl TunnelRegistry {
 
     let opened = open(config, tunnel, known_hosts).await?;
     let local_port = opened.local_port;
-    let mut entries = self.entries.lock().await;
-    entries.insert(config.id.clone(), opened);
+    let replaced = {
+      let mut entries = self.entries.lock().await;
+      entries.insert(config.id.clone(), opened)
+    };
+    if let Some(old) = replaced {
+      old.disconnect().await;
+    }
     Ok(local_port)
   }
 

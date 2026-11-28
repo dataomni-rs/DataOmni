@@ -32,7 +32,9 @@ pub async fn analytics_open_file(
   path: String,
   registry: State<'_, LocalAnalyticsRegistry>,
 ) -> Result<AnalyticsSessionSummary, QueryError> {
-  registry.open_file(PathBuf::from(path)).await
+  let target = PathBuf::from(path);
+  crate::services::path_guard::refuse_reserved_path(&target).map_err(QueryError::message)?;
+  registry.open_file(target).await
 }
 
 /// 向既有分析沙盒会话附加一张内存结果表（用于跨查询 LEFT JOIN / EXCEPT 对账）
@@ -55,7 +57,9 @@ pub async fn analytics_attach_file(
   path: String,
   registry: State<'_, LocalAnalyticsRegistry>,
 ) -> Result<AttachedTableSummary, QueryError> {
-  registry.attach_file(&analytics_id, table_name, PathBuf::from(path)).await
+  let target = PathBuf::from(path);
+  crate::services::path_guard::refuse_reserved_path(&target).map_err(QueryError::message)?;
+  registry.attach_file(&analytics_id, table_name, target).await
 }
 
 /// 计算指定分析会话的全列数据画像
@@ -87,7 +91,9 @@ pub async fn analytics_export_parquet(
   output_path: String,
   registry: State<'_, LocalAnalyticsRegistry>,
 ) -> Result<ParquetExportSummary, QueryError> {
-  registry.export_parquet(&analytics_id, sql, PathBuf::from(output_path)).await
+  let target = PathBuf::from(output_path);
+  crate::services::path_guard::refuse_reserved_path(&target).map_err(QueryError::message)?;
+  registry.export_parquet(&analytics_id, sql, target).await
 }
 
 /// 中止指定分析会话上正在进行的画像或二次查询

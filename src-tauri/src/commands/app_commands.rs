@@ -465,7 +465,7 @@ fn resolve_cli_executable_path(os: &str) -> String {
 
 /// 返回当前 DataOmni 二进制路径、PATH 可见性、已开放给 Agent 的非生产连接数与内置 `SKILL.md` 文本。
 #[tauri::command]
-pub fn agent_cli_info(
+pub async fn agent_cli_info(
   app: AppHandle,
   service_state: tauri::State<'_, crate::commands::connection_commands::ConnectionServiceState>,
 ) -> Result<AgentCliInfo, String> {
@@ -477,26 +477,20 @@ pub fn agent_cli_info(
   let audit_log_path =
     app.path().app_log_dir().ok().map(|dir| dir.join(crate::cli::AUDIT_FILE).display().to_string());
 
-  let open_connection_count = {
-    let mut guard = service_state
-      .lock()
-      .map_err(|error| format!("{}: {error}", crate::commands::SERVICE_STATE_UNAVAILABLE))?;
-    let service = match &mut *guard {
-      Some(service) => service,
-      slot => slot.insert(
-        crate::services::ConnectionService::new(&app)
-          .map_err(|error| format!("{}: {error}", crate::commands::SERVICE_INIT_FAILED))?,
-      ),
-    };
-    service
-      .get_connections()
-      .iter()
-      .filter(|conn| {
-        conn.environment != ConnectionEnvironment::Production
-          && conn.agent_access == AgentAccess::Read
-      })
-      .count()
-  };
+  let open_connection_count =
+    crate::commands::connection_commands::with_service_blocking(&service_state, &app, |service| {
+      Ok(
+        service
+          .get_connections()
+          .iter()
+          .filter(|conn| {
+            conn.environment != ConnectionEnvironment::Production
+              && conn.agent_access == AgentAccess::Read
+          })
+          .count(),
+      )
+    })
+    .await?;
 
   Ok(AgentCliInfo {
     executable_path,
@@ -510,14 +504,17 @@ pub fn agent_cli_info(
 
 /// 只读读取 `dataomni-cli.log` 中最近的 CLI / MCP 审计摘要（倒序，最多 200 条）。
 #[tauri::command]
-pub fn read_agent_audit_log(
+pub async fn read_agent_audit_log(
   app: AppHandle,
   limit: Option<usize>,
 ) -> Result<Vec<crate::cli::AuditLogEntry>, String> {
   let Ok(log_dir) = app.path().app_log_dir() else {
     return Ok(Vec::new());
   };
-  crate::cli::read_audit_log_from(&log_dir, limit.unwrap_or(crate::cli::MAX_AUDIT_ENTRIES))
+  let max_entries = limit.unwrap_or(crate::cli::MAX_AUDIT_ENTRIES);
+  tokio::task::spawn_blocking(move || crate::cli::read_audit_log_from(&log_dir, max_entries))
+    .await
+    .map_err(|error| format!("{}: {error}", crate::commands::SERVICE_STATE_UNAVAILABLE))?
 }
 
 #[cfg(test)]

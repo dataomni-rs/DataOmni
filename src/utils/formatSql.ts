@@ -11,6 +11,7 @@ import {
 import { isolateHistory } from '@codemirror/commands';
 import type { TransactionSpec } from '@codemirror/state';
 import { DatabaseType } from '../contracts/connection';
+import { SQL_DIALECT_TRAITS, sqlDialectFromDatabaseType } from '../contracts/sqlDialectTraits';
 import { describeError } from './describeError';
 import { findSqlStatementAtOffset, getSqlStatementRanges } from './sqlStatements';
 
@@ -26,24 +27,8 @@ export type FormatSqlResult =
  * 界面上表现为「点一下格式化，弹个看不懂的错」。返回 null 让按钮直接禁用。
  */
 export function sqlFormatterLanguage(dbType: DatabaseType): SqlLanguage | null {
-  switch (dbType) {
-    case DatabaseType.MySQL:
-      return 'mysql';
-    case DatabaseType.PostgreSQL:
-      return 'postgresql';
-    case DatabaseType.SQLite:
-      return 'sqlite';
-    case DatabaseType.SqlServer:
-      return 'transactsql';
-    case DatabaseType.Oracle:
-      return 'plsql';
-    case DatabaseType.DuckDB:
-      return 'duckdb';
-    case DatabaseType.ClickHouse:
-      return 'clickhouse';
-    default:
-      return null;
-  }
+  const dialect = sqlDialectFromDatabaseType(dbType);
+  return dialect ? SQL_DIALECT_TRAITS[dialect].formatterLanguage : null;
 }
 
 /**

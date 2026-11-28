@@ -177,7 +177,8 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
   const footerRef = useRef<HTMLDivElement>(null);
   const [tableHeight, setTableHeight] = useState(FALLBACK_RESULT_TABLE_HEIGHT);
   
-  // 换一条结果集时清掉旧的客户端筛选、排序、自定义列序与详情抽屉，避免列下标错位
+  // 换一条结果集时清掉旧的客户端筛选、排序、自定义列序与详情抽屉，避免列下标错位；
+  // 同步清空行级编辑暂存态，防止同 statementId 改 SQL 重跑后把旧表变更误提交到新表（H8 / C1）
   useEffect(() => {
     setCellFilters([]);
     setColumnOrder([]);
@@ -187,6 +188,14 @@ export const QueryResultScrollTable: React.FC<QueryResultScrollTableProps> = ({
     setActiveMatchIndex(0);
     setInspectorState(null);
     setCurrentPage(1);
+    setChanges([]);
+    setEditingCell(null);
+    setEditValue({ kind: 'unset' });
+    setShowAddForm(false);
+    setNewRowData({});
+    setShowChanges(false);
+    setCommitFailure(null);
+    setCommitError(null);
   }, [statementId, result]);
 
   const rawTotalRows = result.rows.length;

@@ -212,6 +212,48 @@ pub(super) async fn run(
   outcome
 }
 
+/// 即使服务端 `COMMAND INFO` 将其标为 `readonly`，也不允许 Agent 执行的危险管理/凭据/DoS 命令（H14 / S9）：
+/// - `CONFIG` / `ACL` / `CLIENT`：可读取 `requirepass`、`masterauth`、ACL 哈希与客户端拓扑
+/// - `KEYS` / `DEBUG` / `MONITOR`：单线程阻塞或崩溃实例
+/// - `EVAL_RO` / `EVALSHA_RO` / `FCALL_RO` / `SCRIPT` / `FUNCTION`：任意脚本可触发 CPU DoS 或绕过审计
+const REFUSED_READONLY_COMMANDS: &[&str] = &[
+  "CONFIG",
+  "ACL",
+  "DEBUG",
+  "KEYS",
+  "EVAL_RO",
+  "EVALSHA_RO",
+  "FCALL_RO",
+  "CLIENT",
+  "MODULE",
+  "MONITOR",
+  "SCRIPT",
+  "FUNCTION",
+  "SHUTDOWN",
+  "SLAVEOF",
+  "REPLICAOF",
+  "MIGRATE",
+  "RESTORE",
+  "BGSAVE",
+  "BGREWRITEAOF",
+  "SAVE",
+  "SYNC",
+  "PSYNC",
+];
+
+fn check_command_denylist(arguments: &[String]) -> Result<(), CliError> {
+  let Some((name, _)) = arguments.split_first() else {
+    return Err(CliError::usage(USAGE));
+  };
+  let upper = name.trim().to_ascii_uppercase();
+  if REFUSED_READONLY_COMMANDS.contains(&upper.as_str()) {
+    return Err(CliError::refused(format!(
+      "{upper} is explicitly refused in read-only CLI/MCP mode"
+    )));
+  }
+  Ok(())
+}
+
 /// 问服务器这条命令带不带 `readonly`。有子命令的（`OBJECT ENCODING`、`XINFO STREAM`）
 /// Redis 7 起按 `名字|子命令` 各有旗标；查不到子命令（更早的版本没有）就看命令本身
 async fn require_read_only(
@@ -220,6 +262,7 @@ async fn require_read_only(
   arguments: &[String],
   timeout: Duration,
 ) -> Result<(), CliError> {
+  check_command_denylist(arguments)?;
   let Some((name, rest)) = arguments.split_first() else {
     return Err(CliError::usage(USAGE));
   };
@@ -403,5 +446,30 @@ mod tests {
     };
     assert_eq!(command_flags(&entry), Some(vec!["readonly".to_string(), "fast".to_string()]));
     assert_eq!(command_flags(&RedisReply::Nil), None);
+  }
+
+  /// H14（S9）：即使服务端把 CONFIG/ACL/DEBUG/KEYS/EVAL_RO/CLIENT 标为 readonly，客户端显式黑名单也必须拒绝
+  #[test]
+  fn explicitly_refuses_sensitive_or_dos_redis_commands() {
+    for blocked in [
+      &["CONFIG", "GET", "requirepass"][..],
+      &["config", "get", "*"],
+      &["ACL", "LIST"],
+      &["ACL", "GETUSER", "default"],
+      &["DEBUG", "SLEEP", "5"],
+      &["KEYS", "*"],
+      &["EVAL_RO", "while true do end", "0"],
+      &["EVALSHA_RO", "deadbeef", "0"],
+      &["FCALL_RO", "myfn", "0"],
+      &["CLIENT", "LIST"],
+    ] {
+      assert!(
+        matches!(check_command_denylist(&args(blocked)), Err(CliError { exit: Exit::Refused, .. })),
+        "expected refusal for {blocked:?}"
+      );
+    }
+    for allowed in [&["GET", "k"][..], &["HGETALL", "h"], &["OBJECT", "ENCODING", "k"], &["INFO"]] {
+      assert!(check_command_denylist(&args(allowed)).is_ok(), "unexpected refusal for {allowed:?}");
+    }
   }
 }

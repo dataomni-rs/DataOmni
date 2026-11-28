@@ -111,7 +111,7 @@ async fn connect(
       } else {
         "START TRANSACTION READ ONLY"
       };
-      let pool = sqlx_pool::open(&profile.connection_string_via(tunnel_port))
+      let pool = sqlx_pool::open(&profile.sqlx_connect_url_via(tunnel_port))
         .await
         .map_err(Failure::Connect)?;
       (Pool::Sqlx(pool), Some(begin))

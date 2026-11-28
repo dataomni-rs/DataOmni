@@ -28,6 +28,7 @@
 | v1.3.0 夯实根基 | 内置 DuckDB 统一分析与可视化（DA）、CLI/MCP 可用性增强（CM）、应用内克制型 AI 增强（AI）与跨平台实机验收（`V1`） | [x] `DA0–DA3`、`CM1–CM4`、`AI0–AI2`、顶层无头 CLI 与 TTY 高亮、3 查询批量 `diff` 与 MCP SSH 复用、分析/外键跳转 UX 打磨均已随 `v1.3.0`（2026-11-21）正式发布（`V1` 跨平台实机验收继续跟踪） |
 | v1.3.0 多模型分析 | 结构化表级抽样与多表对账、Redis 空间/TTL/BigKey 体检、MongoDB 嵌套 Schema 漂移与僵尸索引、ES 原生聚合/Mapping 诊断、Neo4j 拓扑体检与分析增强（[`rfcs/multi-engine-analytics.md`](rfcs/multi-engine-analytics.md)） | [x] `AN0–AN6`（PR `#64`）与 `AN7–AN10`（PR `#65`）均已并入 `v1.3.0`（2026-11-21）正式发布 |
 | v1.3.1 缺口收口与国产库 | openGauss SM3、无前缀裸列补全、Redis Sentinel 多哨兵/`READONLY` 切主、OceanBase 表达式默认值、KingbaseES、活跃会话与锁等待面板、达梦 DM8（[`rfcs/driver-and-gap-closure.md`](rfcs/driver-and-gap-closure.md)） | [x] `DC0–DC7` 全部合并（`DC0–DC4` + `DC6` PR `#69`、`DC7` PR `#70`、`DC5` 达梦 DM8 `odbc` feature PR `#71`），已于 2026-11-22 正式发布 `v1.3.1`（三平台 10 项产物、`latest.json`、`dataomni-rs/homebrew-tap` 与 `dataomni.dev` 全量上线） |
+| v1.3.4 架构稳固与安全加固 | 2026-11-28 全仓架构与安全深度审计收口：信任边界与注入封堵（`H1–H7`）、前端竞态/方言收口与后端并发阻塞修复（`H8–H13`）、纵深防线与按变化边界结构减债（`H14–H18`） | [x] `H1–H18` 三批全部收口并通过全量前后端与三特性闸门验证 |
 | 持续运维与条件项 | `V1` 跨平台实机验收、`V2` Nightly 稳态、`U3` 外部渠道与目录、`M2` 国产库、`M3` MAS 沙盒变体（`rfcs/roadmap-1.3.md` 长期跟踪项） | [-] `P4` 已清零；`M2` 已并入 `DC5–DC6` 跟踪，其余按外部触发条件推进 |
 
 ---
@@ -205,6 +206,57 @@
 
 ---
 
+## v1.3.4 架构稳固与安全深度加固（2026-11-28 全仓审计立项）
+
+原则：针对 `v1.3.3`（`main@966f839`）全仓架构与安全评估暴露出的历史接缝，按「**先安全止血与 UB → 再正确性与并发阻塞 → 最后纵深防线与按变化边界结构减债**」三批增量推进；每项先写失败的反向攻击或回归单测（先红后绿），严禁借加固名义引入无证据的过度抽象。
+
+### 第一批（Batch 1 · P0 安全止血与 UB 修复，`H1–H7`）
+
+- [x] H1（S3）修复 Elasticsearch CLI/MCP 只读门禁 `%5f` 百分号编码与 `..` 路径折叠绕过（`f9083ef`，`cli::elasticsearch::tests` 3/3 先红后绿、`cargo fmt --check` 通过）
+  - 在 `cli/elasticsearch.rs` 中先按与 `services/elasticsearch.rs` 一致的 `url::Url` 解析器规范化路径并严格逐段解码百分号转义，显式拒绝 `.`/`..` 路径折叠、反斜杠、控制字符、双重编码与百分号编码的 `_` 端点段，通配符 `*` 禁止匹配 `.`/`..`/`_` 前缀段；反向单测覆盖 `POST /books/%5fdoc/_search`、`GET /%5fflush`、`POST /books/%5fdelete_by_query/_explain/..`、`POST /books/_explain/..` 等 18 条攻击向量及合法含 `%20` 文档 ID。
+- [x] H2（S4）将 CSV 导入 `valid_type_name` 替换为严格 SQL 类型语法解析器，消除 PG / SQL Server SQL 注入（`f37899a`，`services::csv_import::tests` 29/29 先红后绿、`cargo fmt --check` 通过）
+  - 替换 `services/csv_import.rs` 宽字符白名单为严格 SQL 类型语法解析器（可选单一 `schema.` + 合法 SQL 类型名/已知标准多词类型 + 可选单一精度修饰 `(p[,s])` + 可选 `[]`），阻断全部无单引号/无分号的括号/逗号/多词 SQL 注入载荷（18 条反向载荷与全部合法带引号/多词/数组/PostGIS 类型均通过验证）。
+- [x] H3（C3）消除达梦 DM8 `ensure_dm_svc_utf8` 工作线程 `std::env::set_var` POSIX 多线程 UB 与 `/tmp` 抢占（`bb4d0e1`，`services::dameng::tests` 4/4 + `--features odbc` 编译 + `cargo fmt --check` 全绿）
+  - 将 `dm_svc.conf` 迁至用户私有配置目录 `<app_config_dir>/dm8`（Unix `0o700` 权限、原子写盘、动态写入本地时区偏移）并在 `main.rs` 单线程启动阶段调用 `init_dm_svc_env()`（仍尊重外部已有 `DM_SVC_PATH`），彻底移除 `spawn_blocking` 工作线程中的 `std::env::set_var`。
+- [x] H4（S5）加固 `opengauss_relay`：握手帧长上限 + 本机临时口令鉴权 + 生命周期绑定清理（`eddb085`，`services::opengauss_relay::tests` 8/8 含真 `sqlx` SM3 端到端与未鉴权入侵拒连/Drop 关停门、`cargo fmt --check` 通过）
+  - 给 `read_message` 增加 64 KiB 握手帧上限阻断远端超大长度头 OOM；移除进程级永久缓存 `RELAYS`，改为每连接池独占 `RelayHandle`（256-bit 随机本机口令 + `AuthenticationCleartextPassword` 常量时间核验，未过鉴权绝不触碰上游），并经 `sqlx::PgPool::close_event` 在池关闭/释放时自动停听并释放上游口令。
+- [x] H5（S6）抽象统一 `path_guard` 并接入全部 15 处文件 IPC 命令（`f582d77`，`services::path_guard::tests` + `commands::file_commands::tests` 14/14 含不存在父目录 `..`、悬空符号链接与目录逃逸反向门、`cargo fmt` 通过）
+  - 新增 `services/path_guard.rs`，封禁应用配置目录与跨平台日志目录（修复 macOS `~/Library/Logs/com.dataomni.app` 漏保）；`resolve_for_comparison` 逐段规范化、展开悬空符号链接（限 16 层防环）并词法折叠未存在尾段的 `..`；`write_new_text_files` 逐目标校验包含性；全部 15 处文件/分析/导入导出/备份 IPC 命令统一经 `path_guard` 拦截。
+- [x] H6（S1）升级 Agent HMAC 授权至 `dataomni-agent-read-v2` 并覆盖无口令/文件连接（`2ac1c3c`，`connection_service` + `cli::` + `mcp::` 114/114 全绿、`cargo fmt` 通过）
+  - 补签 `ssh_tunnel.{host,port,username,auth,private_key_path,remote_host,remote_port}`、`ssl`/`tls_mode`/全部证书与私钥路径及按 key 排序规范化后的 `options`（阻断 `remote_host` 跳转 PROD 与 `options.odbcDriver` 动态库注入）；在系统钥匙串引入安装级 256-bit 随机 HMAC 密钥 `#agent-grant-key`，使 SQLite/DuckDB/X.509/无口令连接同样强制签发并核验 `<id>#agent`；旧版 v1 凭证拒绝执行并返回 `DATAOMNI_AGENT_GRANT_UPGRADE_REQUIRED`。
+- [x] H7（S2）收口 `tauri-plugin-sql` 历史接缝：MySQL/PostgreSQL 池键去口令、下线原始 URL `open_database_pool`、脱敏锁中毒日志（`3151d26`，前端 `eslint` + `tsc` + 223 文件 2494 条单测、Rust 525 条单测与默认/`--no-default-features` 双特性 `clippy -D warnings` 全绿）
+  - `models/mod.rs` 将 MySQL/PostgreSQL `to_connection_string` 统一为无口令池键（全部 12 类数据库零明文口令回传 WebView，真实含口令 URL 收敛于内部 `sqlx_connect_url_via`）；`test_connection` 直接完成 MySQL/PG/SQLite 建池登记，彻底移除 `open_database_pool` IPC 命令；`pool_registry.rs` 锁中毒日志经 `redact_connection_string` 脱敏；补齐 `DATAOMNI_AGENT_GRANT_UPGRADE_REQUIRED` 双语错误文案。
+
+### 第二批（Batch 2 · P0/P1 正确性、前端竞态、方言收口与后端并发，`H8–H13`）
+
+- [x] H8（C1）修复 `QueryResultScrollTable` 重跑语句不清空 `changes` 等 6 个编辑暂存态（`83c7b1d`，`QueryResultScrollTable.test.tsx` 11/11 先红后绿 + `tsc` + `eslint` 通过）
+  - 在 `[statementId, result]` effect 中同步重置 `changes`、`editingCell`、`editValue`、`showAddForm`、`newRowData`、`showChanges`、`commitFailure`、`commitError`，消除同 `statementId` 改写 SQL 重跑后把旧表变更误提交到新表的跨表写入风险。
+- [x] H9（C2 + F1）修复 `SessionManager` 跨连接切换竞态与前端 4 处异步陈旧响应/双查（`2d1628b`，`eslint` + `tsc` + 223 文件 2500 条单测全绿）
+  - `SessionManager` 引入单调递增 `switchEpoch`，每个 `await` 后核验 epoch 并主动关闭过期孤儿句柄，阻断慢连接晚到回调劫持或清空健康连接；`useProfileConnector` 补齐 attempt 序号守卫；修复 `queryStore`（`refreshTransaction` 核对 `session.id`、`connectionLost` 核对 `connectionId`、事务内报错不重复刷新 2 次、`executeAllStatements` 锁定发起文档 ID）、`TableDataViewer`（三类加载请求序号防乱序 + 消除结构/数据子标签双查）、`DatabaseExplorer`（请求序号 + 仅 `schemaVersion` 变更强制绕过 5 分钟缓存）与 `RedisKeyBrowser`（`scan` 请求序号）。
+- [x] H10（F2）定义声明式 `SQL_DIALECT_TRAITS: Record<SqlDialect, ...>` 一次收口 5 处 `dameng` 漏网（`271f520`，`eslint` + `tsc` + 224 文件 2505 条单测全绿）
+  - 在 `src/contracts/sqlDialectTraits.ts` 建立编译期穷尽检查的 `SQL_DIALECT_TRAITS` 与 `sqlDialectFromDatabaseType`，集中收敛并修复 `historyRedaction.ts`（达梦 `IDENTIFIED BY` 口令脱敏）、`resultEditability.ts`（无引号表名折叠大写）、`formatSql.ts`（`DatabaseType.Dameng` 映射 `plsql`）、`sqlCompletionSchema.ts`（`PLSQL` 方言与大写用户名默认 Schema）、`rowStatements.ts`（全默认值显式 `DEFAULT` 插入）与 `sqlIdentifiers.ts`，并补齐 `sqlDialectTraits.test.ts` 回归单测。
+- [x] H11（B1 + B2 + B6）修复 Oracle/达梦阻塞析构、达梦真流式与取消、CLI 双连（`56ba814`，`pool_registry` 4/4 + `--features odbc` 与 `--no-default-features` 双 `clippy -D warnings` + `cargo fmt --check` 全绿）
+  - 为 `OraclePool`/`OracleConnection` 与 `DamengPool`/`DamengConnection` 补齐 `Drop` 后台线程释放，并将 Oracle `BreakOnDrop` 移出 Tokio 工作线程；`PoolRegistry::insert` 与 `IdleConnections::put` 改为锁外析构/退还多余连接并补防持锁 Drop 回归单测；重构达梦 `execute_streaming_with_params` 为有界 `mpsc::channel` 边读边发并新增互斥锁保护的 ODBC `SQLCancel` 后台取消钩子；`OraclePool`/`DamengPool`/`SqlServerPool::acquire_for_session` 优先复用新鲜 `idle` 连接消除 CLI 双连。
+- [x] H12（B3 + B4）消除 `QuerySessionState` 跨标签队头阻塞 + 草稿 `test_connection` 隧道/池零泄漏与退出清理（`ef17229`，`query_session` 8/8 + 双特性 `clippy -D warnings` + `cargo fmt --check` 全绿）
+  - `SessionEntry` 维护 `in_transaction: Arc<AtomicBool>` 无锁镜像，`transaction_open_on` 改用 `try_lock` + 无锁回退彻底消除慢查询队头阻塞（含超时回归门）；`test_connection` 识别未保存草稿（`id.is_empty()`），改用临时 SSH 隧道与瞬态连接池测试后立即关闭拆除；`ssh_tunnel::ensure` 并发覆盖前 `disconnect()` 旧隧道；`delete_connection` 与 `lib.rs` `RunEvent::Exit` 统一清理隧道。
+- [x] H13（B5）将 Keychain / `ConnectionService` 与大文件同步 I/O 移出 Tokio Worker（`af40ead`，`commands::` 26/26 + 双特性 `clippy -D warnings` + `cargo fmt` 全绿）
+  - `ConnectionServiceState` 升级为 `Arc<Mutex<Option<ConnectionService>>>`，新增 `with_service_blocking` / `with_existing_service_blocking` 将连接配置、钥匙串读写与 `backup_database`/`agent_cli_info`/`read_agent_audit_log` 全部迁入 `spawn_blocking`；`ai_save_key`/`ai_has_key` 改为 `async` 并与 `ai_complete` 钥匙串读取、`file_commands` 8 MB 读写及 base64/UTF-16 编解码一并移入阻塞池。
+
+### 第三批（Batch 3 · P1/P2 纵深防线加固与按变化边界结构减债，`H14–H18`）
+
+- [x] H14（S7 + S9 + S10 + S11）只读纵深防线全面补齐（SQL / ClickHouse / Redis / MongoDB / DuckDB 备份）（`df03b48`，44/44 单元测试 + 双特性 `clippy -D warnings` + `cargo fmt` 全绿）
+  - `read_only_gate.rs` 拒绝 PG `U&"..."` Unicode 转义标识符、扩展高危副作用函数族（`lo_*`/`pg_ls_*`/`pg_stat_reset*`/MSSQL `OPENROWSET`/`OPENDATASOURCE`）与 Oracle 包前缀调用（`UTL_*`/`DBMS_*`/`HTTPURITYPE`/`URIFACTORY`）；`clickhouse.rs` `enforce_read_only` 改为 fail-closed（仅明确 `1`/`2` 时省略 `readonly=1`）；`cli/redis.rs` 新增显式高危黑名单拦截 `CONFIG`/`ACL`/`DEBUG`/`KEYS`/`EVAL_RO`/`EVALSHA_RO`/`FCALL_RO`/`CLIENT`；`cli/mongo.rs` 递归扫描全部 BSON 拦截 `$where`/`$function`/`$accumulator` 及嵌套 `$out`/`$merge`；`backup.rs` `replay_duckdb_schema` 强制锁死 `memory_limit=128MB`、`enable_external_access=false` 与 `lock_configuration=true`。
+- [x] H15（S8 + S12）AI 端点 SSRF/明文/提示词脱敏加固 + Redis Pickle 查看器防卡死/防栈溢出（`10f7244`，Rust `ai`+`ai_commands` 11/11 + 双特性 `clippy -D warnings`、前端 `eslint` + `tsc` + 50/50 单测全绿）
+  - `services/ai.rs` 与 `commands/ai_commands.rs` 强制非本机回环 AI 端点使用 `https://`、禁用 HTTP 重定向、禁止 URL 凭据，并在钥匙串中将 API Key 绑定至保存时的端点 Origin（无损兼容旧版未绑定 Key）；`historyRedaction.ts` 导出 `redactSensitiveText`，`aiSqlAssist.ts` 组装 SQL/报错/EXPLAIN 提示词前统一脱敏；`pickle.ts` 限制操作码步数与格式化节点/字符/深度硬上限、向 `temporal()` 透传 `open` 集、`pickleView` 兜底 `try/catch` 并补齐 Billion-Laughs DAG 与自引用回归测试。
+- [x] H16（P2-1 + P2-3）后端 10 个 `PoolRegistry` 收拢为 `EngineRegistries` 与微并发清理（`6d40234`，96/96 单元测试 + 默认/`--no-default-features`/`--features odbc` 三特性 `clippy -D warnings` + `cargo fmt` 全绿）
+  - 合并 10 类引擎注册表为单一 `EngineRegistries`，消除 `lib.rs`、`connection_commands` 与 `database_commands` 重复状态声明与 7 处 `too_many_arguments`，去除 `ResolvedPool::resolve` 多余 `async` 并抽取 `resolve_connection_string` 序言；修复 `redis.rs` 锁外建连、`opengauss_relay.rs` PBKDF2 迁入 `spawn_blocking`、`LocalAnalyticsRegistry` 锁外析构 DuckDB 会话、`cli/mod.rs` `with_keychain_deadline` 改用 `Condvar` 消除 MCP 睡线程堆积；`ALL_DATABASE_TYPES` 补全 `Dameng` 并顺带补齐 `explain.rs` 的 `PlanDialect::Dameng` 执行计划与缩进树解析。
+- [x] H17（P2-2）按真实变化边界拆分 3 个多职责 Rust 文件（`5fb3244`，112/112 单元测试 + 默认/`--no-default-features`/`--features odbc` 三特性 `clippy -D warnings` + `cargo fmt` 全绿）
+  - `services/query_executor.rs` 抽出 `services/sqlx_decode.rs`（793 行）隔离 SQLite/MySQL/PostgreSQL `sqlx` 解码与格式化；`services/local_analytics.rs` 拆为目录模块 `local_analytics/{mod,ingest,export,profile}.rs`；`cli/mod.rs` 拆出 `cli/{runtime,catalog,query}.rs`。
+- [x] H18（P2-4 + P2-5）前端热点减负、契约护栏与 Low 级安全加固（`8cb9942`，`eslint` + `tsc` + 224 文件 2513 条单测 + Rust 契约单测 42/42 全绿）
+  - 消除 `queryStore` 对 `connectionStore` 的跨 Store 循环依赖，在 `DatabaseSession` 与 `QueryExecutionSessionSnapshot` 中携带 `profileName`/`dbType` 快照；`queryStore` 合并 3 份流式 `Channel` 循环为统一 `streamExecuteQuery`、复用模块级 `TextEncoder` 并新增 64 MB 跨标签大结果集 LRU 淘汰上限；`TableDataViewer` 按连接与方言缓存 `serverVersion` 消除切表重查；扩展 `fixtures/contract-conformance.json` 双向钉住 `QueryColumnMetadata`/`DriverQueryColumn` 与 `TransactionState`/`TransactionContext` 字段集合；补齐 `svgExport` 背景属性转义、`.ncx` XML 数值实体码点上限（`<= 0x10ffff`）、`rowStatements` PostgreSQL/ClickHouse 列类型声明防注入校验（并核验 `ConnectionForm` 已对 `preferred`/`required` TLS 展示 MITM 提示），同步将 `dameng.rs` 取消报错文案收口为英文以过 `backendError.test.ts` 门禁。
+
+---
+
 ## 「当前版本不做」的保留项与可执行重估条件
 
 ### 架构与性能重估门
@@ -215,6 +267,11 @@
 - **v0.3 Windows ARM64 原生包**：当前靠系统转译跑 x64 包（且 Oracle 无 Windows ARM64 Instant Client）；重估条件：有 ARM Windows 用户反馈转译慢或装不上。
 - **5.4 带 Oracle 的 Linux AppImage 不发**：重估条件：AppImage 打包能排除 `instantclient` 目录不改 ELF。
 - **每种数据库独立能力声明表**：重估条件：出现第一个前后端能力判断不一致的缺陷，届时做共用语料（仿 `fixtures/export-conformance.json`）。
+- **用 `Box<dyn DatabaseDriver>` 取代 `SessionConnection`/`PoolRef` 枚举**（v1.3.3 审计确认不做）：静态枚举带来编译器穷尽检查、零堆分配、无痛访问方言原语；重估条件：新增一种数据库引擎在 `query_executor`+`commands` 中产生重复样板且出现外部动态插件机制（第 3 类独立驱动扩展诉求）时。
+- **将 117 个 Tauri 命令合并为通用 RPC 分发器**（v1.3.3 审计确认不做）：当前按域清晰分组且保持端到端静态类型；重估条件：命令总数超过 180 且参数校验/鉴权出现无法靠 `EngineRegistries` 复用的跨命令样板时。
+- **按行数盲拆高内聚大文件**（`schema_metadata.rs` / `explain.rs` / 各独立引擎文件 / `ConnectionForm.tsx` 等大弹窗，v1.3.3 审计确认不做）：重估条件：某文件在连续 30 次提交中因两个互不相干的功能方向产生合并冲突 ≥ 3 次时。
+- **替换 Zustand / 重写 Feature 门禁 / 改动现有 5 处 `unsafe`**（v1.3.3 审计确认不做）：311 处订阅 0 裸调用、uninhabited enum 零成本、`unsafe` 均有充分 `SAFETY` 约束；重估条件：`cargo clippy` / Miri 或新增平台目标暴露真实违例时。
+- **对话框返回路径的会话级路径令牌（dialog-brokered path token）**（`H5` 完成统一 `path_guard` 后作为下一档可选加固保留）：重估条件：需要进一步把渲染层受损面收紧到「零任意路径读写」或引入用户脚本/插件能力时。
 
 ### 方言、工作区与编辑器长尾重估门（触发条件均为「收到真实用户反馈」）
 

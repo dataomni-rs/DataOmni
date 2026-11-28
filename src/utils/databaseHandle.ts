@@ -82,20 +82,19 @@ export async function openDatabase(connectionString: string): Promise<DatabaseHa
     };
   }
   if (opensOwnPool(connectionString)) {
-    // 不用插件的 load：它给空闲连接留 10 分钟（经 VPN / NAT 会被悄悄丢掉），
-    // 库不存在时还会替你建一个（SQLite 则相当于任意文件创建）
-    await invoke('open_database_pool', { connectionString });
+    // 池子已在后端 `test_connection` 按无口令连接串开好并登记进 `SqlxRegistry`（H7 / S2），
+    // 前端不再传原始连接串开池子
     return backendHandle(connectionString, 'sqlx_select', 'close_sqlx_pool');
   }
   throw new Error(`Unsupported database connection scheme: ${connectionString}`);
 }
 
 /**
- * 池子是 `test_connection` 在后端登记的那几家（与 `test_connection` 里的 `registry.insert` 一致）。
- * 登记按连接串，关句柄会把这个串的池子整个摘掉——不管刚才是谁登记的。
+ * 全部 12 类引擎的池子均由 `test_connection` 在后端按无口令连接串登记。
+ * 关句柄会把这个串的池子整个摘掉——不管刚才是谁登记的。
  */
 function poolRegisteredByTestConnection(connectionString: string): boolean {
-  return [
+  return opensOwnPool(connectionString) || [
     SQL_SERVER_SCHEME, ORACLE_SCHEME, DAMENG_SCHEME, DUCKDB_SCHEME, CLICKHOUSE_SCHEME, MONGODB_SCHEME,
     MONGODB_SRV_SCHEME, REDIS_SCHEME, NEO4J_SCHEME, ELASTICSEARCH_SCHEME
   ].some((scheme) => connectionString.startsWith(scheme));

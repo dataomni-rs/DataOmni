@@ -234,6 +234,9 @@ export default function DatabaseExplorer({
   const cachedMetadata = databaseMetadata[connectionId];
   const isMetadataStale = cachedMetadata && (Date.now() - cachedMetadata.lastUpdated) > METADATA_TTL_MS;
 
+  const metadataRequestSeqRef = useRef(0);
+  const prevSchemaVersionRef = useRef(schemaVersion);
+
   // 加载数据库元数据
   const loadDatabaseMetadata = async (forceRefresh = false) => {
     if (!database || !connection) return;
@@ -260,7 +263,8 @@ export default function DatabaseExplorer({
       }
       return;
     }
-    
+
+    const seq = ++metadataRequestSeqRef.current;
     setLoading(true);
     setError(null);
     
@@ -275,6 +279,7 @@ export default function DatabaseExplorer({
               : connection.db_type === DatabaseType.Elasticsearch ? 'elasticsearch_list_objects' : 'mongodb_list_collections',
           { connectionString, timeoutMs: queryTimeoutMs }
         );
+        if (seq !== metadataRequestSeqRef.current) return;
         const objects = normalizeObjectRows(rows);
         setDatabaseMetadata(connectionId, { objects, lastUpdated: Date.now() });
         setExpandedNodes(new Set(defaultExpandedKeys(
@@ -286,6 +291,7 @@ export default function DatabaseExplorer({
       const queries = await invoke<ObjectCatalogQueries>('get_object_catalog_queries', {
         dbType: connection.db_type
       });
+      if (seq !== metadataRequestSeqRef.current) return;
 
       // 没有库名时 `table_schema = NULL` 恒不匹配，会安静地查出 0 行，
       // 让人以为库是空的。这里直接说清楚。
@@ -299,6 +305,7 @@ export default function DatabaseExplorer({
       );
 
       const rows = await database.select(queries.objects, params);
+      if (seq !== metadataRequestSeqRef.current) return;
       const objects = normalizeObjectRows(Array.isArray(rows) ? rows : []);
 
       setDatabaseMetadata(connectionId, { objects, lastUpdated: Date.now() });
@@ -306,27 +313,25 @@ export default function DatabaseExplorer({
       const tree = buildObjectTree(objects, showsSchemaLevel(connection.db_type), kindLabel, trailingSchemas(connection.db_type));
       setExpandedNodes(new Set(defaultExpandedKeys(tree)));
     } catch (err) {
+      if (seq !== metadataRequestSeqRef.current) return;
       console.error('加载数据库元数据失败:', err);
       // 原始错误必须可见：只说「失败」等于没说，用户和我们都无从下手
       setError(describeError(err));
     } finally {
-      setLoading(false);
+      if (seq === metadataRequestSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
-  // 组件挂载时加载数据
+  // 组件挂载或连接就绪时加载数据：仅在 schemaVersion 递增（执行过 DDL）时绕过 5 分钟缓存（H9 / F1）
   useEffect(() => {
+    const schemaChanged = prevSchemaVersionRef.current !== schemaVersion;
+    prevSchemaVersionRef.current = schemaVersion;
     if (connectionId && database && connectionReady) {
-      console.log('🔄 DatabaseExplorer: 连接准备就绪，重新加载元数据:', connectionId);
-      // 添加短暂延时确保数据库连接对象已完全同步
-      const timeoutId = setTimeout(() => {
-        loadDatabaseMetadata(true); // 强制刷新，确保获取最新数据
-      }, 100);
-      
-      return () => clearTimeout(timeoutId);
+      void loadDatabaseMetadata(schemaChanged);
     }
-    // schemaVersion：我们自己执行过 DDL 之后重新拉一遍，新建的表立刻出现在树里
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在连接切换、连接就绪或 schemaVersion 变化时强制刷新；loadDatabaseMetadata 写缓存会触发重渲染，放入依赖会循环拉取
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在连接切换、连接就绪或 schemaVersion 变化时加载；loadDatabaseMetadata 写缓存会触发重渲染，放入依赖会循环拉取
   }, [connectionId, connectionReady, schemaVersion]);
   
   // 过期的那一刻不会自己触发渲染；下一次渲染发现过期了就重新拉，旧列表在拉的

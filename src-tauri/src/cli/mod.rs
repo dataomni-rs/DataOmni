@@ -9,6 +9,7 @@
 //! Agent，界面的语言设置在 WebView 里，这里读不到。
 
 mod audit;
+mod catalog;
 mod dictionary;
 mod diff;
 mod elasticsearch;
@@ -16,8 +17,14 @@ mod format;
 mod mcp;
 mod mongo;
 mod neo4j;
+mod query;
 mod redis;
+mod runtime;
 mod session;
+
+use catalog::*;
+use query::*;
+use runtime::*;
 
 use crate::models::{ConnectionProfile, DatabaseType};
 use crate::services::connection_service::{app_config_dir, ConnectionService, APP_IDENTIFIER};
@@ -507,87 +514,6 @@ fn dispatch(args: &[String], dirs: &Dirs) -> Result<Output, CliError> {
   }
 }
 
-struct QueryArguments {
-  connection: String,
-  sql: String,
-  row_limit: usize,
-  timeout: Duration,
-  params: std::collections::HashMap<String, Value>,
-}
-
-/// `query` 与 `explain` 的参数。`usage` 是那条命令的用法；没有 `--limit` / `--param` 的命令传
-/// `false`，给了就报错，而不是悄悄不理
-fn parse_statement_arguments(
-  rest: &[String],
-  usage: &str,
-  accepts_limit: bool,
-  accepts_params: bool,
-) -> Result<QueryArguments, CliError> {
-  let mut positional = Vec::new();
-  let mut row_limit = DEFAULT_ROW_LIMIT;
-  let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
-  let mut params = std::collections::HashMap::new();
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    match argument.as_str() {
-      "--limit" if accepts_limit => {
-        row_limit = number_after("--limit", iter.next(), 1, MAX_ROW_LIMIT as u64)? as usize
-      }
-      "--timeout" => {
-        timeout_seconds = number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?
-      }
-      "--param" if accepts_params => {
-        let raw = iter.next().ok_or_else(|| CliError::usage("--param takes name=value"))?;
-        let Some((key, value)) = raw.split_once('=') else {
-          return Err(CliError::usage("--param takes name=value"));
-        };
-        if key.is_empty() {
-          return Err(CliError::usage("--param name cannot be empty"));
-        }
-        params.insert(key.to_string(), Value::String(value.to_string()));
-      }
-      "--param-null" if accepts_params => {
-        let key = iter
-          .next()
-          .filter(|name| !name.is_empty())
-          .ok_or_else(|| CliError::usage("--param-null takes a parameter name"))?;
-        params.insert(key.clone(), Value::Null);
-      }
-      "--params-json" if accepts_params => {
-        let raw =
-          iter.next().ok_or_else(|| CliError::usage("--params-json takes a JSON object"))?;
-        let parsed: Value = serde_json::from_str(raw)
-          .map_err(|error| CliError::usage(format!("--params-json is not valid JSON: {error}")))?;
-        let Value::Object(map) = parsed else {
-          return Err(CliError::usage("--params-json must be a JSON object"));
-        };
-        for (key, value) in map {
-          if key.is_empty() {
-            return Err(CliError::usage("--params-json parameter name cannot be empty"));
-          }
-          if !matches!(value, Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) {
-            return Err(CliError::usage(format!(
-              "parameter {key} must be a string, number, boolean or null"
-            )));
-          }
-          params.insert(key, value);
-        }
-      }
-      _ => positional.push(argument.clone()),
-    }
-  }
-  let [connection, sql] =
-    <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
-  let sql = read_argument(&sql)?;
-  Ok(QueryArguments {
-    connection,
-    sql,
-    row_limit,
-    timeout: Duration::from_secs(timeout_seconds),
-    params,
-  })
-}
-
 /// `-` 表示从标准输入读：语句、条件、管道都可能长得不便写在命令行上
 fn read_argument(text: &str) -> Result<String, CliError> {
   if text != "-" {
@@ -605,204 +531,6 @@ fn number_after(flag: &str, value: Option<&String>, min: u64, max: u64) -> Resul
     .and_then(|value| value.parse::<u64>().ok())
     .filter(|number| (min..=max).contains(number))
     .ok_or_else(|| CliError::usage(format!("{flag} takes a number from {min} to {max}")))
-}
-
-fn query(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let arguments = parse_statement_arguments(rest, USAGE_QUERY, true, true)?;
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, &arguments.connection)?;
-  let started = Instant::now();
-  let outcome = run_query(&service, &profile, &arguments, config_dir);
-  // 审计只记参数化之前的原始 SQL 长度与 SHA-256，参数值绝不进日志（CM3 安全红线）
-  audit::record(log_dir, "query", &profile.name, &arguments.sql, &outcome, started.elapsed());
-  let result = outcome?;
-  Ok(query_output(&profile, result, started.elapsed()))
-}
-
-fn run_query(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  arguments: &QueryArguments,
-  config_dir: Option<&Path>,
-) -> Result<QueryExecutionResult, CliError> {
-  // 先过语句门、再看类型与参数绑定，最后才读口令：被拒的语句不该换来一次钥匙串弹框
-  read_only_gate::check(&arguments.sql)
-    .map_err(|refusal| CliError::refused(refusal.to_string()))?;
-  if !session::supports(&profile.db_type) {
-    return Err(unsupported(&profile.db_type));
-  }
-  let rewritten = crate::services::named_parameters::rewrite_named_parameters(
-    &arguments.sql,
-    &profile.db_type,
-    &arguments.params,
-  )
-  .map_err(|error| CliError::usage(error.to_string()))?;
-  let resolved = resolve_verified(service, profile)?;
-  let run = session::run_read_only_with_params(
-    &resolved,
-    &rewritten.sql,
-    &rewritten.params,
-    arguments.row_limit,
-    config_dir,
-  );
-  block_on_within(arguments.timeout, "the statement", async { run.await.map_err(session_error) })
-}
-
-fn explain(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let arguments = parse_statement_arguments(rest, USAGE_EXPLAIN, false, false)?;
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, &arguments.connection)?;
-  let started = Instant::now();
-  let outcome = run_explain(&service, &profile, &arguments, config_dir);
-  audit::record(log_dir, "explain", &profile.name, &arguments.sql, &outcome, started.elapsed());
-  let plan = outcome?;
-  Ok(json!({
-    "schema": OUTPUT_SCHEMA,
-    "connection": profile.name,
-    "plan": plan,
-    "elapsed_ms": started.elapsed().as_millis() as u64,
-  }))
-}
-
-fn run_explain(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  arguments: &QueryArguments,
-  config_dir: Option<&Path>,
-) -> Result<crate::services::explain::QueryPlan, CliError> {
-  // 包进 EXPLAIN 之前先过语句门：门只放读语句，EXPLAIN 永远不带 ANALYZE
-  read_only_gate::check(&arguments.sql)
-    .map_err(|refusal| CliError::refused(refusal.to_string()))?;
-
-  if !session::supports(&profile.db_type) {
-    return Err(unsupported(&profile.db_type));
-  }
-  let resolved = resolve_verified(service, profile)?;
-  block_on_within(arguments.timeout, "the plan", async {
-    let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-    let plan = opened.explain(&resolved.db_type, &arguments.sql).await;
-    opened.close().await;
-    plan.map_err(session_error)
-  })
-}
-
-fn test(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let [connection] = rest else {
-    return Err(CliError::usage(USAGE_TEST));
-  };
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, connection)?;
-  let started = Instant::now();
-  let outcome = run_test(&service, &profile, config_dir);
-  audit::record(log_dir, "test", &profile.name, "", &outcome, started.elapsed());
-  outcome?;
-  Ok(json!({
-    "schema": OUTPUT_SCHEMA,
-    "connection": profile.name,
-    "ok": true,
-    "elapsed_ms": started.elapsed().as_millis() as u64,
-  }))
-}
-
-fn run_test(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  config_dir: Option<&Path>,
-) -> Result<(), CliError> {
-  if !session::supports(&profile.db_type) {
-    return Err(unsupported(&profile.db_type));
-  }
-  let resolved = resolve_verified(service, profile)?;
-  let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
-  block_on_within(timeout, "the connection", async {
-    match session::open(&resolved, config_dir).await {
-      Ok(opened) => {
-        opened.close().await;
-        Ok(())
-      }
-      Err(failure) => {
-        let mut error = session_error(failure);
-        // 只探网络库的主机与端口：文件库的报错里已经有路径与系统给的原因；经隧道的连接
-        // 探到的是隧道后面的地址，从这台机器本来就到不了，结论会是错的
-        let networked = !matches!(profile.db_type, DatabaseType::SQLite | DatabaseType::DuckDB);
-        if error.kind == "connect" && networked && profile.ssh_tunnel.is_none() {
-          let steps = crate::services::diagnose(profile).await.steps;
-          error.diagnosis = serde_json::to_value(steps).ok();
-        }
-        Err(error)
-      }
-    }
-  })
-}
-
-fn dictionary(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<String, CliError> {
-  let [connection] = rest else {
-    return Err(CliError::usage(USAGE_DICTIONARY));
-  };
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, connection)?;
-  let started = Instant::now();
-  let outcome = run_dictionary(&service, &profile, config_dir);
-  audit::record(log_dir, "dictionary", &profile.name, "", &outcome, started.elapsed());
-  outcome
-}
-
-fn run_dictionary(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  config_dir: Option<&Path>,
-) -> Result<String, CliError> {
-  let queries = crate::services::er_diagram_queries(&profile.db_type)
-    .filter(|_| session::supports(&profile.db_type))
-    .ok_or_else(|| unsupported(&profile.db_type))?;
-  let database = profile.database.clone().unwrap_or_default();
-  // 同 `list_objects`：没有库名时 MySQL 的目录条件恒不匹配，字典会是空的，像是库里没有表
-  if queries.parameter_count > 0 && database.is_empty() {
-    return Err(CliError::usage("this connection has no database name; set one in DataOmni"));
-  }
-  let resolved = resolve_verified(service, profile)?;
-  let params = vec![Value::String(database); usize::from(queries.parameter_count)];
-  let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
-  let (columns, foreign_keys) = block_on_within(timeout, "the catalog", async {
-    let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-    let columns = opened.select(queries.columns, params.clone()).await;
-    let foreign_keys = match columns {
-      Ok(_) => opened.select(queries.foreign_keys, params).await,
-      Err(_) => Ok(Vec::new()),
-    };
-    opened.close().await;
-    Ok((columns.map_err(session_error)?, foreign_keys.map_err(session_error)?))
-  })?;
-  let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-  let tables = dictionary::tables_from_rows(&columns);
-  let links = dictionary::links_from_rows(&foreign_keys);
-  let semantics = config_dir.and_then(|dir| {
-    crate::services::connection_semantics::read_semantics_for_agent(dir, &profile.id)
-  });
-  Ok(dictionary::render_with_semantics(
-    &profile.name,
-    dictionary::dialect(profile),
-    &date,
-    &tables,
-    &links,
-    semantics.as_deref(),
-  ))
 }
 
 fn mongo(
@@ -941,1232 +669,6 @@ fn run_es(
   )
 }
 
-/// 导出最多等多久：整表导出要几分钟，语句的默认 30 秒不够
-const DEFAULT_EXPORT_TIMEOUT_SECONDS: u64 = 300;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliExportFormat {
-  Csv,
-  Json,
-  Parquet,
-}
-
-impl CliExportFormat {
-  const fn as_str(self) -> &'static str {
-    match self {
-      Self::Csv => "csv",
-      Self::Json => "json",
-      Self::Parquet => "parquet",
-    }
-  }
-}
-
-struct ExportArguments {
-  connection: String,
-  sql: String,
-  out: PathBuf,
-  format: CliExportFormat,
-  options: crate::services::export_writer::ExportOptions,
-  timeout: Duration,
-}
-
-struct CliExportResult {
-  path: String,
-  rows_written: u64,
-  bytes_written: u64,
-  truncated: bool,
-}
-
-fn parse_export_arguments(rest: &[String]) -> Result<ExportArguments, CliError> {
-  use crate::services::export_writer::{ExportFormat, ExportOptions};
-  let usage = USAGE_EXPORT;
-  let mut positional = Vec::new();
-  let mut out = None;
-  let mut format = CliExportFormat::Csv;
-  let mut options = ExportOptions {
-    format: ExportFormat::Csv,
-    delimiter: ",".to_string(),
-    include_header: true,
-    null_text: String::new(),
-    byte_order_mark: false,
-    sql_table: String::new(),
-    sql_dialect: None,
-    sql_computed_columns: Vec::new(),
-    sql_identity_columns: Vec::new(),
-    sql_sequence_columns: Vec::new(),
-  };
-  let mut timeout_seconds = DEFAULT_EXPORT_TIMEOUT_SECONDS;
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    let mut value = |flag: &str| {
-      iter.next().cloned().ok_or_else(|| CliError::usage(format!("{flag} takes a value")))
-    };
-    match argument.as_str() {
-      "--out" => out = Some(PathBuf::from(value("--out")?)),
-      // `sql` 要知道哪些是计算列、自增列与序列（界面另查表的元数据），这一版不做
-      "--format" => match value("--format")?.as_str() {
-        "csv" => {
-          format = CliExportFormat::Csv;
-          options.format = ExportFormat::Csv;
-        }
-        "json" => {
-          format = CliExportFormat::Json;
-          options.format = ExportFormat::Json;
-        }
-        "parquet" => {
-          format = CliExportFormat::Parquet;
-        }
-        other => {
-          return Err(CliError::usage(format!("--format is csv, json or parquet, got {other}")))
-        }
-      },
-      "--delimiter" => options.delimiter = value("--delimiter")?,
-      "--null" => options.null_text = value("--null")?,
-      "--no-header" => options.include_header = false,
-      "--bom" => options.byte_order_mark = true,
-      "--timeout" => {
-        timeout_seconds = number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?
-      }
-      _ => positional.push(argument.clone()),
-    }
-  }
-  let [connection, sql] =
-    <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
-  let out = out.ok_or_else(|| CliError::usage(usage))?;
-  // 不覆盖：Agent 写错一个路径就会盖掉人的文件
-  if out.exists() {
-    return Err(CliError::usage(format!("{} already exists; choose another path", out.display())));
-  }
-  Ok(ExportArguments {
-    connection,
-    sql: read_argument(&sql)?,
-    out,
-    format,
-    options,
-    timeout: Duration::from_secs(timeout_seconds),
-  })
-}
-
-fn export(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let arguments = parse_export_arguments(rest)?;
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, &arguments.connection)?;
-  let started = Instant::now();
-  let outcome = run_export(&service, &profile, &arguments, config_dir);
-  audit::record(log_dir, "export", &profile.name, &arguments.sql, &outcome, started.elapsed());
-  let summary = outcome?;
-  let mut output = json!({
-    "schema": OUTPUT_SCHEMA,
-    "connection": profile.name,
-    "format": arguments.format.as_str(),
-    "file": summary.path,
-    "rows": summary.rows_written,
-    "bytes": summary.bytes_written,
-    "elapsed_ms": started.elapsed().as_millis() as u64,
-  });
-  if arguments.format == CliExportFormat::Parquet {
-    output["truncated"] = json!(summary.truncated);
-  }
-  Ok(output)
-}
-
-fn run_export(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  arguments: &ExportArguments,
-  config_dir: Option<&Path>,
-) -> Result<CliExportResult, CliError> {
-  read_only_gate::check(&arguments.sql)
-    .map_err(|refusal| CliError::refused(refusal.to_string()))?;
-  if !session::supports(&profile.db_type) {
-    return Err(unsupported(&profile.db_type));
-  }
-  let resolved = resolve_verified(service, profile)?;
-  match arguments.format {
-    CliExportFormat::Csv | CliExportFormat::Json => {
-      let summary = block_on_within(arguments.timeout, "the export", async {
-        let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-        let summary =
-          opened.export(&arguments.sql, &arguments.out, arguments.options.clone()).await;
-        opened.close().await;
-        summary.map_err(session_error)
-      })?;
-      Ok(CliExportResult {
-        path: summary.path,
-        rows_written: summary.rows_written,
-        bytes_written: summary.bytes_written,
-        truncated: false,
-      })
-    }
-    CliExportFormat::Parquet => {
-      use crate::services::local_analytics::{
-        create_result_session, export_parquet_from_session, MAX_ANALYTICS_ROWS,
-      };
-      let query_result = block_on_within(arguments.timeout, "the export", async {
-        session::run_read_only(&resolved, &arguments.sql, MAX_ANALYTICS_ROWS, config_dir)
-          .await
-          .map_err(session_error)
-      })?;
-      let QueryExecutionResult::Rows { columns, column_metadata, rows, truncated, .. } =
-        query_result
-      else {
-        return Err(CliError::usage("the statement returned no rows to export"));
-      };
-      let (col_inputs, matrix) = result_to_analytics_inputs(&columns, &column_metadata, &rows);
-      let analytics =
-        create_result_session(&col_inputs, &matrix, MAX_ANALYTICS_ROWS).map_err(|error| {
-          CliError {
-            exit: Exit::Database,
-            kind: "analytics",
-            message: error.to_string(),
-            diagnosis: None,
-          }
-        })?;
-      let parquet =
-        export_parquet_from_session(&analytics, None, &arguments.out).map_err(|error| {
-          CliError {
-            exit: Exit::Database,
-            kind: "analytics",
-            message: error.to_string(),
-            diagnosis: None,
-          }
-        })?;
-      Ok(CliExportResult {
-        path: arguments.out.to_string_lossy().into_owned(),
-        rows_written: parquet.row_count,
-        bytes_written: parquet.bytes,
-        truncated: truncated || analytics.is_truncated(),
-      })
-    }
-  }
-}
-
-fn result_to_analytics_inputs(
-  columns: &[String],
-  column_metadata: &[crate::services::query_executor::QueryColumnMetadata],
-  rows: &[crate::services::query_executor::QueryRow],
-) -> (Vec<crate::services::local_analytics::AnalyticsColumnInput>, Vec<Vec<Value>>) {
-  let col_inputs = columns
-    .iter()
-    .enumerate()
-    .map(|(index, name)| {
-      let meta = column_metadata.get(index);
-      crate::services::local_analytics::AnalyticsColumnInput {
-        name: name.clone(),
-        logical_type: meta.map(|m| m.logical_type.clone()),
-        database_type: meta.map(|m| m.database_type.clone()),
-      }
-    })
-    .collect();
-  let matrix = rows
-    .iter()
-    .map(|row| columns.iter().map(|col| row.get(col).cloned().unwrap_or(Value::Null)).collect())
-    .collect();
-  (col_inputs, matrix)
-}
-
-enum ProfileTarget {
-  Query { connection: String, sql: String, timeout: Duration },
-  LocalFile { path: PathBuf },
-}
-
-struct ProfileArguments {
-  target: ProfileTarget,
-  row_limit: usize,
-}
-
-fn parse_profile_arguments(rest: &[String]) -> Result<ProfileArguments, CliError> {
-  use crate::services::local_analytics::MAX_ANALYTICS_ROWS;
-  let usage = USAGE_PROFILE;
-  let mut positional = Vec::new();
-  let mut file: Option<PathBuf> = None;
-  let mut row_limit = DEFAULT_PROFILE_ROW_LIMIT;
-  let mut timeout_seconds: Option<u64> = None;
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    match argument.as_str() {
-      "--file" => {
-        let path = iter.next().cloned().ok_or_else(|| CliError::usage("--file takes a path"))?;
-        if file.is_some() {
-          return Err(CliError::usage(usage));
-        }
-        file = Some(PathBuf::from(path));
-      }
-      "--limit" => {
-        row_limit = number_after("--limit", iter.next(), 1, MAX_ANALYTICS_ROWS as u64)? as usize
-      }
-      "--timeout" => {
-        timeout_seconds = Some(number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?)
-      }
-      flag if flag.starts_with("--") => {
-        return Err(CliError::usage(format!("unknown option {flag}; {usage}")))
-      }
-      _ => positional.push(argument.clone()),
-    }
-  }
-  if let Some(path) = file {
-    if !positional.is_empty() || timeout_seconds.is_some() {
-      return Err(CliError::usage(usage));
-    }
-    return Ok(ProfileArguments { target: ProfileTarget::LocalFile { path }, row_limit });
-  }
-  let [connection, sql] =
-    <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
-  let sql = read_argument(&sql)?;
-  let timeout = Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS));
-  Ok(ProfileArguments { target: ProfileTarget::Query { connection, sql, timeout }, row_limit })
-}
-
-fn profile_command(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  use crate::services::local_analytics::{
-    create_result_session, open_local_file_session, profile_session,
-  };
-  let arguments = parse_profile_arguments(rest)?;
-  let started = Instant::now();
-  match arguments.target {
-    ProfileTarget::LocalFile { path } => {
-      if !path.is_file() {
-        return Err(CliError {
-          exit: Exit::Usage,
-          kind: "file",
-          message: format!("file not found: {}", path.display()),
-          diagnosis: None,
-        });
-      }
-      let session = open_local_file_session(&path, arguments.row_limit).map_err(|error| {
-        CliError { exit: Exit::Usage, kind: "file", message: error.to_string(), diagnosis: None }
-      })?;
-      let profile = profile_session("cli-file-profile", &session).map_err(|error| CliError {
-        exit: Exit::Database,
-        kind: "analytics",
-        message: error.to_string(),
-        diagnosis: None,
-      })?;
-      Ok(json!({
-        "schema": OUTPUT_SCHEMA,
-        "file": path.to_string_lossy(),
-        "file_kind": session.file_kind(),
-        "rows": profile.row_count,
-        "column_count": profile.column_count,
-        "truncated": session.is_truncated(),
-        "columns": profile.columns,
-        "elapsed_ms": started.elapsed().as_millis() as u64,
-      }))
-    }
-    ProfileTarget::Query { connection, sql, timeout } => {
-      let service = open_service(config_dir)?;
-      let conn_profile = find_open(&service, &connection)?;
-      let query_args = QueryArguments {
-        connection: connection.clone(),
-        sql: sql.clone(),
-        row_limit: arguments.row_limit,
-        timeout,
-        params: std::collections::HashMap::new(),
-      };
-      let outcome = run_query(&service, &conn_profile, &query_args, config_dir);
-      audit::record(log_dir, "profile", &conn_profile.name, &sql, &outcome, started.elapsed());
-      let result = outcome?;
-      let QueryExecutionResult::Rows { columns, column_metadata, rows, truncated, .. } = result
-      else {
-        return Err(CliError::usage("the statement returned no rows to profile"));
-      };
-      let (col_inputs, matrix) = result_to_analytics_inputs(&columns, &column_metadata, &rows);
-      let session =
-        create_result_session(&col_inputs, &matrix, arguments.row_limit).map_err(|error| {
-          CliError {
-            exit: Exit::Database,
-            kind: "analytics",
-            message: error.to_string(),
-            diagnosis: None,
-          }
-        })?;
-      let profile = profile_session("cli-profile", &session).map_err(|error| CliError {
-        exit: Exit::Database,
-        kind: "analytics",
-        message: error.to_string(),
-        diagnosis: None,
-      })?;
-      Ok(json!({
-        "schema": OUTPUT_SCHEMA,
-        "connection": conn_profile.name,
-        "rows": profile.row_count,
-        "column_count": profile.column_count,
-        "truncated": truncated || session.is_truncated(),
-        "columns": profile.columns,
-        "elapsed_ms": started.elapsed().as_millis() as u64,
-      }))
-    }
-  }
-}
-
-/// 本机的 CSV 文件：嗅探分隔符与编码（UTF-8，否则 gb18030），给表头、开头几行和字段数对不上的行。
-/// 不碰连接，也就不留痕
-fn csv_preview(rest: &[String]) -> Result<Value, CliError> {
-  let usage = USAGE_CSV_PREVIEW;
-  let mut path = None;
-  let mut delimiter = None;
-  let mut has_header = true;
-  let mut rows = crate::services::csv_import::PREVIEW_ROWS;
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    match argument.as_str() {
-      "--delimiter" => match iter.next().map(|text| text.as_bytes()) {
-        Some([single]) => delimiter = Some(*single),
-        _ => return Err(CliError::usage("--delimiter takes one ASCII character")),
-      },
-      "--no-header" => has_header = false,
-      "--rows" => rows = number_after("--rows", iter.next(), 1, MAX_ROW_LIMIT as u64)? as usize,
-      _ if path.is_none() => path = Some(PathBuf::from(argument)),
-      _ => return Err(CliError::usage(usage)),
-    }
-  }
-  let path = path.ok_or_else(|| CliError::usage(usage))?;
-  let preview = crate::services::csv_import::preview_csv(&path, delimiter, has_header, rows)
-    .map_err(|error| CliError {
-      exit: Exit::Usage,
-      kind: "file",
-      message: error.to_string(),
-      diagnosis: None,
-    })?;
-  let mut output = json!({ "schema": OUTPUT_SCHEMA, "file": path.to_string_lossy() });
-  if let (Value::Object(output), Ok(Value::Object(body))) =
-    (&mut output, serde_json::to_value(preview))
-  {
-    output.extend(body);
-  }
-  Ok(output)
-}
-
-struct McpRuntime {
-  runtime: tokio::runtime::Runtime,
-  tunnels: Arc<TunnelRegistry>,
-}
-
-thread_local! {
-  static ACTIVE_MCP: std::cell::RefCell<Option<Arc<McpRuntime>>> =
-    const { std::cell::RefCell::new(None) };
-}
-
-/// `mcp::serve` 期间持有的常驻 Tokio 运行时与 SSH 隧道复用池。
-/// 离开作用域时优雅断开全部活跃隧道再释放运行时。
-pub(super) struct McpSessionGuard {
-  runtime: Arc<McpRuntime>,
-}
-
-impl McpSessionGuard {
-  pub(super) fn enter() -> Result<Self, CliError> {
-    let runtime =
-      Arc::new(McpRuntime { runtime: runtime()?, tunnels: Arc::new(TunnelRegistry::default()) });
-    ACTIVE_MCP.with(|slot| {
-      *slot.borrow_mut() = Some(Arc::clone(&runtime));
-    });
-    Ok(Self { runtime })
-  }
-}
-
-impl Drop for McpSessionGuard {
-  fn drop(&mut self) {
-    ACTIVE_MCP.with(|slot| {
-      *slot.borrow_mut() = None;
-    });
-    self.runtime.runtime.block_on(self.runtime.tunnels.close_all());
-  }
-}
-
-pub(super) fn shared_mcp_tunnels() -> Option<Arc<TunnelRegistry>> {
-  ACTIVE_MCP.with(|slot| slot.borrow().as_ref().map(|mcp| Arc::clone(&mcp.tunnels)))
-}
-
-/// 在常驻 MCP 运行时或新运行时里跑完 `work`，到点没完就报超时。`what` 是报错里的主语
-fn block_on_within<T>(
-  timeout: Duration,
-  what: &str,
-  work: impl std::future::Future<Output = Result<T, CliError>>,
-) -> Result<T, CliError> {
-  let shared = ACTIVE_MCP.with(|slot| slot.borrow().clone());
-  let timed = match shared {
-    Some(mcp) => mcp.runtime.block_on(async { tokio::time::timeout(timeout, work).await }),
-    None => runtime()?.block_on(async { tokio::time::timeout(timeout, work).await }),
-  };
-  timed.map_err(|_| CliError {
-    exit: Exit::Database,
-    kind: "timeout",
-    message: format!("{what} did not finish within {} s", timeout.as_secs()),
-    diagnosis: None,
-  })?
-}
-
-fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
-  tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .map_err(|error| CliError::unavailable("runtime", error.to_string()))
-}
-
-/// 备份：PostgreSQL、MySQL / MariaDB、MongoDB 用服务端自己的工具（`pg_dump`、`mysqldump`、
-/// `mongodump`，都只读），SQLite、DuckDB 在只读打开的库上用库自己的语句，同界面（`services::backup`）。
-/// 不设时限：外部工具跑在阻塞线程里，到点丢掉 future 也停不下它，运行时收尾时照样要等它跑完
-fn backup(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let usage = USAGE_BACKUP;
-  let mut positional = Vec::new();
-  let mut out = None;
-  let mut database = None;
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    let mut value = |flag: &str| {
-      iter.next().cloned().ok_or_else(|| CliError::usage(format!("{flag} takes a value")))
-    };
-    match argument.as_str() {
-      "--out" => out = Some(PathBuf::from(value("--out")?)),
-      "--database" => database = Some(value("--database")?),
-      _ => positional.push(argument.clone()),
-    }
-  }
-  let [connection] = <[String; 1]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
-  let out = out.ok_or_else(|| CliError::usage(usage))?;
-  if out.exists() {
-    return Err(CliError::usage(format!("{} already exists; choose another path", out.display())));
-  }
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, &connection)?;
-  if database.is_some() && profile.db_type != DatabaseType::MongoDB {
-    return Err(CliError::usage("--database is for MongoDB: the database to back up"));
-  }
-  let started = Instant::now();
-  let outcome = run_backup(&service, &profile, &out, database.as_deref(), config_dir);
-  audit::record(log_dir, "backup", &profile.name, "", &outcome, started.elapsed());
-  let kind = outcome?;
-  Ok(json!({
-    "schema": OUTPUT_SCHEMA,
-    "connection": profile.name,
-    "file": out.to_string_lossy(),
-    "kind": kind,
-    "elapsed_ms": started.elapsed().as_millis() as u64,
-  }))
-}
-
-fn run_backup(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  out: &Path,
-  database: Option<&str>,
-  config_dir: Option<&Path>,
-) -> Result<crate::services::backup::BackupKind, CliError> {
-  use crate::services::backup::{backup_with_tool, BACKUP_NO_DATABASE, BACKUP_TOOL_MISSING};
-  let backup_error = |error: crate::services::QueryError| {
-    let message = error.to_string();
-    if message.starts_with(BACKUP_TOOL_MISSING) {
-      CliError::unavailable("tool", message)
-    } else if message.starts_with(BACKUP_NO_DATABASE) {
-      CliError::usage(message)
-    } else {
-      CliError { exit: Exit::Database, kind: "backup", message, diagnosis: None }
-    }
-  };
-  match profile.db_type {
-    DatabaseType::PostgreSQL | DatabaseType::MySQL | DatabaseType::MongoDB => {
-      let resolved = resolve_verified(service, profile)?;
-      runtime()?.block_on(async {
-        let (tunnels, port) = session::tunnel(&resolved)
-          .await
-          .map_err(|error| CliError::unavailable("connect", error))?;
-        let outcome = backup_with_tool(&resolved, port, out, database).await.map_err(backup_error);
-        tunnels.close().await;
-        outcome
-      })
-    }
-    DatabaseType::SQLite | DatabaseType::DuckDB => {
-      let resolved = resolve_verified(service, profile)?;
-      runtime()?.block_on(async {
-        session::backup_embedded(&resolved, config_dir, out).await.map_err(
-          |failure| match failure {
-            session::Failure::Database(error) => backup_error(error),
-            other => session_error(other),
-          },
-        )
-      })
-    }
-    _ => Err(unsupported(&profile.db_type)),
-  }
-}
-
-struct SchemaArguments {
-  connection: String,
-  table: Option<String>,
-  schema: Option<String>,
-}
-
-fn parse_schema_arguments(rest: &[String]) -> Result<SchemaArguments, CliError> {
-  let mut positional = Vec::new();
-  let mut schema = None;
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    match argument.as_str() {
-      "--schema" => {
-        schema = Some(iter.next().cloned().ok_or_else(|| CliError::usage("--schema takes a name"))?)
-      }
-      _ => positional.push(argument.clone()),
-    }
-  }
-  let usage = || CliError::usage(USAGE_SCHEMA);
-  let mut positional = positional.into_iter();
-  let connection = positional.next().ok_or_else(usage)?;
-  let table = positional.next();
-  if positional.next().is_some() || (schema.is_some() && table.is_none()) {
-    return Err(usage());
-  }
-  Ok(SchemaArguments { connection, table, schema })
-}
-
-/// 表或视图的定义原文，同界面结构页的「对象定义」：**数据库自己给的**（`SHOW CREATE TABLE`、
-/// `sqlite_master`、`DBMS_METADATA`……），不从目录重建——重建出来的看着权威、照着建却不等价
-fn ddl(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let arguments = parse_schema_arguments(rest)?;
-  let Some(table) = arguments.table.clone() else {
-    return Err(CliError::usage(USAGE_DDL));
-  };
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, &arguments.connection)?;
-  let started = Instant::now();
-  let outcome = run_ddl(&service, &profile, &table, arguments.schema.as_deref(), config_dir);
-  audit::record(log_dir, "ddl", &profile.name, &table, &outcome, started.elapsed());
-  let statements = outcome?;
-  let ddl: Vec<String> = statements
-    .iter()
-    .map(
-      |statement| {
-        if statement.ends_with(';') {
-          statement.clone()
-        } else {
-          format!("{statement};")
-        }
-      },
-    )
-    .collect();
-  Ok(
-    json!({ "schema": OUTPUT_SCHEMA, "connection": profile.name, "table": table, "ddl": ddl.join("\n\n") }),
-  )
-}
-
-fn run_ddl(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  table: &str,
-  schema: Option<&str>,
-  config_dir: Option<&Path>,
-) -> Result<Vec<String>, CliError> {
-  if !session::supports(&profile.db_type) {
-    return Err(unsupported(&profile.db_type));
-  }
-  let resolved = resolve_verified(service, profile)?;
-  let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
-  block_on_within(timeout, "the definition", async {
-    let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-    let statements = ddl_statements(&opened, &resolved.db_type, table, schema).await;
-    opened.close().await;
-    statements
-  })
-}
-
-/// 定义原文的每一条（SQLite 连着索引与触发器）。查不到就是没有这张表或视图；PostgreSQL 的表
-/// 本来就没有原文（它没有 `SHOW CREATE TABLE`），单独说
-async fn ddl_statements(
-  opened: &session::Opened,
-  db_type: &DatabaseType,
-  table: &str,
-  schema: Option<&str>,
-) -> Result<Vec<String>, CliError> {
-  use crate::services::schema_metadata::{schema_metadata_queries, DdlQuery};
-  let queries = schema_metadata_queries(db_type).ok_or_else(|| unsupported(db_type))?;
-  let ddl = queries.ddl.ok_or_else(|| unsupported(db_type))?;
-  let rows = match ddl {
-    DdlQuery::Bound { sql } => {
-      let params = if queries.parameter_count == 1 {
-        vec![Value::from(table)]
-      } else {
-        vec![Value::from(table), schema.map_or(Value::Null, Value::from)]
-      };
-      opened.select(sql, params).await
-    }
-    // 只有 MySQL 走这一种：`SHOW CREATE TABLE` 不收占位符，表名作为引用过的标识符拼进去
-    DdlQuery::Interpolated { sql } => {
-      let quote = |name: &str| format!("`{}`", name.replace('`', "``"));
-      let target = match schema {
-        Some(schema) => format!("{}.{}", quote(schema), quote(table)),
-        None => quote(table),
-      };
-      opened.select(&sql.replace("{table}", &target), Vec::new()).await
-    }
-  };
-  // MySQL 对不存在的表报 1146，当作「没有」而不是数据库错误。sqlx 给的码是 SQLSTATE（42S02），不是错误号
-  let rows = match rows {
-    Ok(rows) => rows,
-    Err(session::Failure::Database(error)) if error.code.as_deref() == Some("42S02") => Vec::new(),
-    Err(failure) => return Err(session_error(failure)),
-  };
-  // 同 `schemaObjects.ts` 的 `extractDdlStatements`：几家把原文放在不同的列里
-  let statements: Vec<String> = rows
-    .iter()
-    .filter_map(|row| {
-      ["Create Table", "Create View", "sql"]
-        .iter()
-        .find_map(|column| row[*column].as_str().map(str::trim).filter(|text| !text.is_empty()))
-        .map(str::to_string)
-    })
-    .collect();
-  if statements.is_empty() {
-    let message = if *db_type == DatabaseType::PostgreSQL {
-      format!("no view named {table}: PostgreSQL keeps no CREATE TABLE text for tables; `schema <connection> {table}` gives the columns, indexes and foreign keys")
-    } else {
-      format!("no table or view named {table}")
-    };
-    return Err(CliError { exit: Exit::Usage, kind: "not_found", message, diagnosis: None });
-  }
-  Ok(statements)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffFormat {
-  Json,
-  Markdown,
-}
-
-struct DiffArguments {
-  source: String,
-  target: String,
-  format: DiffFormat,
-  timeout: Duration,
-}
-
-fn parse_diff_arguments(rest: &[String]) -> Result<DiffArguments, CliError> {
-  let usage = USAGE_DIFF;
-  let mut positional = Vec::new();
-  let mut format = DiffFormat::Json;
-  let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
-  let mut iter = rest.iter();
-  while let Some(argument) = iter.next() {
-    match argument.as_str() {
-      "--format" => {
-        let value =
-          iter.next().ok_or_else(|| CliError::usage("--format takes json or markdown"))?;
-        format = match value.as_str() {
-          "json" => DiffFormat::Json,
-          "markdown" => DiffFormat::Markdown,
-          other => {
-            return Err(CliError::usage(format!("--format is json or markdown, got {other}")))
-          }
-        };
-      }
-      "--timeout" => {
-        timeout_seconds = number_after("--timeout", iter.next(), 1, MAX_TIMEOUT_SECONDS)?
-      }
-      flag if flag.starts_with("--") => {
-        return Err(CliError::usage(format!("unknown option {flag}; {usage}")))
-      }
-      _ => positional.push(argument.clone()),
-    }
-  }
-  let [source, target] = <[String; 2]>::try_from(positional).map_err(|_| CliError::usage(usage))?;
-  Ok(DiffArguments { source, target, format, timeout: Duration::from_secs(timeout_seconds) })
-}
-
-/// CM3 只读跨库结构差异报告：双边连接均须开放且通过凭证校验（任一不可见一律报统一的 `not_found`，不泄露哪一侧受限）。
-fn diff_command(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Output, CliError> {
-  let arguments = parse_diff_arguments(rest)?;
-  let service = open_service(config_dir)?;
-  let bilateral_not_found = || CliError {
-    exit: Exit::Usage,
-    kind: "not_found",
-    message: "one or both connections are not open to the command line".to_string(),
-    diagnosis: None,
-  };
-  let source_profile = find_open(&service, &arguments.source).map_err(|_| bilateral_not_found())?;
-  let target_profile = find_open(&service, &arguments.target).map_err(|_| bilateral_not_found())?;
-  let started = Instant::now();
-  let outcome = run_diff(&service, &source_profile, &target_profile, arguments.timeout, config_dir);
-  let label = format!("{} -> {}", source_profile.name, target_profile.name);
-  audit::record(log_dir, "diff", &label, "", &outcome, started.elapsed());
-  let report = outcome?;
-  match arguments.format {
-    DiffFormat::Markdown => Ok(Output::Markdown(diff::render_markdown(
-      &source_profile.name,
-      &target_profile.name,
-      &report,
-    ))),
-    DiffFormat::Json => Ok(Output::Json(json!({
-      "schema": OUTPUT_SCHEMA,
-      "source": source_profile.name,
-      "target": target_profile.name,
-      "same_dialect": report.same_dialect,
-      "ignore_schema": report.ignore_schema,
-      "summary": report.summary,
-      "tables_added": report.tables_added,
-      "tables_removed": report.tables_removed,
-      "tables_changed": report.tables_changed,
-      "elapsed_ms": started.elapsed().as_millis() as u64,
-    }))),
-  }
-}
-
-fn run_diff(
-  service: &ConnectionService,
-  source_profile: &ConnectionProfile,
-  target_profile: &ConnectionProfile,
-  timeout: Duration,
-  config_dir: Option<&Path>,
-) -> Result<diff::SchemaDiffReport, CliError> {
-  if !diff::supports_diff(&source_profile.db_type) {
-    return Err(unsupported(&source_profile.db_type));
-  }
-  if !diff::supports_diff(&target_profile.db_type) {
-    return Err(unsupported(&target_profile.db_type));
-  }
-  let source_resolved = resolve_verified(service, source_profile)?;
-  let target_resolved = resolve_verified(service, target_profile)?;
-  block_on_within(timeout, "the schema diff", async {
-    let source_tables = load_diff_snapshot(&source_resolved, config_dir).await?;
-    let target_tables = load_diff_snapshot(&target_resolved, config_dir).await?;
-    Ok(diff::compare_snapshots(
-      &source_resolved.db_type,
-      &source_tables,
-      &target_resolved.db_type,
-      &target_tables,
-    ))
-  })
-}
-
-async fn load_diff_snapshot(
-  profile: &ConnectionProfile,
-  config_dir: Option<&Path>,
-) -> Result<Vec<diff::DiffTable>, CliError> {
-  let obj_queries = crate::services::object_catalog::object_catalog_queries(&profile.db_type)
-    .ok_or_else(|| unsupported(&profile.db_type))?;
-  let meta_queries = crate::services::schema_metadata::schema_metadata_queries(&profile.db_type)
-    .ok_or_else(|| unsupported(&profile.db_type))?;
-  let database = profile.database.clone().unwrap_or_default();
-  if obj_queries.object_parameter_count > 0 && database.is_empty() {
-    return Err(CliError::usage(format!(
-      "{} has no database name; set one in DataOmni",
-      profile.name
-    )));
-  }
-
-  let opened = session::open(profile, config_dir).await.map_err(session_error)?;
-  let outcome = async {
-    let params =
-      vec![Value::String(database.clone()); usize::from(obj_queries.object_parameter_count)];
-    let rows = opened.select(obj_queries.objects, params).await.map_err(session_error)?;
-    let mut table_list = Vec::new();
-    for row in rows {
-      let kind = row["object_kind"].as_str().unwrap_or_default().to_ascii_lowercase();
-      if !kind.contains("table") {
-        continue;
-      }
-      let name = row["object_name"].as_str().unwrap_or_default().trim().to_string();
-      if name.is_empty() {
-        continue;
-      }
-      let schema =
-        row["object_schema"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-      table_list.push((schema, name));
-    }
-
-    // MySQL / PostgreSQL 走整库 3 条批量查询（常量往返），避免大库经 SSH 隧道做逐表 N+1 超时
-    if let Some(bulk) = diff::bulk_diff_queries(&profile.db_type) {
-      let bulk_params =
-        if bulk.parameter_count == 0 { Vec::new() } else { vec![Value::String(database)] };
-      let col_rows =
-        opened.select(bulk.columns, bulk_params.clone()).await.map_err(session_error)?;
-      let idx_rows =
-        opened.select(bulk.indexes, bulk_params.clone()).await.map_err(session_error)?;
-      let fk_rows = opened.select(bulk.foreign_keys, bulk_params).await.map_err(session_error)?;
-      return Ok(diff::build_bulk_tables(table_list, col_rows, idx_rows, fk_rows, truthy));
-    }
-
-    let mut tables = Vec::with_capacity(table_list.len());
-    for (schema, name) in table_list {
-      let meta_params = if meta_queries.parameter_count == 1 {
-        vec![Value::from(name.as_str())]
-      } else {
-        vec![Value::from(name.as_str()), schema.as_deref().map_or(Value::Null, Value::from)]
-      };
-      let col_rows =
-        opened.select(meta_queries.columns, meta_params.clone()).await.map_err(session_error)?;
-      let idx_rows =
-        opened.select(meta_queries.indexes, meta_params.clone()).await.map_err(session_error)?;
-      let fk_rows =
-        opened.select(meta_queries.foreign_keys, meta_params).await.map_err(session_error)?;
-
-      let (columns, primary_key) = diff::columns_and_pk_from_rows(&col_rows, truthy);
-      let indexes = diff::indexes_from_rows(&idx_rows, truthy);
-      let foreign_keys = diff::foreign_keys_from_rows(&fk_rows);
-      tables.push(diff::DiffTable { schema, name, columns, primary_key, indexes, foreign_keys });
-    }
-    Ok(tables)
-  }
-  .await;
-  opened.close().await;
-  outcome
-}
-
-fn schema(
-  rest: &[String],
-  config_dir: Option<&Path>,
-  log_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  let arguments = parse_schema_arguments(rest)?;
-  let service = open_service(config_dir)?;
-  let profile = find_open(&service, &arguments.connection)?;
-  let started = Instant::now();
-  let outcome = run_schema(&service, &profile, &arguments, config_dir);
-  let subject = arguments.table.as_deref().unwrap_or("");
-  audit::record(log_dir, "schema", &profile.name, subject, &outcome, started.elapsed());
-  outcome
-}
-
-fn run_schema(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-  arguments: &SchemaArguments,
-  config_dir: Option<&Path>,
-) -> Result<Value, CliError> {
-  if !session::supports(&profile.db_type) {
-    return Err(unsupported(&profile.db_type));
-  }
-  let resolved = resolve_verified(service, profile)?;
-  let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
-  let body = block_on_within(timeout, "the catalog", async {
-    let opened = session::open(&resolved, config_dir).await.map_err(session_error)?;
-    let result = match &arguments.table {
-      None => list_objects(&opened, &resolved).await,
-      Some(table) => describe_table(&opened, &resolved, table, arguments.schema.as_deref()).await,
-    };
-    opened.close().await;
-    result
-  })?;
-  let mut output = json!({ "schema": OUTPUT_SCHEMA, "connection": profile.name });
-  if let (Value::Object(output), Value::Object(body)) = (&mut output, body) {
-    output.extend(body);
-  }
-  if let Some(table) = arguments.table.as_deref() {
-    if let Some(table_semantics) = config_dir
-      .and_then(|dir| {
-        crate::services::connection_semantics::read_semantics_for_agent(dir, &profile.id)
-      })
-      .and_then(|notes| {
-        crate::services::connection_semantics::extract_table_section(
-          &notes,
-          table,
-          arguments.schema.as_deref(),
-        )
-      })
-    {
-      output["semantics"] = Value::String(table_semantics);
-    }
-  }
-  Ok(output)
-}
-
-async fn list_objects(
-  opened: &session::Opened,
-  profile: &ConnectionProfile,
-) -> Result<Value, CliError> {
-  let queries = crate::services::object_catalog::object_catalog_queries(&profile.db_type)
-    .ok_or_else(|| unsupported(&profile.db_type))?;
-  let database = profile.database.clone().unwrap_or_default();
-  // 没有库名时 MySQL 的目录条件恒不匹配，会安静地查出 0 行，像是库是空的（同界面）
-  if queries.object_parameter_count > 0 && database.is_empty() {
-    return Err(CliError::usage("this connection has no database name; set one in DataOmni"));
-  }
-  let params = vec![Value::String(database); usize::from(queries.object_parameter_count)];
-  let rows = opened.select(queries.objects, params).await.map_err(session_error)?;
-  let objects: Vec<Value> = rows
-    .into_iter()
-    .map(|row| json!({ "schema": row["object_schema"], "name": row["object_name"], "kind": row["object_kind"] }))
-    .collect();
-  Ok(json!({ "objects": objects }))
-}
-
-async fn describe_table(
-  opened: &session::Opened,
-  profile: &ConnectionProfile,
-  table: &str,
-  schema: Option<&str>,
-) -> Result<Value, CliError> {
-  let queries = crate::services::schema_metadata::schema_metadata_queries(&profile.db_type)
-    .ok_or_else(|| unsupported(&profile.db_type))?;
-  // 同 `catalogQueries.ts` 的 `catalogQueryParams`：一个参数是表名，两个是表名与 schema
-  let params = if queries.parameter_count == 1 {
-    vec![Value::from(table)]
-  } else {
-    vec![Value::from(table), schema.map_or(Value::Null, Value::from)]
-  };
-  let columns = opened.select(queries.columns, params.clone()).await.map_err(session_error)?;
-  if columns.is_empty() {
-    return Err(CliError {
-      exit: Exit::Usage,
-      kind: "not_found",
-      message: format!("no table or view named {table}"),
-      diagnosis: None,
-    });
-  }
-  let indexes = opened.select(queries.indexes, params.clone()).await.map_err(session_error)?;
-  let foreign_keys = opened.select(queries.foreign_keys, params).await.map_err(session_error)?;
-  let columns: Vec<Value> = columns
-    .into_iter()
-    .map(|row| {
-      json!({
-        "name": row["column_name"],
-        "type": row["data_type"],
-        "nullable": truthy(&row["is_nullable"]),
-        "primary_key": truthy(&row["is_primary_key"]),
-        "default": row["column_default"],
-        "comment": row["comment"],
-      })
-    })
-    .collect();
-  Ok(
-    json!({ "table": table, "columns": columns, "indexes": indexes, "foreign_keys": foreign_keys }),
-  )
-}
-
-/// 目录里的布尔：PostgreSQL 给真布尔，MySQL 与 SQLite 给 1/0（同 `tableMetadata.ts`）
-fn truthy(value: &Value) -> bool {
-  match value {
-    Value::Bool(flag) => *flag,
-    Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
-    Value::String(text) => matches!(text.as_str(), "1" | "t" | "true" | "YES" | "Y"),
-    _ => false,
-  }
-}
-
-fn session_error(failure: session::Failure) -> CliError {
-  match failure {
-    session::Failure::Unsupported(db_type) => unsupported(&db_type),
-    session::Failure::Connect(message) => CliError::unavailable("connect", message),
-    session::Failure::Database(error) => CliError {
-      exit: Exit::Database,
-      kind: "database",
-      message: error.to_string(),
-      diagnosis: None,
-    },
-  }
-}
-
-fn unsupported(db_type: &crate::models::DatabaseType) -> CliError {
-  match db_type {
-    DatabaseType::MongoDB => {
-      return CliError::refused("MongoDB connections take `dataomni mongo`, not SQL")
-    }
-    DatabaseType::Redis => {
-      return CliError::refused("Redis connections take `dataomni redis`, not SQL")
-    }
-    DatabaseType::Neo4j => {
-      return CliError::refused("Neo4j connections take `dataomni neo4j`, not SQL")
-    }
-    DatabaseType::Elasticsearch => {
-      return CliError::refused("Elasticsearch connections take `dataomni es`, not SQL")
-    }
-    _ => {}
-  }
-  let name =
-    serde_json::to_value(db_type).ok().and_then(|value| value.as_str().map(str::to_string));
-  CliError::refused(format!(
-    "{} connections are not supported on the command line yet",
-    name.unwrap_or_else(|| format!("{db_type:?}"))
-  ))
-}
-
-/// 钥匙串授权等到点时是否退出进程。命令行退出；MCP 服务（`serve_mcp`）关掉它，只在 stderr
-/// 提一句、接着等
-static KEYCHAIN_DEADLINE_EXITS: AtomicBool = AtomicBool::new(true);
-
-/// 读口令可能卡在钥匙串的授权框上。到点还没回来就直接退出并说清楚，框留给人去点——
-/// 卡着不动的命令会让 Agent 一直等下去
-fn with_keychain_deadline<T>(work: impl FnOnce() -> T) -> T {
-  let done = Arc::new(AtomicBool::new(false));
-  let watched = Arc::clone(&done);
-  std::thread::spawn(move || {
-    std::thread::sleep(KEYCHAIN_DEADLINE);
-    if !watched.load(Ordering::SeqCst) {
-      let body = json!({
-        "schema": OUTPUT_SCHEMA,
-        "error": {
-          "kind": "keychain",
-          "message": "the system keychain is waiting for approval: choose \"Always Allow\" in the prompt, then run the command again",
-        },
-      });
-      eprintln!("{body}");
-      if KEYCHAIN_DEADLINE_EXITS.load(Ordering::SeqCst) {
-        std::process::exit(Exit::Unavailable as i32);
-      }
-    }
-  });
-  let result = work();
-  done.store(true, Ordering::SeqCst);
-  result
-}
-
-/// 按 id 或名字找文件里标着开放的连接。还没验凭证：那一步要读钥匙串，放在语句门之后
-fn find_open(service: &ConnectionService, name: &str) -> Result<ConnectionProfile, CliError> {
-  let open: Vec<ConnectionProfile> =
-    service.get_connections().into_iter().filter(ConnectionProfile::open_to_agents).collect();
-  if let Some(profile) = open.iter().find(|profile| profile.id == name) {
-    return Ok(profile.clone());
-  }
-  let mut named = open.into_iter().filter(|profile| profile.name == name);
-  match (named.next(), named.next()) {
-    (Some(profile), None) => Ok(profile),
-    (Some(_), Some(_)) => {
-      Err(CliError::usage(format!("several connections are named {name}; use the id instead")))
-    }
-    (None, _) => Err(CliError::not_found(name)),
-  }
-}
-
-/// 验过开放凭证、补好凭据的连接。凭证对不上的和不存在的一样，报「找不到」
-fn resolve_verified(
-  service: &ConnectionService,
-  profile: &ConnectionProfile,
-) -> Result<ConnectionProfile, CliError> {
-  match with_keychain_deadline(|| service.resolve_for_agents(profile)) {
-    Ok(Some(resolved)) => Ok(resolved),
-    Ok(None) => Err(CliError::not_found(&profile.name)),
-    Err(error) => Err(CliError::unavailable("credentials", error)),
-  }
-}
-
-fn query_output(
-  profile: &ConnectionProfile,
-  result: QueryExecutionResult,
-  elapsed: Duration,
-) -> Value {
-  let elapsed_ms = elapsed.as_millis() as u64;
-  match result {
-    QueryExecutionResult::Rows { columns, rows, truncated, row_limit, .. } => {
-      let rows: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-          Value::Array(columns.iter().map(|column| plain(row.get(column).cloned())).collect())
-        })
-        .collect();
-      json!({
-        "schema": OUTPUT_SCHEMA,
-        "connection": profile.name,
-        "columns": columns,
-        "rows": rows,
-        "row_count": rows.len(),
-        "truncated": truncated,
-        "row_limit": row_limit,
-        "elapsed_ms": elapsed_ms,
-      })
-    }
-    // 语句门只放读语句，走到这里的只会是没有结果集的读（极少见），照实说
-    QueryExecutionResult::Affected { rows_affected } => json!({
-      "schema": OUTPUT_SCHEMA,
-      "connection": profile.name,
-      "rows_affected": rows_affected,
-      "elapsed_ms": elapsed_ms,
-    }),
-  }
-}
-
-/// 界面用的带类型的值（`{"type": "decimal", "value": "1.50"}`）摊平成值本身：类型是给网格
-/// 选编辑器用的，Agent 只要值。整数在 JSON 数字放得下的范围内给数字，超出的仍是字符串——
-/// 界面打标签就是为了不丢精度；`json` 列给解析后的值
-fn plain(value: Option<Value>) -> Value {
-  const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
-  let Some(value) = value else { return Value::Null };
-  let Value::Object(object) = &value else { return value };
-  let (Some(Value::String(kind)), Some(Value::String(text)), 2) =
-    (object.get("type"), object.get("value"), object.len())
-  else {
-    return value;
-  };
-  match kind.as_str() {
-    "bigint" => match text.parse::<i64>() {
-      Ok(number) if number.abs() <= MAX_SAFE_INTEGER => Value::from(number),
-      _ => Value::String(text.clone()),
-    },
-    "json" => serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone())),
-    _ => Value::String(text.clone()),
-  }
-}
-
-fn no_arguments(command: &str, rest: &[String]) -> Result<(), CliError> {
-  match rest.first() {
-    None => Ok(()),
-    Some(extra) => Err(CliError::usage(format!("{command} takes no arguments, got {extra}"))),
-  }
-}
-
-fn open_service(config_dir: Option<&Path>) -> Result<ConnectionService, CliError> {
-  let config_dir = config_dir.ok_or_else(|| {
-    CliError::unavailable("config", "cannot locate the DataOmni configuration directory")
-  })?;
-  #[cfg(not(test))]
-  let service = ConnectionService::open_read_only(config_dir);
-  #[cfg(test)]
-  let service = ConnectionService::open_read_only_without_keychain(config_dir);
-  service.map_err(|error| CliError::unavailable("config", error.to_string()))
-}
-
-/// 开放给命令行、并且凭证对得上的连接。不带口令、钥匙串引用、私钥和证书的路径：
-/// Agent 要的只是「有哪些库、叫什么、是什么类型」。开放了却用不了的（比如口令只在会话里输）
-/// 单独列在 `unavailable` 里，说明原因，而不是悄悄少一个
-fn list_open(service: &ConnectionService) -> Value {
-  let mut open: Vec<ConnectionProfile> =
-    service.get_connections().into_iter().filter(ConnectionProfile::open_to_agents).collect();
-  open.sort_by(|left, right| left.name.cmp(&right.name));
-  let mut usable = Vec::new();
-  let mut unavailable = Vec::new();
-  with_keychain_deadline(|| {
-    for connection in open {
-      match service.resolve_for_agents(&connection) {
-        Ok(Some(_)) => usable.push(connection),
-        Ok(None) => {}
-        Err(error) => unavailable.push(json!({ "name": connection.name, "reason": error })),
-      }
-    }
-  });
-  let connections: Vec<Value> = usable
-    .into_iter()
-    .map(|connection| {
-      json!({
-        "id": connection.id,
-        "name": connection.name,
-        "type": connection.db_type,
-        "environment": connection.environment,
-        "host": connection.host,
-        "port": connection.port,
-        "database": connection.database,
-        "ssh_tunnel": connection.ssh_tunnel.is_some(),
-      })
-    })
-    .collect();
-  json!({ "schema": OUTPUT_SCHEMA, "connections": connections, "unavailable": unavailable })
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -2194,6 +696,13 @@ mod tests {
 
   impl ConfigDir {
     pub(super) fn with(connections: &[Value]) -> Self {
+      let dir = Self::with_raw(connections);
+      ConnectionService::write_test_agent_grants(&dir.0, connections);
+      dir
+    }
+
+    /// 只写 `connections.json`，不签任何钥匙串开放凭证（用于测试手改配置文件被拦截）
+    pub(super) fn with_raw(connections: &[Value]) -> Self {
       let dir = std::env::temp_dir().join(format!("dataomni-cli-{}", uuid::Uuid::new_v4()));
       if let Err(error) = std::fs::create_dir_all(&dir) {
         panic!("{error}");
@@ -2204,6 +713,17 @@ mod tests {
         panic!("{error}");
       }
       Self(dir)
+    }
+
+    /// 写入测试连接配置并按真实 v2 HMAC 算法为免密开放连接签发测试钥匙串凭证
+    pub(super) fn write_connections(&self, connections: &[Value]) {
+      if let Err(error) = std::fs::write(
+        self.0.join("connections.json"),
+        Value::from(connections.to_vec()).to_string(),
+      ) {
+        panic!("{error}");
+      }
+      ConnectionService::write_test_agent_grants(&self.0, connections);
     }
 
     pub(super) fn config_file(&self) -> Vec<u8> {
@@ -2250,7 +770,7 @@ mod tests {
     assert_eq!(names(&stdout), vec!["open-dev", "open-staging"]);
   }
 
-  /// §8 第 8 条：手写进文件的「开放」，没有凭证就不算——有口令的连接这里看不见
+  /// §8 第 8 条 + H6 (S1)：手写进文件的「开放」，无论有无口令，没有钥匙串凭证都不算
   #[test]
   fn a_connection_marked_open_only_in_the_file_is_hidden() {
     let dir = ConfigDir::with(&[
@@ -2261,6 +781,15 @@ mod tests {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(names(&stdout), vec!["open"]);
     let (code, _, stderr) = run_in(&dir, &["query", "forged", "SELECT 1"]);
+    assert_eq!(code, Exit::Usage as i32);
+    assert_eq!(json_of(&stderr)["error"]["kind"], "not_found");
+
+    // 无口令连接仅手改文件开放同样不可见（H6 / S1）
+    let raw_dir = ConfigDir::with_raw(&[profile("c", "forged-nopass", "development", "read")]);
+    let (code, stdout, stderr) = run_in(&raw_dir, &["connections"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(names(&stdout).is_empty(), "unsigned passwordless connection must stay hidden");
+    let (code, _, stderr) = run_in(&raw_dir, &["query", "forged-nopass", "SELECT 1"]);
     assert_eq!(code, Exit::Usage as i32);
     assert_eq!(json_of(&stderr)["error"]["kind"], "not_found");
   }
@@ -2434,11 +963,7 @@ mod tests {
   fn query_reads_rows_with_a_default_limit() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) =
       run_in(&dir, &["query", "local", "SELECT id, name FROM items WHERE id <= 2 ORDER BY id"]);
@@ -2463,11 +988,7 @@ mod tests {
   fn query_refuses_writes_and_escapes() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let escaped = dir.0.join("escaped.db");
     let attach = format!("ATTACH '{}' AS x", escaped.display());
     let vacuum = format!("VACUUM INTO '{}'", escaped.display());
@@ -2495,11 +1016,7 @@ mod tests {
     let db = seeded_sqlite(&dir.0);
     let mut closed = file_profile("c", "closed", "sqlite", &db, "development");
     closed["agent_access"] = json!("off");
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("p", "prod", "sqlite", &db, "production"), closed]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("p", "prod", "sqlite", &db, "production"), closed]);
     for name in ["prod", "p", "closed", "c", "missing"] {
       let (code, _, stderr) = run_in(&dir, &["query", name, "SELECT 1"]);
       assert_eq!(code, Exit::Usage as i32, "{name}");
@@ -2518,11 +1035,7 @@ mod tests {
         .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2);")
         .expect("seed");
     }
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("d", "duck", "duckdb", &file, "testing")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("d", "duck", "duckdb", &file, "testing")]);
     let (code, stdout, stderr) = run_in(&dir, &["query", "duck", "SELECT sum(x) AS total FROM t"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(json_of(&stdout)["columns"], json!(["total"]));
@@ -2545,11 +1058,7 @@ mod tests {
   fn query_is_recorded_without_the_statement_text() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     run_in(&dir, &["query", "local", "SELECT * FROM items WHERE name = 'alice@example.com'"]);
     run_in(&dir, &["query", "local", "DELETE FROM items"]);
     let log =
@@ -2594,11 +1103,7 @@ mod tests {
       .expect("schema");
       pool.close().await;
     });
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) = run_in(&dir, &["schema", "local"]);
     assert_eq!(code, 0, "{stderr}");
@@ -2653,11 +1158,7 @@ mod tests {
   fn explain_returns_the_plan_without_running_the_statement() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) =
       run_in(&dir, &["explain", "local", "SELECT name FROM items WHERE id = 3"]);
@@ -2688,11 +1189,7 @@ mod tests {
         .expect("orders");
       pool.close().await;
     });
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     let (code, stdout, stderr) = run_in(&dir, &["dictionary", "local"]);
     assert_eq!(code, 0, "{stderr}");
@@ -2715,15 +1212,10 @@ mod tests {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
     let missing = dir.0.join("missing.db");
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("s", "local", "sqlite", &db, "development"),
-        file_profile("m", "gone", "sqlite", &missing, "development"),
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("s", "local", "sqlite", &db, "development"),
+      file_profile("m", "gone", "sqlite", &missing, "development"),
+    ]);
 
     let (code, stdout, stderr) = run_in(&dir, &["test", "local"]);
     assert_eq!(code, 0, "{stderr}");
@@ -2843,11 +1335,7 @@ mod tests {
   fn export_writes_every_row_to_a_new_file() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let csv = dir.0.join("items.csv");
     let csv_path = csv.to_string_lossy().into_owned();
     let (code, stdout, stderr) = run_in(
@@ -2910,11 +1398,7 @@ mod tests {
       sqlx::raw_sql("CREATE INDEX items_name ON items(name)").execute(&pool).await.expect("index");
       pool.close().await;
     });
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let (code, stdout, stderr) = run_in(&dir, &["ddl", "local", "items"]);
     assert_eq!(code, 0, "{stderr}");
     let ddl = json_of(&stdout)["ddl"].as_str().unwrap_or_default().to_string();
@@ -2931,11 +1415,7 @@ mod tests {
   fn backup_copies_a_sqlite_database_without_writing_to_it() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
     let before = std::fs::read(&db).unwrap_or_default();
     let copy = dir.0.join("copy.db");
     let copy_path = copy.to_string_lossy().into_owned();
@@ -3050,11 +1530,7 @@ mod tests {
   fn export_parquet_and_profile_work_end_to_end() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("s", "local", "sqlite", &db, "development")]).to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("s", "local", "sqlite", &db, "development")]);
 
     // 1. export --format parquet 写出合法 Parquet 文件且绝不覆盖已有文件
     let parquet = dir.0.join("items.parquet");
@@ -3143,15 +1619,10 @@ mod tests {
         )
         .expect("seed duckdb");
     }
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("s", "local", "sqlite", &db, "development"),
-        file_profile("d", "duck", "duckdb", &duck_path, "development"),
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("s", "local", "sqlite", &db, "development"),
+      file_profile("d", "duck", "duckdb", &duck_path, "development"),
+    ]);
 
     // 1. SQLite: --params-json 保留数字类型，--param 传字符串
     let secret_sentinel = "SECRET_PARAM_SENTINEL_9981";
@@ -3244,17 +1715,12 @@ mod tests {
     }
     let mut hidden_profile = file_profile("h", "hidden", "sqlite", &dst_db, "development");
     hidden_profile["agent_access"] = json!("off");
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("a", "dev", "sqlite", &src_db, "development"),
-        file_profile("b", "staging", "sqlite", &dst_db, "staging"),
-        file_profile("p", "prod", "sqlite", &dst_db, "production"),
-        hidden_profile,
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("a", "dev", "sqlite", &src_db, "development"),
+      file_profile("b", "staging", "sqlite", &dst_db, "staging"),
+      file_profile("p", "prod", "sqlite", &dst_db, "production"),
+      hidden_profile,
+    ]);
 
     // 1. JSON 差异报告
     let (code, stdout, stderr) = run_in(&dir, &["diff", "dev", "staging"]);
@@ -3293,12 +1759,7 @@ mod tests {
   fn connection_semantics_injects_into_dictionary_and_schema_without_breaking_baseline() {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![file_profile("conn-sem", "local", "sqlite", &db, "development")])
-        .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[file_profile("conn-sem", "local", "sqlite", &db, "development")]);
 
     // 1. 无侧文件：dictionary 不含语义块，schema 不含 semantics 字段
     let (code, baseline_dict, stderr) = run_in(&dir, &["dictionary", "local"]);

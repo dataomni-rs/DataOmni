@@ -24,6 +24,7 @@ pub mod neo4j;
 pub mod object_catalog;
 pub mod opengauss_relay;
 pub mod oracle;
+pub mod path_guard;
 pub mod plugin_decode;
 pub mod pool_registry;
 pub mod query_error;
@@ -36,6 +37,7 @@ pub mod schema_metadata;
 pub mod session_target;
 pub mod sql_server;
 pub mod sqlite_path;
+pub(crate) mod sqlx_decode;
 pub mod sqlx_pool;
 pub mod ssh_tunnel;
 pub mod transaction_state;
@@ -63,6 +65,7 @@ pub use export_writer::{
   EXPORT_CANCELLED_CODE,
 };
 pub use object_catalog::{object_catalog_queries, ObjectCatalogQueries};
+pub use pool_registry::EngineRegistries;
 pub use query_error::QueryError;
 pub use query_executor::{
   execute_query, execute_query_with_limit, execute_query_with_limits, execute_query_with_timeout,

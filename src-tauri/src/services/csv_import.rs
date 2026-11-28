@@ -606,40 +606,216 @@ fn conversion_check(columns: &[ImportColumn], rows: usize) -> Result<Option<Stri
   )))
 }
 
-/// 目标类型里允许出现的字符。
+/// 校验拼入 SQL（PostgreSQL `$N::text::{type}`、SQL Server `TRY_CONVERT({type}, ...)`）的目标类型名。
 ///
-/// 这个字符串会被拼进 SQL——它来自界面，而界面上的列类型来自目录，但「来自
-/// 目录」不是可以省掉校验的理由：一个改过的请求就能从这里写进任意 SQL。
-/// 放行的是真实类型名里会出现的那些：`character varying(32)`、`numeric(10,2)`、
-/// `text[]`、`public.my_enum`。
+/// 采用严格 SQL 类型语法解析（而非宽字符白名单），仅放行合法类型形态：
+/// - 可选单一 `schema.` 前缀（普通标识符或 `"..."` 双引号标识符）
+/// - 单一类型名或标准 SQL 多词类型（`character varying`、`double precision`、
+///   `bit varying`、`timestamp[(p)] [with|without time zone]`、`time[(p)] [with|without time zone]`、
+///   `interval [unit [to unit]][(p)]`、`national char[acter] [varying]`）
+/// - 可选单一精度修饰 `(...)`（1~2 个逗号分隔的无符号整数或标识符，如 `(10, 2)`、`(max)`、`(Point,4326)`）
+/// - 可选数组后缀 `[]`（可多层）
 ///
-/// 双引号括起来的标识符也放行（`"Role"`、`"Billing".tier`）：大小写混写或不在
-/// search_path 上的类型，PostgreSQL 的 `format_type` 就这么给。引号里什么字符都行
-/// （`""` 是转义的引号），引号必须成对——出了引号照旧只认上面那几个字符。
+/// 禁止任何额外关键字、逗号外泄、嵌套括号、分号、单引号或控制字符。
 fn valid_type_name(name: &str) -> bool {
-  if name.is_empty() || name.len() > 256 {
+  if name.is_empty() || name.len() > 256 || name.bytes().any(|b| b < 0x20 || b == 0x7f) {
     return false;
   }
-  let mut quoted = false;
-  let mut chars = name.chars().peekable();
-  while let Some(c) = chars.next() {
-    if quoted {
-      if c == '"' {
-        if chars.peek() == Some(&'"') {
-          chars.next();
+
+  enum Ident<'a> {
+    Quoted,
+    Unquoted(&'a str),
+  }
+
+  struct TypeNameParser<'a> {
+    input: &'a str,
+    pos: usize,
+  }
+
+  impl<'a> TypeNameParser<'a> {
+    fn rest(&self) -> &'a str {
+      &self.input[self.pos..]
+    }
+
+    fn peek(&self) -> Option<u8> {
+      self.input.as_bytes().get(self.pos).copied()
+    }
+
+    fn eat_byte(&mut self, expected: u8) -> bool {
+      if self.peek() == Some(expected) {
+        self.pos += 1;
+        true
+      } else {
+        false
+      }
+    }
+
+    fn eat_quoted_ident(&mut self) -> Option<Ident<'a>> {
+      if !self.eat_byte(b'"') {
+        return None;
+      }
+      let start = self.pos;
+      let bytes = self.input.as_bytes();
+      while self.pos < bytes.len() {
+        if bytes[self.pos] == b'"' {
+          if bytes.get(self.pos + 1) == Some(&b'"') {
+            self.pos += 2;
+            continue;
+          }
+          if self.pos == start {
+            return None;
+          }
+          self.pos += 1;
+          return Some(Ident::Quoted);
+        }
+        self.pos += 1;
+      }
+      None
+    }
+
+    fn eat_unquoted_ident(&mut self) -> Option<&'a str> {
+      let bytes = self.input.as_bytes();
+      let first = *bytes.get(self.pos)?;
+      if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+      }
+      let start = self.pos;
+      self.pos += 1;
+      while let Some(&byte) = bytes.get(self.pos) {
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+          self.pos += 1;
         } else {
-          quoted = false;
+          break;
         }
       }
-    } else if c == '"' {
-      quoted = true;
-    } else if !(c.is_ascii_alphanumeric()
-      || matches!(c, ' ' | '_' | '(' | ')' | ',' | '[' | ']' | '.'))
-    {
-      return false;
+      Some(&self.input[start..self.pos])
+    }
+
+    fn eat_ident(&mut self) -> Option<Ident<'a>> {
+      if self.peek() == Some(b'"') {
+        self.eat_quoted_ident()
+      } else {
+        self.eat_unquoted_ident().map(Ident::Unquoted)
+      }
+    }
+
+    fn eat_space_word(&mut self, expected: &str) -> bool {
+      let saved = self.pos;
+      if !self.eat_byte(b' ') {
+        return false;
+      }
+      match self.eat_unquoted_ident() {
+        Some(word) if word.eq_ignore_ascii_case(expected) => true,
+        _ => {
+          self.pos = saved;
+          false
+        }
+      }
+    }
+
+    fn eat_space_any_word(&mut self, allowed: &[&str]) -> bool {
+      allowed.iter().any(|word| self.eat_space_word(word))
+    }
+
+    fn eat_typmod_arg(&mut self) -> bool {
+      let bytes = self.input.as_bytes();
+      let Some(&first) = bytes.get(self.pos) else {
+        return false;
+      };
+      if first.is_ascii_digit() {
+        let start = self.pos;
+        while bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+          self.pos += 1;
+        }
+        return self.pos - start <= 10;
+      }
+      self.eat_unquoted_ident().is_some()
+    }
+
+    fn eat_optional_typmod(&mut self) -> bool {
+      if !self.eat_byte(b'(') {
+        return true;
+      }
+      if !self.eat_typmod_arg() {
+        return false;
+      }
+      if self.eat_byte(b',') {
+        self.eat_byte(b' ');
+        if !self.eat_typmod_arg() {
+          return false;
+        }
+      }
+      self.eat_byte(b')')
     }
   }
-  !quoted
+
+  let mut parser = TypeNameParser { input: name, pos: 0 };
+  let Some(first) = parser.eat_ident() else {
+    return false;
+  };
+  if parser.eat_byte(b'.') {
+    if parser.eat_ident().is_none() || !parser.eat_optional_typmod() {
+      return false;
+    }
+  } else {
+    match first {
+      Ident::Quoted => {
+        if !parser.eat_optional_typmod() {
+          return false;
+        }
+      }
+      Ident::Unquoted(word) => match word.to_ascii_lowercase().as_str() {
+        "character" | "char" | "bit" => {
+          let _ = parser.eat_space_word("varying");
+          if !parser.eat_optional_typmod() {
+            return false;
+          }
+        }
+        "national" => {
+          if parser.eat_space_any_word(&["character", "char"]) {
+            let _ = parser.eat_space_word("varying");
+          }
+          if !parser.eat_optional_typmod() {
+            return false;
+          }
+        }
+        "double" => {
+          let _ = parser.eat_space_word("precision");
+        }
+        "timestamp" | "time" => {
+          if !parser.eat_optional_typmod() {
+            return false;
+          }
+          if parser.eat_space_any_word(&["with", "without"])
+            && !(parser.eat_space_word("time") && parser.eat_space_word("zone"))
+          {
+            return false;
+          }
+        }
+        "interval" => {
+          let units = ["year", "month", "day", "hour", "minute", "second"];
+          if parser.eat_space_any_word(&units)
+            && parser.eat_space_word("to")
+            && !parser.eat_space_any_word(&units)
+          {
+            return false;
+          }
+          if !parser.eat_optional_typmod() {
+            return false;
+          }
+        }
+        _ => {
+          if !parser.eat_optional_typmod() {
+            return false;
+          }
+        }
+      },
+    }
+  }
+  while parser.rest().starts_with("[]") {
+    parser.pos += 2;
+  }
+  parser.pos == parser.input.len()
 }
 
 /// 一条多行 INSERT。返回语句本身与它能放下的行数。
@@ -1406,12 +1582,44 @@ mod tests {
     assert!(valid_type_name("integer"));
     assert!(valid_type_name("character varying(32)"));
     assert!(valid_type_name("numeric(10,2)"));
+    assert!(valid_type_name("numeric(10, 2)"));
     assert!(valid_type_name("text[]"));
+    assert!(valid_type_name("integer[][]"));
     assert!(valid_type_name("public.my_enum"));
+    assert!(valid_type_name("varchar(max)"));
+    assert!(valid_type_name("timestamp(6) without time zone"));
+    assert!(valid_type_name("timestamp with time zone[]"));
+    assert!(valid_type_name("time(3) with time zone"));
+    assert!(valid_type_name("double precision"));
+    assert!(valid_type_name("interval day to second(3)"));
+    assert!(valid_type_name("geometry(Point,4326)"));
     // 这个字段会被拼进 SQL，所以它是一处注入面，不是一处显示文本
     assert!(!valid_type_name("integer; DROP TABLE t --"));
     assert!(!valid_type_name("text'"));
     assert!(!valid_type_name(""));
+    // H2 (S4)：无单引号无分号的括号/逗号/多词 SQL 注入载荷必须被严格语法解析器拒绝
+    for payload in [
+      "int, v.c0) IS NULL OR EXISTS(SELECT 1) OR TRY_CONVERT(int",
+      "text), ((SELECT current_user)",
+      "int OR 1",
+      "integer UNION SELECT 1",
+      "int(1) (SELECT 1)",
+      "int((SELECT 1))",
+      "\"Role\" OR true",
+      "public.my_enum extra",
+      "text()",
+      "numeric(10, 2, 3)",
+      "int(1 2)",
+      "a.b.c",
+      ".integer",
+      "integer.",
+      "[]",
+      " integer",
+      "integer ",
+      "int\0",
+    ] {
+      assert!(!valid_type_name(payload), "injection payload must be rejected: {payload}");
+    }
   }
 
   #[test]

@@ -380,18 +380,21 @@ pub struct RedisPool {
 }
 
 impl RedisPool {
-  /// 这个库号上的连接，第一次用到时才开。断了自己重连
+  /// 这个库号上的连接，第一次用到时才开。断了自己重连。
+  /// 查缓存命中立即放锁，网络建连不持 `self.connections` 锁，避免阻塞同实例其他库号（H16 / P2-3）
   pub async fn connection(&self, database: i64) -> Result<RedisConnection, String> {
     if self.target.cluster && database != 0 {
       return Err(REDIS_CLUSTER_DATABASE.to_string());
     }
-    let mut connections = self.connections.lock().await;
-    if let Some(connection) = connections.get(&database) {
-      return Ok(connection.clone());
+    {
+      let connections = self.connections.lock().await;
+      if let Some(connection) = connections.get(&database) {
+        return Ok(connection.clone());
+      }
     }
     let connection = open(&self.target, database).await?;
-    connections.insert(database, connection.clone());
-    Ok(connection)
+    let mut connections = self.connections.lock().await;
+    Ok(connections.entry(database).or_insert_with(|| connection).clone())
   }
 
   /// 配置里的那个库号：对象树总是列出它，哪怕里面一个键都没有

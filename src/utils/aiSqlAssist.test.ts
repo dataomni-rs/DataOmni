@@ -152,4 +152,41 @@ describe('aiSqlAssist', () => {
       raw: '{"bottlenecks":[]}'
     });
   });
+
+  it('组装 SQL/报错/EXPLAIN 提示词前自动脱敏口令、连接串与 API Token（H15 / S8）', () => {
+    const nl = buildNlToSqlPrompt({
+      dialect: 'MySQL',
+      requirement: 'Fix token Bearer secret_token_123456',
+      existingSql: "CREATE USER app IDENTIFIED BY 'SuperSecret#99'",
+      selectedRelations: [],
+      language: 'zh'
+    });
+    expect(nl.user).not.toContain('SuperSecret#99');
+    expect(nl.user).not.toContain('secret_token_123456');
+
+    const fix = buildErrorFixPrompt({
+      dialect: 'PostgreSQL',
+      sql: "SELECT * FROM users WHERE password = 'hunter2'",
+      errorMessage: 'connection failed for postgres://admin:dbpass99@prod.internal:5432/app',
+      details: {
+        message: 'duplicate key value violates unique constraint',
+        detail: 'Key (api_key)=(sk-live1234567890abcd) already exists.'
+      },
+      relations: [],
+      language: 'en'
+    });
+    expect(fix.user).not.toContain('hunter2');
+    expect(fix.user).not.toContain('dbpass99');
+    expect(fix.user).not.toContain('sk-live1234567890abcd');
+
+    const explain = buildExplainAnalysisPrompt({
+      dialect: 'PostgreSQL',
+      sql: "SELECT * FROM accounts WHERE access_token = 'tok_xyz_secret'",
+      planRaw: "Seq Scan on accounts (Filter: (password = 'planSecret77'))",
+      relations: [],
+      language: 'en'
+    });
+    expect(explain.user).not.toContain('tok_xyz_secret');
+    expect(explain.user).not.toContain('planSecret77');
+  });
 });

@@ -612,16 +612,11 @@ mod tests {
   fn sqlite_dir() -> (ConfigDir, std::path::PathBuf) {
     let dir = ConfigDir::with(&[]);
     let db = seeded_sqlite(&dir.0);
-    std::fs::write(
-      dir.0.join("connections.json"),
-      Value::from(vec![
-        file_profile("s", "local", "sqlite", &db, "development"),
-        // 生产连接：字段被手工改成了只读，也不能看见（§4 第 2 条）
-        file_profile("p", "prod", "sqlite", &db, "production"),
-      ])
-      .to_string(),
-    )
-    .expect("config");
+    dir.write_connections(&[
+      file_profile("s", "local", "sqlite", &db, "development"),
+      // 生产连接：字段被手工改成了只读，也不能看见（§4 第 2 条）
+      file_profile("p", "prod", "sqlite", &db, "production"),
+    ]);
     (dir, db)
   }
 

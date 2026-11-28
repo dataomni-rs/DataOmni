@@ -117,18 +117,27 @@ pub async fn ai_complete(
   registry: tauri::State<'_, AiRequestRegistry>,
 ) -> Result<String, QueryError> {
   use crate::services::connection_service::credential_entry;
+  crate::services::ai::validate_ai_endpoint_url(&request.base_url).map_err(QueryError::message)?;
   let account = ai_key_account(request.profile_id.as_deref()).map_err(QueryError::message)?;
-  let entry = credential_entry(&account).map_err(QueryError::message)?;
-  let key = match entry.get_password() {
-    Ok(secret) => secret,
-    Err(keyring::Error::NoEntry)
-      if crate::services::ai::is_local_ai_endpoint(&request.base_url) =>
-    {
-      // Ollama / LM Studio 等本机端点允许免 Key 调用
-      String::new()
+  let is_local = crate::services::ai::is_local_ai_endpoint(&request.base_url);
+  let base_url = request.base_url.clone();
+  // 系统钥匙串读取可能走 IPC 阻塞，移出 Tokio 工作线程（B5）；并核验已绑定 Origin（H15 / S8）
+  let key = tokio::task::spawn_blocking(move || -> Result<String, String> {
+    let entry = credential_entry(&account)?;
+    match entry.get_password() {
+      Ok(stored) => crate::services::ai::decode_bound_api_key(&stored, &base_url),
+      Err(keyring::Error::NoEntry) if is_local => {
+        // Ollama / LM Studio 等本机端点允许免 Key 调用
+        Ok(String::new())
+      }
+      Err(error) => Err(describe_key_read_failure(&error)),
     }
-    Err(error) => return Err(QueryError::message(describe_key_read_failure(&error))),
-  };
+  })
+  .await
+  .map_err(|error| {
+    QueryError::message(format!("{}: {error}", crate::services::ai::AI_REQUEST_FAILED))
+  })?
+  .map_err(QueryError::message)?;
   let request_id = request.request_id.clone();
   run_cancellable_ai_task(&registry, request_id, async move {
     crate::services::ai::complete(&request, &key).await
@@ -152,42 +161,57 @@ pub fn ai_cancel(request_id: String, registry: tauri::State<'_, AiRequestRegistr
   registry.cancel(request_id.trim())
 }
 
-/// 存 Key。空串等于删掉：设置里清空那一格再保存，就是不想留着它
+/// 存 Key。空串等于删掉：设置里清空那一格再保存，就是不想留着它；提供 `base_url` 时绑定到该 Origin（H15 / S8）
 #[tauri::command]
-pub fn ai_save_key(key: String, profile_id: Option<String>) -> Result<(), String> {
+pub async fn ai_save_key(
+  key: String,
+  profile_id: Option<String>,
+  base_url: Option<String>,
+) -> Result<(), String> {
   #[cfg(feature = "ai")]
   {
     use crate::services::connection_service::{credential_entry, CREDENTIAL_DELETE_FAILED};
     let account = ai_key_account(profile_id.as_deref())?;
-    let entry = credential_entry(&account)?;
-    let key = key.trim();
-    if key.is_empty() {
-      return match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!("{CREDENTIAL_DELETE_FAILED}: {error}")),
-      };
-    }
-    entry.set_password(key).map_err(|error| format!("{AI_KEY_SAVE_FAILED}: {error}"))
+    let trimmed = key.trim().to_string();
+    let encoded = if trimmed.is_empty() {
+      String::new()
+    } else {
+      crate::services::ai::encode_bound_api_key(&trimmed, base_url.as_deref())?
+    };
+    tokio::task::spawn_blocking(move || {
+      let entry = credential_entry(&account)?;
+      if encoded.is_empty() {
+        return match entry.delete_credential() {
+          Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+          Err(error) => Err(format!("{CREDENTIAL_DELETE_FAILED}: {error}")),
+        };
+      }
+      entry.set_password(&encoded).map_err(|error| format!("{AI_KEY_SAVE_FAILED}: {error}"))
+    })
+    .await
+    .map_err(|error| format!("{AI_KEY_SAVE_FAILED}: {error}"))?
   }
   #[cfg(not(feature = "ai"))]
   {
-    let _ = (key, profile_id);
+    let _ = (key, profile_id, base_url);
     Err(AI_NOT_IN_BUILD.to_string())
   }
 }
 
 /// 钥匙串里有没有 Key。只回答有没有，Key 本身不回到界面上
 #[tauri::command]
-pub fn ai_has_key(profile_id: Option<String>) -> Result<bool, String> {
+pub async fn ai_has_key(profile_id: Option<String>) -> Result<bool, String> {
   #[cfg(feature = "ai")]
   {
     use crate::services::connection_service::{credential_entry, describe_credential_read_failure};
     let account = ai_key_account(profile_id.as_deref())?;
-    match credential_entry(&account)?.get_password() {
+    tokio::task::spawn_blocking(move || match credential_entry(&account)?.get_password() {
       Ok(_) => Ok(true),
       Err(keyring::Error::NoEntry) => Ok(false),
       Err(error) => Err(describe_credential_read_failure(&error)),
-    }
+    })
+    .await
+    .map_err(|error| format!("{AI_KEY_SAVE_FAILED}: {error}"))?
   }
   #[cfg(not(feature = "ai"))]
   {

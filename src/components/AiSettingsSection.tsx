@@ -80,7 +80,7 @@ export function AiSettingsSection() {
   const saveKey = async () => {
     setError(null);
     try {
-      await invoke('ai_save_key', { key: keyDraft });
+      await invoke('ai_save_key', { key: keyDraft, baseUrl: ai.baseUrl });
       setHasKey(keyDraft.trim() !== '');
       setKeyDraft('');
     } catch (caught) {

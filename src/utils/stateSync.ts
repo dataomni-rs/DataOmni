@@ -15,6 +15,7 @@ import {
   type ConnectionFailureKind
 } from '../contracts/connectionLifecycle';
 import { alreadyConnectedTo } from './connectionHealth';
+import { openDatabase } from './databaseHandle';
 import { describeError } from './describeError';
 import { translateNow } from '../stores/languageStore';
 
@@ -30,6 +31,8 @@ export class SessionManager {
   private static instance: SessionManager;
   private connectionPromises: Map<string, Promise<void>> = new Map();
   private shutdownPromise: Promise<void> | null = null;
+  /** 单调递增的连接切换代次：晚到的旧连接完成或失败绝不覆盖/清空新连接（H9 / C2） */
+  private switchEpoch = 0;
   /**
    * 断线 / 认证过期 / 重连的状态机。**只服务于自动重连**，界面上没有消费者：
    * 界面读的是 `queryStore.connectionLost`，它同时被驱动报的 CONNECTION_LOST
@@ -152,15 +155,23 @@ export class SessionManager {
       return;
     }
 
+    const epoch = ++this.switchEpoch;
     // 创建连接Promise
-    const connectionPromise = this.performConnectionSwitch(connection, connectionString);
+    const connectionPromise = this.performConnectionSwitch(connection, connectionString, epoch);
     this.connectionPromises.set(connectionId, connectionPromise);
 
     try {
       await connectionPromise;
+      if (epoch !== this.switchEpoch) {
+        return;
+      }
       this.transition({ type: 'connected', profileId: connectionId });
       console.log('✅ 连接切换完成:', connectionId);
     } catch (error) {
+      if (epoch !== this.switchEpoch) {
+        console.warn('⚠️ 忽略已过期的连接失败回调:', connectionId, error);
+        return;
+      }
       this.transition({
         type: 'connection-failed',
         profileId: connectionId,
@@ -171,7 +182,9 @@ export class SessionManager {
       throw error;
     } finally {
       // 清理Promise
-      this.connectionPromises.delete(connectionId);
+      if (this.connectionPromises.get(connectionId) === connectionPromise) {
+        this.connectionPromises.delete(connectionId);
+      }
     }
   }
 
@@ -192,6 +205,7 @@ export class SessionManager {
    * 要么根本没得选——连接已经不在了，再问「要不要提交」是在骗人。
    */
   private async disconnectNow(): Promise<void> {
+    this.switchEpoch += 1;
     const appStore = useAppStore.getState();
     const activeConnectionId = appStore.activeConnection?.config.id;
 
@@ -262,13 +276,28 @@ export class SessionManager {
     }
   }
 
+  private async closeOrphanIfUnused(connectionString: string): Promise<void> {
+    const live = useQueryStore.getState();
+    if (live.connectionString === connectionString) {
+      return;
+    }
+    try {
+      const handle = await openDatabase(connectionString);
+      await handle.close();
+    } catch {
+      // 孤儿句柄清理失败不干扰当前活跃连接
+    }
+  }
+
   /**
    * 执行实际的连接切换
    */
   private async performConnectionSwitch(
     connection: ConnectionConfig,
-    resolveConnectionString: () => Promise<string>
+    resolveConnectionString: () => Promise<string>,
+    epoch: number
   ): Promise<void> {
+    const isStale = () => epoch !== this.switchEpoch;
     const appStore = useAppStore.getState();
     const queryStore = useQueryStore.getState();
 
@@ -292,7 +321,7 @@ export class SessionManager {
       ? appStore.activeConnection
       : null;
     const leavePrevious = async (keepPoolFor?: string) => {
-      if (previous) {
+      if (previous && !isStale()) {
         console.log('🔌 断开旧连接:', previous.config.id);
         await queryStore.disconnect({ keepPoolFor });
         appStore.clearDatabaseMetadata(previous.config.id);
@@ -305,7 +334,13 @@ export class SessionManager {
     try {
       connectionString = await resolveConnectionString();
     } catch (error) {
+      if (isStale()) {
+        return;
+      }
       await leavePrevious();
+      if (isStale()) {
+        return;
+      }
       // 和握手失败落在同一处：「连不上」的横幅与重连按钮读的是 queryStore.error
       const message = describeError(error, translateNow('error.connectFailed'));
       useQueryStore.setState({
@@ -319,7 +354,15 @@ export class SessionManager {
       });
       throw new Error(message);
     }
+    if (isStale()) {
+      await this.closeOrphanIfUnused(connectionString);
+      return;
+    }
     await leavePrevious(connectionString);
+    if (isStale()) {
+      await this.closeOrphanIfUnused(connectionString);
+      return;
+    }
 
     // 4. 建立新连接
     await queryStore.connectToDatabase(
@@ -327,9 +370,16 @@ export class SessionManager {
       connection.id,
       createDatabaseSession(connection)
     );
+    if (isStale()) {
+      await this.closeOrphanIfUnused(connectionString);
+      return;
+    }
 
     // 5. 等待数据库连接对象就绪
     await this.waitForDatabaseReady();
+    if (isStale()) {
+      return;
+    }
 
     // 6. 设置应用状态
     useAppStore.setState({

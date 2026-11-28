@@ -8,20 +8,19 @@ use crate::services::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::{ipc::Channel, State};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::Duration;
 
 pub const QUERY_CANCELLED_CODE: &str = "QUERY_CANCELLED";
 
-use crate::services::clickhouse::{ClickHouseRegistry, CLICKHOUSE_SCHEME};
-use crate::services::dameng::{DamengRegistry, DAMENG_SCHEME};
-use crate::services::duckdb::{DuckDbRegistry, DUCKDB_SCHEME};
-use crate::services::oracle::{OracleRegistry, ORACLE_SCHEME};
+use crate::services::clickhouse::CLICKHOUSE_SCHEME;
+use crate::services::dameng::DAMENG_SCHEME;
+use crate::services::duckdb::DUCKDB_SCHEME;
+use crate::services::oracle::ORACLE_SCHEME;
 use crate::services::query_executor::PoolRef;
-use crate::services::{
-  DbPool, QueryError, SqlServerRegistry, SqlxRegistry, TunnelRegistry, SQL_SERVER_SCHEME,
-};
+use crate::services::{DbPool, EngineRegistries, QueryError, TunnelRegistry, SQL_SERVER_SCHEME};
 use crate::services::{PlanDialect, SERVER_VERSION_QUERY};
 
 /// 池子按连接串做键，查不到说明前端 `Database.load` 用的串和这里算的不是
@@ -34,6 +33,26 @@ pub const ROW_LIMIT_OUT_OF_RANGE: &str = "DATAOMNI_ROW_LIMIT_OUT_OF_RANGE";
 pub const BYTE_LIMIT_OUT_OF_RANGE: &str = "DATAOMNI_BYTE_LIMIT_OUT_OF_RANGE";
 /// 连接服务的锁拿不到 / 还没建起来
 pub const SERVICE_NOT_READY: &str = "DATAOMNI_SERVICE_NOT_READY";
+
+/// 在 `spawn_blocking` 中访问已初始化的 `ConnectionService`，避免钥匙串读取或锁竞争阻塞 Tokio 工作线程（B5）。
+async fn with_existing_service_blocking<T, F>(
+  service_state: &ConnectionServiceState,
+  action: F,
+) -> Result<T, QueryError>
+where
+  T: Send + 'static,
+  F: FnOnce(&crate::services::ConnectionService) -> Result<T, QueryError> + Send + 'static,
+{
+  let state = Arc::clone(service_state);
+  tokio::task::spawn_blocking(move || {
+    let guard =
+      state.lock().map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
+    let service = guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
+    action(service)
+  })
+  .await
+  .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?
+}
 /// 用户按了取消。不是失败，界面上不该标红
 pub const QUERY_CANCELLED: &str = "DATAOMNI_QUERY_CANCELLED";
 pub const CSV_DELIMITER_INVALID: &str = "DATAOMNI_CSV_DELIMITER_INVALID";
@@ -60,51 +79,62 @@ enum ResolvedPool {
   ClickHouse(std::sync::Arc<crate::services::clickhouse::ClickHousePool>),
 }
 
+async fn resolve_connection_string(
+  connection_id: &str,
+  service_state: &ConnectionServiceState,
+  tunnels: &TunnelRegistry,
+) -> Result<String, QueryError> {
+  let tunnel_port = tunnels.local_port(connection_id).await;
+  let conn_id = connection_id.to_string();
+  with_existing_service_blocking(service_state, move |service| {
+    service
+      .resolve_connection_string(&conn_id, tunnel_port)
+      .map_err(QueryError::from_connection_service)
+  })
+  .await
+}
+
 impl ResolvedPool {
-  #[allow(clippy::too_many_arguments)]
-  async fn resolve(
-    connection_string: String,
-    database_instances: &SqlxRegistry,
-    sql_server: &SqlServerRegistry,
-    oracle: &OracleRegistry,
-    dameng: &DamengRegistry,
-    duckdb: &DuckDbRegistry,
-    clickhouse: &ClickHouseRegistry,
+  fn resolve(
+    connection_string: &str,
+    engines: &EngineRegistries,
   ) -> Result<ResolvedPool, QueryError> {
     if connection_string.starts_with(CLICKHOUSE_SCHEME) {
-      return clickhouse
-        .get(&connection_string)
+      return engines
+        .clickhouse
+        .get(connection_string)
         .map(ResolvedPool::ClickHouse)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
     if connection_string.starts_with(DUCKDB_SCHEME) {
-      return duckdb
-        .get(&connection_string)
+      return engines
+        .duckdb
+        .get(connection_string)
         .map(ResolvedPool::DuckDb)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
     if connection_string.starts_with(DAMENG_SCHEME) {
-      return dameng
-        .get(&connection_string)
+      return engines
+        .dameng
+        .get(connection_string)
         .map(ResolvedPool::Dameng)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
     if connection_string.starts_with(ORACLE_SCHEME) {
-      return oracle
-        .get(&connection_string)
+      return engines
+        .oracle
+        .get(connection_string)
         .map(ResolvedPool::Oracle)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
     if connection_string.starts_with(SQL_SERVER_SCHEME) {
-      return sql_server
-        .get(&connection_string)
+      return engines
+        .sql_server
+        .get(connection_string)
         .map(ResolvedPool::SqlServer)
         .ok_or_else(|| QueryError::message(DB_SESSION_NOT_CONNECTED));
     }
-    Ok(ResolvedPool::Sqlx(crate::services::sqlx_pool::shared(
-      database_instances,
-      &connection_string,
-    )))
+    Ok(ResolvedPool::Sqlx(crate::services::sqlx_pool::shared(&engines.sqlx, connection_string)))
   }
 
   fn pool_ref(&self) -> Result<PoolRef<'_>, QueryError> {
@@ -178,22 +208,15 @@ impl QueryCancellationState {
   }
 }
 
-// 参数都是 Tauri 注入的 State，由框架按类型逐个填，合不成一个结构
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn execute_query(
   request: QueryExecutionRequest,
   on_batch: Channel<QueryResultBatch>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
   cancellation_state: State<'_, QueryCancellationState>,
   query_session_state: State<'_, QuerySessionState>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<QueryExecutionSummary, QueryError> {
   if !(100..=3_600_000).contains(&request.timeout_ms) {
     return Err(QueryError::message(TIMEOUT_OUT_OF_RANGE));
@@ -205,29 +228,10 @@ pub async fn execute_query(
     return Err(QueryError::message(BYTE_LIMIT_OUT_OF_RANGE));
   }
 
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
-  let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let connection_string =
+    resolve_connection_string(&request.connection_id, &connection_service_state, &tunnels).await?;
 
-  let resolved = ResolvedPool::resolve(
-    connection_string.clone(),
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)?;
   let pool = resolved.pool_ref()?;
   let receiver =
     cancellation_state.register(&request.execution_id).await.map_err(QueryError::message)?;
@@ -262,49 +266,25 @@ pub async fn execute_query(
 /// 不走 `execute_query`：那条命令是流式读，按一条语句设计，而且是自动提交的。
 /// 网格里的一批变更必须共用一个事务，否则中途失败会把数据停在一个用户没打算
 /// 要的中间状态。
-// 参数都是 Tauri 注入的 State，由框架按类型逐个填，合不成一个结构
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn execute_write_batch(
   connection_id: String,
   statements: Vec<WriteStatement>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
   query_session_state: State<'_, QuerySessionState>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<Vec<u64>, WriteBatchError> {
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
-  let tunnel_port = tunnels.local_port(&connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| batch_error(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| batch_error(SERVICE_NOT_READY))?;
-    service.resolve_connection_string(&connection_id, tunnel_port).map_err(|message| {
-      WriteBatchError { statement_index: 0, error: QueryError::from_connection_service(message) }
-    })?
-  };
+  let connection_string =
+    resolve_connection_string(&connection_id, &connection_service_state, &tunnels)
+      .await
+      .map_err(|error| WriteBatchError { statement_index: 0, error })?;
   if query_session_state.transaction_open_on(&connection_string).await {
     return Err(batch_error(SESSION_TRANSACTION_OPEN));
   }
 
-  let resolved = ResolvedPool::resolve(
-    connection_string,
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await
-  .map_err(|error| WriteBatchError { statement_index: 0, error })?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)
+    .map_err(|error| WriteBatchError { statement_index: 0, error })?;
   let pool = resolved.pool_ref().map_err(|error| WriteBatchError { statement_index: 0, error })?;
   write_batch::execute_write_batch(pool, &statements).await
 }
@@ -330,45 +310,21 @@ pub struct ExportRequest {
 /// 不走 `execute_query`：那条命令按「结果要回到界面上」设计，行数与字节都被
 /// 上限钉死，而整表导出的行数正是未知且可能很大的那一类。这里一行都不进内存，
 /// 也一行都不过 IPC。
-// 参数都是 Tauri 注入的 State，由框架按类型逐个填，合不成一个结构
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn export_query_to_file(
   request: ExportRequest,
   on_progress: Channel<ExportProgress>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
   cancellation_state: State<'_, QueryCancellationState>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<ExportSummary, QueryError> {
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
-  let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let target_path = std::path::Path::new(&request.path);
+  crate::services::path_guard::refuse_reserved_path(target_path).map_err(QueryError::message)?;
+  let connection_string =
+    resolve_connection_string(&request.connection_id, &connection_service_state, &tunnels).await?;
 
-  let resolved = ResolvedPool::resolve(
-    connection_string,
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)?;
   let pool = resolved.pool_ref()?;
 
   // 取消与查询共用同一个登记表：取消的语义、重复 ID 的检查、结束时的清理
@@ -397,8 +353,6 @@ pub async fn export_query_to_file(
 /// 备份到 `path`：SQLite 的库文件、DuckDB 的导出目录、PostgreSQL 的 pg_dump（custom 格式）、
 /// MySQL / MariaDB 的 mysqldump（SQL 文本）、MongoDB 的 mongodump（gzip 归档）。
 /// 别的网络库还没有，见 `services::backup` 开头
-// 参数都是 Tauri 注入的 State，理由同 `export_query_to_file`
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn backup_database(
   connection_id: String,
@@ -407,39 +361,34 @@ pub async fn backup_database(
   database: Option<String>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<crate::services::backup::BackupKind, QueryError> {
+  crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&path))
+    .map_err(QueryError::message)?;
   let tunnel_port = tunnels.local_port(&connection_id).await;
   // PostgreSQL / MySQL / MongoDB 走外部工具：要的是补上凭据的 profile（主机、用户、TLS），不是连接池
-  let (connection_string, tool_profile) = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    let profile = service
-      .get_connection(&connection_id)
-      .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
-    let tool_profile = if matches!(
-      profile.db_type,
-      crate::models::DatabaseType::PostgreSQL
-        | crate::models::DatabaseType::MySQL
-        | crate::models::DatabaseType::MongoDB
-    ) {
-      Some(service.resolve_for_connection(profile).map_err(QueryError::message)?)
-    } else {
-      None
-    };
-    let connection_string = service
-      .resolve_connection_string(&connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?;
-    (connection_string, tool_profile)
-  };
+  let conn_id = connection_id.clone();
+  let (connection_string, tool_profile) =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      let profile = service
+        .get_connection(&conn_id)
+        .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
+      let tool_profile = if matches!(
+        profile.db_type,
+        crate::models::DatabaseType::PostgreSQL
+          | crate::models::DatabaseType::MySQL
+          | crate::models::DatabaseType::MongoDB
+      ) {
+        Some(service.resolve_for_connection(profile).map_err(QueryError::message)?)
+      } else {
+        None
+      };
+      let connection_string = service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)?;
+      Ok((connection_string, tool_profile))
+    })
+    .await?;
   if let Some(profile) = tool_profile {
     return crate::services::backup::backup_with_tool(
       &profile,
@@ -449,16 +398,7 @@ pub async fn backup_database(
     )
     .await;
   }
-  let resolved = ResolvedPool::resolve(
-    connection_string,
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)?;
   crate::services::backup::backup_embedded(resolved.pool_ref()?, std::path::Path::new(&path)).await
 }
 
@@ -525,6 +465,7 @@ pub async fn preview_csv_file(request: CsvPreviewRequest) -> Result<CsvPreview, 
   };
 
   let path = std::path::PathBuf::from(&request.path);
+  crate::services::path_guard::refuse_reserved_path(&path).map_err(QueryError::message)?;
   // 阻塞的文件读放到阻塞线程池：几十 MB 的文件在异步线程上读会把整个运行时卡住
   tokio::task::spawn_blocking(move || {
     csv_import::preview_csv(&path, delimiter, request.has_header, csv_import::PREVIEW_ROWS)
@@ -543,7 +484,6 @@ pub struct CsvImportRequest {
 }
 
 /// 把一个 CSV 文件导入一张表。
-// 参数都是 Tauri 注入的 State，由框架按类型逐个填，合不成一个结构
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn import_csv_file(
@@ -551,43 +491,21 @@ pub async fn import_csv_file(
   on_progress: Channel<ImportProgress>,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
   cancellation_state: State<'_, QueryCancellationState>,
   pause_state: State<'_, ImportPauseState>,
   query_session_state: State<'_, QuerySessionState>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<ImportSummary, QueryError> {
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
-  let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  crate::services::path_guard::refuse_reserved_path(std::path::Path::new(&request.import.path))
+    .map_err(QueryError::message)?;
+  let connection_string =
+    resolve_connection_string(&request.connection_id, &connection_service_state, &tunnels).await?;
   // 导入与网格提交一样另开连接，事务开着时同样写在它外面
   if query_session_state.transaction_open_on(&connection_string).await {
     return Err(QueryError::message(SESSION_TRANSACTION_OPEN));
   }
 
-  let resolved = ResolvedPool::resolve(
-    connection_string,
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)?;
   let pool = resolved.pool_ref()?;
 
   let mut receiver =
@@ -695,50 +613,30 @@ pub struct ExplainRequest {
 ///
 /// 超时用固定的一分钟：`EXPLAIN ANALYZE` 会真的跑，而它跑多久取决于那条语句。
 // 参数都是 Tauri 注入的 State，由框架按类型逐个填，合不成一个结构
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn explain_query(
   request: ExplainRequest,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
+  engines: State<'_, EngineRegistries>,
   query_session_state: State<'_, QuerySessionState>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
 ) -> Result<crate::services::explain::QueryPlan, QueryError> {
-  // 隧道端口先查出来：下面那个块里拿着 std 的锁，不能 await
   let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let (connection_string, db_type) = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    let connection = service
-      .get_connection(&request.connection_id)
-      .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
-    let db_type = connection.db_type.clone();
-    (
-      service
-        .resolve_connection_string(&request.connection_id, tunnel_port)
-        .map_err(QueryError::from_connection_service)?,
-      db_type,
-    )
-  };
+  let conn_id = request.connection_id.clone();
+  let (connection_string, db_type) =
+    with_existing_service_blocking(&connection_service_state, move |service| {
+      let connection = service
+        .get_connection(&conn_id)
+        .ok_or_else(|| QueryError::message(CONNECTION_NOT_FOUND))?;
+      let db_type = connection.db_type.clone();
+      let cs = service
+        .resolve_connection_string(&conn_id, tunnel_port)
+        .map_err(QueryError::from_connection_service)?;
+      Ok((cs, db_type))
+    })
+    .await?;
 
-  let resolved = ResolvedPool::resolve(
-    connection_string.clone(),
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)?;
   let pool = resolved.pool_ref()?;
 
   // TiDB 与 CockroachDB 走 MySQL / PostgreSQL 的连接类型，EXPLAIN 却各说各的。
@@ -874,41 +772,17 @@ pub struct TerminateSessionRequest {
 
 /// 在独立非事务连接上取消查询或终止指定数据库会话。
 /// 不接受前端任意 SQL：会话 ID 在后端经严格白名单校验后拼装管理语句。
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn terminate_database_session(
   request: TerminateSessionRequest,
   connection_service_state: State<'_, ConnectionServiceState>,
   tunnels: State<'_, TunnelRegistry>,
-  database_instances: State<'_, SqlxRegistry>,
-  sql_server: State<'_, SqlServerRegistry>,
-  oracle: State<'_, OracleRegistry>,
-  dameng: State<'_, DamengRegistry>,
-  duckdb: State<'_, DuckDbRegistry>,
-  clickhouse: State<'_, ClickHouseRegistry>,
+  engines: State<'_, EngineRegistries>,
 ) -> Result<crate::services::TerminateSessionResult, QueryError> {
-  let tunnel_port = tunnels.local_port(&request.connection_id).await;
-  let connection_string = {
-    let connection_service_guard = connection_service_state
-      .lock()
-      .map_err(|e| QueryError::message(format!("{SERVICE_STATE_UNAVAILABLE}: {e}")))?;
-    let service =
-      connection_service_guard.as_ref().ok_or_else(|| QueryError::message(SERVICE_NOT_READY))?;
-    service
-      .resolve_connection_string(&request.connection_id, tunnel_port)
-      .map_err(QueryError::from_connection_service)?
-  };
+  let connection_string =
+    resolve_connection_string(&request.connection_id, &connection_service_state, &tunnels).await?;
 
-  let resolved = ResolvedPool::resolve(
-    connection_string,
-    &database_instances,
-    &sql_server,
-    &oracle,
-    &dameng,
-    &duckdb,
-    &clickhouse,
-  )
-  .await?;
+  let resolved = ResolvedPool::resolve(&connection_string, &engines)?;
   let pool = resolved.pool_ref()?;
   crate::services::execute_session_action(pool, request.action, &request.session_id).await
 }

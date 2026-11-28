@@ -1,6 +1,24 @@
 import type { ConnectionEnvironment } from '../contracts';
 import type { CompletionRelation } from '../contracts/databaseMetadata';
-import type { QueryExecutionError } from '../contracts/queryExecution';
+import type { QueryExecutionError, SqlDialect } from '../contracts/queryExecution';
+import { redactSensitiveText, redactSqlForHistory } from './historyRedaction';
+
+function resolveRedactionDialect(dialect: string): SqlDialect {
+  const lower = dialect.trim().toLowerCase();
+  if (lower.includes('mysql') || lower.includes('mariadb') || lower.includes('tidb') || lower.includes('oceanbase')) return 'mysql';
+  if (lower.includes('sqlite')) return 'sqlite';
+  if (lower.includes('sqlserver') || lower.includes('mssql') || lower.includes('sql server')) return 'sqlserver';
+  if (lower.includes('oracle')) return 'oracle';
+  if (lower.includes('dameng') || lower.includes('dm8')) return 'dameng';
+  if (lower.includes('duckdb')) return 'duckdb';
+  if (lower.includes('clickhouse')) return 'clickhouse';
+  return 'postgresql';
+}
+
+function redactSqlForPrompt(sql: string, dialect: string): string {
+  const step1 = redactSqlForHistory(sql.trim(), resolveRedactionDialect(dialect)).sql;
+  return redactSensitiveText(step1);
+}
 
 /**
  * SQL 编辑器三把克制型 AI 手术刀（`rfcs/ai-sql-assist.md` AI1）：
@@ -174,18 +192,18 @@ export function buildNlToSqlPrompt(input: NlToSqlPromptInput): AiPromptMessages 
 
   const sections: string[] = [
     `Dialect: ${input.dialect}`,
-    `Requirement:\n${input.requirement.trim()}`
+    `Requirement:\n${redactSensitiveText(input.requirement.trim())}`
   ];
 
   if (input.existingSql && input.existingSql.trim() !== '') {
-    sections.push(`Existing SQL to revise or extend:\n${input.existingSql.trim()}`);
+    sections.push(`Existing SQL to revise or extend:\n${redactSqlForPrompt(input.existingSql, input.dialect)}`);
   }
 
   sections.push(`Selected schema (metadata only, no row data):\n${formatRelationSchemaSnippet(input.selectedRelations)}`);
 
   if (input.semanticsNotes && input.semanticsNotes.trim() !== '') {
     sections.push(
-      `Local business semantics notes:\n${truncateText(input.semanticsNotes, MAX_SEMANTICS_PROMPT_CHARS)}`
+      `Local business semantics notes:\n${truncateText(redactSensitiveText(input.semanticsNotes), MAX_SEMANTICS_PROMPT_CHARS)}`
     );
   }
 
@@ -214,18 +232,18 @@ export function buildErrorFixPrompt(input: ErrorFixPromptInput): AiPromptMessage
     referencedKeys.has(relationKey(relation))
   );
 
-  const errorLines = [`Message: ${input.errorMessage}`];
+  const errorLines = [`Message: ${redactSensitiveText(input.errorMessage)}`];
   if (input.details?.code) errorLines.push(`Code: ${input.details.code}`);
   if (input.details?.position) errorLines.push(`Position: ${input.details.position}`);
-  if (input.details?.detail) errorLines.push(`Detail: ${input.details.detail}`);
-  if (input.details?.hint) errorLines.push(`Hint: ${input.details.hint}`);
+  if (input.details?.detail) errorLines.push(`Detail: ${redactSensitiveText(input.details.detail)}`);
+  if (input.details?.hint) errorLines.push(`Hint: ${redactSensitiveText(input.details.hint)}`);
   if (input.details?.constraint) errorLines.push(`Constraint: ${input.details.constraint}`);
   if (input.details?.table) errorLines.push(`Table: ${input.details.table}`);
 
   const sections = [
     `Dialect: ${input.dialect}`,
     `Database error:\n${errorLines.join('\n')}`,
-    `Failing SQL:\n${input.sql.trim()}`
+    `Failing SQL:\n${redactSqlForPrompt(input.sql, input.dialect)}`
   ];
 
   if (relevantRelations.length > 0) {
@@ -257,12 +275,12 @@ export function buildExplainAnalysisPrompt(input: ExplainAnalysisPromptInput): A
 
   const sections = [
     `Dialect: ${input.dialect}`,
-    `SQL:\n${input.sql.trim()}`
+    `SQL:\n${redactSqlForPrompt(input.sql, input.dialect)}`
   ];
   if (input.worstEstimateSummary) {
-    sections.push(`Worst row-estimate divergence:\n${input.worstEstimateSummary}`);
+    sections.push(`Worst row-estimate divergence:\n${redactSensitiveText(input.worstEstimateSummary)}`);
   }
-  sections.push(`EXPLAIN output:\n${truncateText(input.planRaw, MAX_EXPLAIN_RAW_CHARS)}`);
+  sections.push(`EXPLAIN output:\n${truncateText(redactSensitiveText(input.planRaw), MAX_EXPLAIN_RAW_CHARS)}`);
   if (relevantRelations.length > 0) {
     sections.push(`Referenced table metadata:\n${formatRelationSchemaSnippet(relevantRelations)}`);
   }

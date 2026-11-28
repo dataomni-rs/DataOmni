@@ -43,26 +43,111 @@ const READ_POSTS: &[&[&str]] = &[
 const GET_OPERATIONS: &[&str] =
   &["_refresh", "_flush", "_forcemerge", "_cache", "_reload_search_analyzers"];
 
+/// 严格解码单个 URL 路径段中的百分号转义；任何不完整的 `%` 序列或非 UTF-8 均拒绝
+fn percent_decode_strict(segment: &str) -> Result<String, String> {
+  let bytes = segment.as_bytes();
+  let mut out = Vec::with_capacity(bytes.len());
+  let mut index = 0;
+  while index < bytes.len() {
+    if bytes[index] == b'%' {
+      let (Some(&hi), Some(&lo)) = (bytes.get(index + 1), bytes.get(index + 2)) else {
+        return Err(format!("malformed percent-encoding in path segment {segment:?}"));
+      };
+      let hex = |byte: u8| -> Option<u8> {
+        match byte {
+          b'0'..=b'9' => Some(byte - b'0'),
+          b'a'..=b'f' => Some(byte - b'a' + 10),
+          b'A'..=b'F' => Some(byte - b'A' + 10),
+          _ => None,
+        }
+      };
+      let (Some(hi), Some(lo)) = (hex(hi), hex(lo)) else {
+        return Err(format!("malformed percent-encoding in path segment {segment:?}"));
+      };
+      out.push((hi << 4) | lo);
+      index += 3;
+    } else {
+      out.push(bytes[index]);
+      index += 1;
+    }
+  }
+  String::from_utf8(out)
+    .map_err(|_| format!("non-UTF-8 percent-encoding in path segment {segment:?}"))
+}
+
+/// 按与 `services/elasticsearch.rs` 一致的 URL 解析器规范化路径并逐段解码校验：
+/// 拒绝 `.`/`..` 路径折叠、反斜杠、控制字符、双重编码与百分号编码的 `_` 端点段
+fn decode_checked_segments(path: &str) -> Result<Vec<String>, String> {
+  if !path.starts_with('/') || path.starts_with("//") {
+    return Err(format!("invalid path {path:?}"));
+  }
+  if path.bytes().any(|byte| byte < 0x20 || byte == 0x7f || byte == b'\\') {
+    return Err(format!("path {path:?} contains disallowed control characters or backslashes"));
+  }
+  let raw_path = path.split(['?', '#']).next().unwrap_or("");
+  for segment in raw_path.split('/').filter(|segment| !segment.is_empty()) {
+    if segment == "." || segment == ".." {
+      return Err(format!("dot segment {segment:?} is not allowed in path {path:?}"));
+    }
+  }
+  let parsed = url::Url::parse(&format!("http://es.invalid{path}"))
+    .map_err(|error| format!("invalid path {path:?}: {error}"))?;
+  if parsed.host_str() != Some("es.invalid")
+    || parsed.port().is_some()
+    || !parsed.username().is_empty()
+    || parsed.password().is_some()
+  {
+    return Err(format!("path {path:?} must not override host or credentials"));
+  }
+  let mut segments = Vec::new();
+  for raw in parsed.path().split('/').filter(|segment| !segment.is_empty()) {
+    let decoded = percent_decode_strict(raw)?;
+    if decoded == "." || decoded == ".." {
+      return Err(format!("dot segment is not allowed in path {path:?}"));
+    }
+    if decoded
+      .bytes()
+      .any(|byte| byte < 0x20 || byte == 0x7f || matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'%'))
+    {
+      return Err(format!("decoded path segment {raw:?} contains disallowed characters"));
+    }
+    if raw.contains('%') && decoded.starts_with('_') {
+      return Err(format!("percent-encoded endpoint segment {raw:?} is not allowed"));
+    }
+    segments.push(decoded);
+  }
+  Ok(segments)
+}
+
 /// 这条请求能不能在命令行里发。拒绝的理由是给 Agent 看的
 fn check(method: &str, path: &str) -> Result<(), String> {
-  let path = path.split(['?', '#']).next().unwrap_or("");
-  let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+  let segments = decode_checked_segments(path)?;
   let endpoint: Vec<&str> =
-    segments.iter().skip_while(|segment| !segment.starts_with('_')).copied().collect();
+    segments.iter().skip_while(|segment| !segment.starts_with('_')).map(String::as_str).collect();
   match method.to_ascii_uppercase().as_str() {
-    "GET" | "HEAD" => match endpoint.iter().find(|segment| GET_OPERATIONS.contains(segment)) {
+    "GET" | "HEAD" => match endpoint
+      .iter()
+      .find(|segment| GET_OPERATIONS.iter().any(|op| segment.eq_ignore_ascii_case(op)))
+    {
       Some(operation) => Err(format!("{operation} is an operation, not a read")),
       None => Ok(()),
     },
     "POST" => {
       let matches = |shape: &&[&str]| {
         shape.len() == endpoint.len()
-          && shape.iter().zip(&endpoint).all(|(want, got)| *want == "*" || want == got)
+          && shape.iter().zip(&endpoint).all(|(want, got)| {
+            if *want == "*" {
+              !got.is_empty() && !got.starts_with('_') && *got != "." && *got != ".."
+            } else {
+              want == got
+            }
+          })
       };
       if READ_POSTS.iter().any(matches) {
         Ok(())
       } else {
-        Err(format!("POST {path} is not one of the search endpoints"))
+        let raw_path = path.split(['?', '#']).next().unwrap_or("");
+        Err(format!("POST {raw_path} is not one of the search endpoints"))
       }
     }
     other => Err(format!("{other} changes data")),
@@ -233,9 +318,31 @@ mod tests {
       ("GET", "/books/_refresh"),
       ("GET", "/_flush"),
       ("GET", "/books/_cache/clear"),
+      // H1 (S3)：百分号编码与路径折叠绕过
+      ("POST", "/books/%5fdoc/_search"),
+      ("POST", "/books/%5Fdoc/_search"),
+      ("GET", "/books/%5frefresh"),
+      ("GET", "/%5fflush"),
+      ("GET", "/%5Fflush"),
+      ("POST", "/books/%5fdelete_by_query/_explain/.."),
+      ("POST", "/books/_explain/.."),
+      ("POST", "/books/_explain/."),
+      ("POST", "/books/_explain/%2e%2e"),
+      ("POST", "/books/_explain/%2e"),
+      ("POST", "/books/_termvectors/.."),
+      ("POST", "/books/_explain/_update"),
+      ("POST", "/books/%5fsearch"),
+      ("GET", "/books/_doc%2f..%2f_flush"),
+      ("GET", "/books/..%5c_flush"),
+      ("GET", "/books/%255fflush"),
+      ("POST", "//evil.example/books/_search"),
+      ("GET", "/books/_search%00"),
     ] {
       assert!(check(method, path).is_err(), "{method} {path}");
     }
+    // 合法含百分号编码的文档 ID 仍可正常只读访问
+    assert_eq!(check("GET", "/books/_doc/hello%20world"), Ok(()));
+    assert_eq!(check("POST", "/books/_explain/doc%201"), Ok(()));
   }
 
   /// 真库：`DATAOMNI_ELASTICSEARCH_TEST_URL`（`http(s)://user:password@host:port`），只在 shell 里传。

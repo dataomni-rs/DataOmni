@@ -389,4 +389,72 @@ describe('单列复制与单列导出', () => {
       .map((th) => th.dataset.colOrigIndex);
     expect(resetCols).toEqual(['0', '1', '2']);
   });
+
+  // H8 (C1)：同 statementId 改 SQL 重跑后（例如从 users 改成 orders），必须清空旧表暂存的
+  // 待提交变更、编辑单元格与新增行表单，绝不能把表 A 的修改提交到表 B
+  it('同 statementId 换新结果集时清空已暂存的变更与编辑表单', async () => {
+    useQueryStore.setState({ connectionString: 'sqlite::memory:', connectionId: 'conn-1' });
+    const usersResult: QueryResult = {
+      columns: ['id', 'name'],
+      rows: [[1, 'alice']],
+      affected_rows: 1,
+      execution_time: 2,
+      tableColumns: [
+        { name: 'id', data_type: 'integer', is_nullable: false, is_primary_key: true },
+        { name: 'name', data_type: 'text', is_nullable: false, is_primary_key: false }
+      ],
+      editability: { editable: true, schema: null, table: 'users', keyColumns: ['id'] }
+    };
+    const ordersResult: QueryResult = {
+      columns: ['id', 'total'],
+      rows: [[10, 99]],
+      affected_rows: 1,
+      execution_time: 2,
+      tableColumns: [
+        { name: 'id', data_type: 'integer', is_nullable: false, is_primary_key: true },
+        { name: 'total', data_type: 'integer', is_nullable: false, is_primary_key: false }
+      ],
+      editability: { editable: true, schema: null, table: 'orders', keyColumns: ['id'] }
+    };
+
+    await act(async () => {
+      root.render(
+        <QueryResultScrollTable
+          result={usersResult}
+          statementId="s-reused"
+          resultSql="SELECT * FROM users"
+        />
+      );
+    });
+
+    // 暂存删除第 1 行并打开新增行表单
+    const deleteBtn = container.querySelector<HTMLButtonElement>('tbody tr button.text-danger');
+    if (!deleteBtn) throw new Error('没有行删除按钮');
+    await act(async () => {
+      deleteBtn.click();
+    });
+    const addRowBtn = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.trim() === 'Add');
+    if (!addRowBtn) throw new Error('没有 Add 按钮');
+    await act(async () => {
+      addRowBtn.click();
+    });
+
+    expect(container.textContent).toContain('1 pending change');
+
+    // 同一个 statementId 换成 orders 表的新结果
+    await act(async () => {
+      root.render(
+        <QueryResultScrollTable
+          result={ordersResult}
+          statementId="s-reused"
+          resultSql="SELECT * FROM orders"
+        />
+      );
+    });
+
+    expect(container.textContent).not.toContain('pending change');
+    expect(container.textContent).not.toContain('Review & commit');
+    expect(container.textContent).not.toContain('Stage insert');
+  });
 });

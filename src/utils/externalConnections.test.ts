@@ -273,4 +273,14 @@ describe('externalConnections parser', () => {
     expect(isSameConnectionTarget(base, cloneWithNewId)).toBe(true);
     expect(isSameConnectionTarget(base, { ...base, database: 'other' })).toBe(false);
   });
+
+  it('caps out-of-range numeric XML entities instead of throwing RangeError (H18 / P2-5)', () => {
+    const malformed = `<?xml version="1.0" encoding="UTF-8"?>
+<Connections Ver="2.0">
+  <Connection ConnectionName="Test &#99999999; &#x110000; &#65;" ConnType="PGSQL" Host="127.0.0.1" Port="5432" Database="app" UserName="u" />
+</Connections>`;
+    const parsed = parseConnectionImportFile(malformed);
+    expect(parsed.profiles).toHaveLength(1);
+    expect(parsed.profiles[0].name).toBe('Test &#99999999; &#x110000; A');
+  });
 });

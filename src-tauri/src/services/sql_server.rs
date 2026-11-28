@@ -204,8 +204,13 @@ impl SqlServerPool {
   /// 会话连接上可能开着事务、建过临时表、改过 `SET` 选项，放回池子就会被下一次
   /// 目录查询接着用——在别人的事务里读目录。
   pub async fn acquire_for_session(self: &Arc<Self>) -> Result<SqlServerConnection, QueryError> {
+    let (idle, _stale) = self.idle.take();
+    let client = match idle {
+      Some(client) => client,
+      None => connect(&self.target).await?,
+    };
     Ok(SqlServerConnection {
-      client: Some(connect(&self.target).await?),
+      client: Some(client),
       target: self.target.clone(),
       pool: None,
       transaction: TransactionState::default(),
@@ -576,7 +581,7 @@ impl Drop for SqlServerConnection {
     let (Some(pool), Some(client)) = (self.pool.take(), self.client.take()) else {
       return;
     };
-    pool.idle.put(client);
+    let _ = pool.idle.put(client);
   }
 }
 

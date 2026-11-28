@@ -436,6 +436,12 @@ mod imp {
     }
   }
 
+  impl Drop for OraclePool {
+    fn drop(&mut self) {
+      release_in_background(self.idle.drain());
+    }
+  }
+
   impl OraclePool {
     /// `first` 是测试连接时连上的那一条，直接留着用，省一次登录
     pub fn new(target: OracleTarget, first: Arc<Connection>) -> Arc<Self> {
@@ -445,11 +451,17 @@ mod imp {
       })
     }
 
-    /// 给一个会话用的连接：用完不放回，理由和 SQL Server 一样——会话上可能开着
-    /// 事务、改过 `ALTER SESSION`
+    /// 给一个会话用的连接：优先复用池中尚新鲜的空闲连接（避免 CLI 等短命路径双连），
+    /// 用完不放回，理由和 SQL Server 一样——会话上可能开着事务、改过 `ALTER SESSION`
     pub async fn acquire_for_session(&self) -> Result<OracleConnection, QueryError> {
+      let (idle, stale) = self.idle.take();
+      release_in_background(stale);
+      let connection = match idle {
+        Some(connection) => connection,
+        None => connect(&self.target).await?,
+      };
       Ok(OracleConnection {
-        connection: Some(connect(&self.target).await?),
+        connection: Some(connection),
         target: self.target.clone(),
         autocommit: true,
         transaction: TransactionState::default(),
@@ -489,7 +501,11 @@ mod imp {
       let worker = Arc::clone(&connection);
       let result = blocking(move || select_rows(&worker, &sql, &params)).await;
       if keeps_connection(&result) {
-        self.idle.put(connection);
+        if let Some(excess) = self.idle.put(connection) {
+          release_in_background(vec![excess]);
+        }
+      } else {
+        release_in_background(vec![connection]);
       }
       result
     }
@@ -528,10 +544,14 @@ mod imp {
         Err((_, error)) => error.code.as_deref() != Some(CONNECTION_LOST_CODE),
       };
       if reusable {
-        self.idle.put(connection);
+        if let Some(excess) = self.idle.put(connection) {
+          release_in_background(vec![excess]);
+        }
       } else {
-        // 写不重试（不知道写进去没有），但同一批旧连接一起丢掉，下一次不再撞上
-        release_in_background(self.idle.drain());
+        // 写不重试（不知道写进去没有），但同一批旧连接与本条断开连接一起后台丢掉，下一次不再撞上
+        let mut dead = self.idle.drain();
+        dead.push(connection);
+        release_in_background(dead);
       }
       outcome.map_err(|(index, error)| WriteBatchError::at(index, error))
     }
@@ -689,10 +709,18 @@ mod imp {
     transaction: TransactionState,
   }
 
+  impl Drop for OracleConnection {
+    fn drop(&mut self) {
+      if let Some(connection) = self.connection.take() {
+        release_in_background(vec![connection]);
+      }
+    }
+  }
+
   /// future 被丢掉时（超时、取消）打断服务端那条语句。
   ///
   /// 阻塞线程还在等驱动返回，拿不回来；但它手里的是同一条连接，`break_execution`
-  /// 可以从别的线程调。
+  /// 可以从别的线程调。放到独立 OS 线程上执行，避免 OCI 同步网络往返卡住 Tokio worker。
   struct BreakOnDrop {
     connection: Arc<Connection>,
     finished: bool,
@@ -701,7 +729,10 @@ mod imp {
   impl Drop for BreakOnDrop {
     fn drop(&mut self) {
       if !self.finished {
-        let _ = self.connection.break_execution();
+        let connection = Arc::clone(&self.connection);
+        std::thread::spawn(move || {
+          let _ = connection.break_execution();
+        });
       }
     }
   }
@@ -913,6 +944,7 @@ mod imp {
     fn settle(&mut self, connection: Arc<Connection>, keeps: bool, open: Option<bool>) {
       let started_at = std::mem::take(&mut self.transaction).started_at;
       if !keeps {
+        release_in_background(vec![connection]);
         return;
       }
       self.connection = Some(connection);
@@ -980,6 +1012,8 @@ mod imp {
       guard.finished = true;
       if keeps_connection(&outcome) {
         self.connection = Some(connection);
+      } else {
+        release_in_background(vec![connection]);
       }
       outcome
     }

@@ -23,6 +23,8 @@ pub enum Refusal {
   MultipleStatements,
   /// MySQL 会执行 `/*! … */` 里的内容
   ExecutableComment,
+  /// PostgreSQL `U&"..."` Unicode 转义标识符可绕过函数名黑名单
+  UnicodeIdentifier,
   NotARead(String),
   WriteKeyword(String),
   SideEffectFunction(String),
@@ -35,6 +37,9 @@ impl fmt::Display for Refusal {
       Self::Unterminated => write!(f, "a quote or comment is not closed"),
       Self::MultipleStatements => write!(f, "only one statement per call is allowed"),
       Self::ExecutableComment => write!(f, "executable comments (/*! ... */) are not allowed"),
+      Self::UnicodeIdentifier => {
+        write!(f, "Unicode escaped identifiers (U&\"...\") are not allowed")
+      }
       Self::NotARead(word) => {
         write!(f, "only read statements are allowed; this one starts with {word}")
       }
@@ -132,10 +137,44 @@ const SIDE_EFFECT_FUNCTIONS: &[&str] = &[
   "LOAD_EXTENSION",
   "READFILE",
   "WRITEFILE",
+  // SQL Server（可触达外部数据源/文件/SSRF）
+  "OPENROWSET",
+  "OPENDATASOURCE",
+  "OPENQUERY",
+  "OPENXML",
+  // Oracle / 达梦外网/文件系统构造器与函数
+  "HTTPURITYPE",
+  "DBURITYPE",
+  "XDBURITYPE",
+  // PostgreSQL 补充高危文件与运维副作用函数
+  "PG_FILE_WRITE",
+  "PG_FILE_UNLINK",
+  "PG_FILE_RENAME",
+  "PG_PROMOTE",
+  "PG_START_BACKUP",
+  "PG_STOP_BACKUP",
+  "PG_BACKUP_START",
+  "PG_BACKUP_STOP",
+  "BRIN_SUMMARIZE_NEW_VALUES",
+  "GIN_CLEAN_PENDING_LIST",
 ];
 
-/// 前缀匹配：`pg_advisory_lock`、`pg_advisory_xact_lock_shared`、`dblink_connect`、`dblink_open` 等各有一整族
-const SIDE_EFFECT_PREFIXES: &[&str] = &["PG_ADVISORY", "DBLINK_"];
+/// 前缀匹配：`pg_advisory_lock`、`dblink_*`、`lo_*`、`pg_ls_*`、`pg_stat_reset*` 等各有一整族
+const SIDE_EFFECT_PREFIXES: &[&str] = &[
+  "PG_ADVISORY",
+  "DBLINK_",
+  "LO_",
+  "PG_LS_",
+  "PG_STAT_RESET",
+  "PG_LOGICAL_",
+  "PG_CREATE_",
+  "PG_DROP_",
+  "PG_SWITCH_",
+  "PG_REPLICATION_",
+];
+
+/// Oracle / 达梦包前缀调用（如 `UTL_HTTP.REQUEST(...)`、`DBMS_LDAP.INIT(...)`、`URIFACTORY.GETURI(...)`）
+const SIDE_EFFECT_PACKAGE_PREFIXES: &[&str] = &["UTL_", "DBMS_", "URIFACTORY"];
 
 pub fn check(sql: &str) -> Result<(), Refusal> {
   every_lexing().try_for_each(|lexing| check_tokens(&lex(sql, lexing)?))
@@ -258,6 +297,10 @@ fn lex(sql: &str, lexing: Lexing) -> Result<Vec<Token>, Refusal> {
         i += 1;
       }
       let word: String = chars[start..i].iter().collect::<String>().to_ascii_uppercase();
+      // PostgreSQL `U&"..."` Unicode 转义标识符可把危险函数名编码成 `\0070g_...` 绕过词法黑名单（H14 / S7）
+      if word == "U" && chars.get(i) == Some(&'&') && chars.get(i + 1) == Some(&'"') {
+        return Err(Refusal::UnicodeIdentifier);
+      }
       // 字符串前缀：E'' 按 PostgreSQL 的规矩转义，q'' / nq'' 是 Oracle 的引号。
       // 其余前缀（N''、X''、B''）就是普通字符串，下一轮按普通字符串扫
       if chars.get(i) == Some(&'\'') {
@@ -426,12 +469,30 @@ fn check_tokens(tokens: &[Token]) -> Result<(), Refusal> {
       Err(Refusal::SideEffectFunction(name.to_ascii_lowercase()))
     }
     _ => Ok(()),
+  })?;
+
+  // 拦截 Oracle / 达梦 `UTL_*.fn(...)`、`DBMS_*.fn(...)`、`URIFACTORY.getUri(...)` 包调用（H14 / S7）
+  statement.windows(4).try_for_each(|quad| match quad {
+    [Token::Word(pkg) | Token::Quoted(pkg), Token::Punct('.'), Token::Word(func) | Token::Quoted(func), Token::Punct('(')]
+      if is_side_effect_package(pkg) =>
+    {
+      Err(Refusal::SideEffectFunction(format!(
+        "{}.{}",
+        pkg.to_ascii_lowercase(),
+        func.to_ascii_lowercase()
+      )))
+    }
+    _ => Ok(()),
   })
 }
 
 fn is_side_effect(name: &str) -> bool {
   SIDE_EFFECT_FUNCTIONS.contains(&name)
     || SIDE_EFFECT_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
+fn is_side_effect_package(package: &str) -> bool {
+  SIDE_EFFECT_PACKAGE_PREFIXES.iter().any(|prefix| package.starts_with(prefix))
 }
 
 #[cfg(test)]
@@ -496,5 +557,38 @@ mod tests {
     let wrongly_allowed: Vec<_> =
       corpus.deny.iter().filter(|case| check(&case.sql).is_ok()).map(|case| &case.sql).collect();
     assert!(wrongly_allowed.is_empty(), "{wrongly_allowed:#?}");
+  }
+
+  /// H14（S7）纵深回归门：拦截 PG `U&"..."` Unicode 转义标识符、扩展副作用函数族、
+  /// MSSQL `OPENROWSET` 与 Oracle `UTL_*`/`DBMS_*`/`HTTPURITYPE` 包调用。
+  #[test]
+  fn refuses_unicode_identifiers_extended_side_effects_and_oracle_packages() {
+    assert_eq!(check(r#"SELECT U&"\0070g_terminate_backend"(1)"#), Err(Refusal::UnicodeIdentifier));
+    assert_eq!(check(r#"SELECT u&"pg_read_file"('/etc/passwd')"#), Err(Refusal::UnicodeIdentifier));
+    // 普通 Unicode 字符串字面量 U&'...' 不受影响
+    assert_eq!(check(r#"SELECT U&'d\0061t\+000061'"#), Ok(()));
+
+    for dangerous in [
+      "SELECT lo_create(0)",
+      "SELECT lo_unlink(12345)",
+      "SELECT lo_from_bytea(0, '\\x01'::bytea)",
+      "SELECT pg_ls_logdir()",
+      "SELECT pg_ls_waldir()",
+      "SELECT pg_stat_reset()",
+      "SELECT pg_stat_reset_shared('bgwriter')",
+      "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=x;', 'SELECT 1')",
+      "SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=x').db.dbo.t",
+      "SELECT UTL_HTTP.REQUEST('http://169.254.169.254/latest/meta-data/') FROM dual",
+      "SELECT SYS.\"UTL_INADDR\".\"GET_HOST_ADDRESS\"('internal.local') FROM dual",
+      "SELECT DBMS_LDAP.INIT('127.0.0.1', 389) FROM dual",
+      "SELECT HTTPURITYPE('http://169.254.169.254/').GETCLOB() FROM dual",
+      "SELECT URIFACTORY.GETURI('http://169.254.169.254/').GETCLOB() FROM dual",
+    ] {
+      assert!(
+        matches!(check(dangerous), Err(Refusal::SideEffectFunction(_))),
+        "expected side-effect refusal for: {dangerous}, got {:?}",
+        check(dangerous)
+      );
+    }
   }
 }

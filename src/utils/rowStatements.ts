@@ -1,5 +1,6 @@
 import type { ColumnInfo } from '../contracts';
 import { unhandledDialect } from '../contracts/queryExecution';
+import { SQL_DIALECT_TRAITS } from '../contracts/sqlDialectTraits';
 import { columnTypeToken, isConcurrencyComparable, isNumericColumnType, NUMERIC_LITERAL } from './columnTypes';
 import type { BoundValue, CellInput } from './cellInput';
 import { binaryLiteral, isCompleteHex } from './columnEditors';
@@ -68,8 +69,11 @@ function createPlaceholderAllocator(dialect: SqlIdentifierDialect): PlaceholderA
   return (column) => {
     index += 1;
     switch (dialect) {
-      case 'clickhouse':
-        return `{p${index}:${column?.data_type || 'String'}}`;
+      case 'clickhouse': {
+        const typeName = column?.data_type?.trim() || 'String';
+        assertSafeColumnType(typeName, 'clickhouse');
+        return `{p${index}:${typeName}}`;
+      }
       case 'postgresql':
         return `$${index}`;
       // Oracle 按位置绑 `:1`、`:2`
@@ -118,7 +122,57 @@ function typedParameter(
   if (CHAR_FAMILY.test(column.data_type)) {
     return `${placeholder}::bpchar`;
   }
-  return `${placeholder}::${column.data_type}`;
+  const typeName = column.data_type.trim();
+  assertSafeColumnType(typeName, 'postgresql');
+  return `${placeholder}::${typeName}`;
+}
+
+const PG_IDENT = '(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)';
+const PG_MULTIWORD_TYPE =
+  '(?:double\\s+precision|character\\s+varying|bit\\s+varying|(?:timestamp|time)(?:\\s*\\(\\s*\\d+\\s*\\))?\\s+(?:with|without)\\s+time\\s+zone|interval(?:\\s+[A-Za-z]+(?:\\s+to\\s+[A-Za-z]+)?)?)';
+const PG_SAFE_TYPE_RE = new RegExp(
+  `^(?:${PG_MULTIWORD_TYPE}|(?:${PG_IDENT}\\.)?${PG_IDENT})(?:\\s*\\(\\s*\\d+(?:\\s*,\\s*\\d+)?\\s*\\))?(?:\\s*\\[\\s*\\])*$`,
+  'i'
+);
+const CH_FORBIDDEN_RE = /[;{}[\]\\`]|--|\/\*|\*\//;
+const CH_SAFE_CHARS_RE = /^[A-Za-z_][A-Za-z0-9_(),\s'=.+-]*$/;
+
+/**
+ * 校验目录返回的列类型声明语法后再插值进 `::type`（PostgreSQL）或 `{pN:type}`（ClickHouse），
+ * 阻断恶意表目录借 `column.data_type` 注入任意 SQL 片段（H18 / P2-5）。
+ */
+export function isSafeColumnType(typeName: string, dialect: 'postgresql' | 'clickhouse'): boolean {
+  const trimmed = typeName.trim();
+  if (trimmed === '' || trimmed.length > 256 || /[\0\r\n;]/.test(trimmed) || trimmed.includes('--') || trimmed.includes('/*')) {
+    return false;
+  }
+  if (dialect === 'postgresql') {
+    return PG_SAFE_TYPE_RE.test(trimmed);
+  }
+  if (CH_FORBIDDEN_RE.test(trimmed) || !CH_SAFE_CHARS_RE.test(trimmed)) {
+    return false;
+  }
+  let depth = 0;
+  let inQuote = false;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (ch === "'") {
+      inQuote = !inQuote;
+    } else if (!inQuote) {
+      if (ch === '(') depth += 1;
+      else if (ch === ')') {
+        depth -= 1;
+        if (depth < 0) return false;
+      }
+    }
+  }
+  return !inQuote && depth === 0;
+}
+
+function assertSafeColumnType(typeName: string, dialect: 'postgresql' | 'clickhouse'): void {
+  if (!isSafeColumnType(typeName, dialect)) {
+    throw new Error(`Unsafe column type declaration for ${dialect}: ${typeName}`);
+  }
 }
 
 /** 这几种收 text 参数不用转；带上 `::varchar(32)` 只会让预览里的语句更难读 */
@@ -388,16 +442,17 @@ export function buildInsertStatement(
     const defaults = Object.keys(values).filter((name) => values[name].kind === 'default');
     // Oracle 要点名一列：虚拟列不收 DEFAULT，能避开就避开
     const defaulted = defaults.find((name) => !generated.has(name)) ?? defaults[0];
+    const insertStyle = SQL_DIALECT_TRAITS[target.dialect].emptyInsertStyle;
     // 每列都交给默认值（只有自增主键和 created_at 的表），仍是合法的一行；
-    // 省掉全部列之后的写法各家不同。ClickHouse 没有对应写法
-    if (defaulted === undefined || target.dialect === 'clickhouse') {
+    // 省掉全部列之后的写法由 SQL_DIALECT_TRAITS 统一声明（含 Oracle 与达梦显式列 DEFAULT）
+    if (defaulted === undefined || insertStyle === 'unsupported') {
       throw new Error(translateNow('table.noInsertableColumns'));
     }
     const table = tableReference(target);
-    if (target.dialect === 'mysql') {
+    if (insertStyle === 'empty-values') {
       return { sql: `INSERT INTO ${table} () VALUES ()`, params: [] };
     }
-    if (target.dialect === 'oracle') {
+    if (insertStyle === 'explicit-default-column') {
       return { sql: `INSERT INTO ${table} (${quoteSqlIdentifier(defaulted, target.dialect)}) VALUES (DEFAULT)`, params: [] };
     }
     return { sql: `INSERT INTO ${table} DEFAULT VALUES`, params: [] };

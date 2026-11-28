@@ -31,6 +31,7 @@ export function unhandledDialect(dialect: never): never {
 
 export interface QueryExecutionSessionSnapshot {
   readonly profileId: string;
+  readonly profileName?: string;
   readonly sessionId: string;
   readonly database: string | null;
 }
@@ -107,6 +108,7 @@ export function createQueryExecution(
     dialect,
     session: {
       profileId: session.profileId,
+      ...(session.profileName !== undefined ? { profileName: session.profileName } : {}),
       sessionId: session.id,
       database: session.database
     },

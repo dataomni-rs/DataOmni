@@ -5,4 +5,5 @@ export * from './query';
 export * from './queryExecution';
 export * from './resultSet';
 export * from './session';
+export * from './sqlDialectTraits';
 export * from './workspace';

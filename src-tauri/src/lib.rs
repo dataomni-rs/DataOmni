@@ -57,17 +57,8 @@ pub fn run() {
     .manage(ImportPauseState::default())
     .manage(services::QuerySessionState::default())
     .manage(services::TunnelRegistry::default())
-    .manage(services::SqlxRegistry::default())
-    .manage(services::SqlServerRegistry::default())
-    .manage(services::oracle::OracleRegistry::default())
-    .manage(services::dameng::DamengRegistry::default())
-    .manage(services::mongodb::MongoRegistry::default())
-    .manage(services::redis::RedisRegistry::default())
+    .manage(services::EngineRegistries::default())
     .manage(services::redis::RedisAnalysisState::default())
-    .manage(services::neo4j::Neo4jRegistry::default())
-    .manage(services::elasticsearch::EsRegistry::default())
-    .manage(services::duckdb::DuckDbRegistry::default())
-    .manage(services::clickhouse::ClickHouseRegistry::default())
     .manage(services::local_analytics::LocalAnalyticsRegistry::default())
     .manage(commands::ai_commands::AiRequestRegistry::default())
     .setup(|app| {
@@ -105,7 +96,6 @@ pub fn run() {
       import_connections,
       import_connection_profiles,
       test_connection,
-      open_database_pool,
       sqlx_select,
       close_sqlx_pool,
       diagnose_connection,
@@ -204,6 +194,16 @@ pub fn run() {
       write_binary_file,
       read_text_file,
     ])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application")
+    .run(|app_handle, event| {
+      if let tauri::RunEvent::Exit = event {
+        use tauri::Manager;
+        let tunnels = app_handle.state::<services::TunnelRegistry>();
+        tauri::async_runtime::block_on(async {
+          let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(3), tunnels.close_all()).await;
+        });
+      }
+    });
 }

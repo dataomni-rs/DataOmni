@@ -53,7 +53,6 @@ import { translateNow } from './languageStore';
 import { bindParameters, nameParameterError, type ParameterInput } from '../utils/queryParameters';
 import { changesSchema } from '../utils/schemaChanges';
 import { useAppStore } from './appStore';
-import { useConnectionStore } from './connectionStore';
 import { useHistoryStore } from './historyStore';
 import { normalizeLineBreaks } from '../utils/sqlFile';
 
@@ -61,6 +60,9 @@ export type { QueryResult, SqlStatement } from '../contracts/query';
 
 const QUERY_RESULT_BACKEND_BYTE_LIMIT = 12 * 1024 * 1024;
 const QUERY_RESULT_FRONTEND_BYTE_LIMIT = 16 * 1024 * 1024;
+/** 跨标签缓存的结果集总字节软上限（64 MB）：超出时按最旧非活动标签淘汰旧结果，防 WebView 内存膨胀（H18 / P2-4） */
+export const MAX_CACHED_RESULT_BYTES = 64 * 1024 * 1024;
+const UTF8_ENCODER = new TextEncoder();
 /**
  * `runReadQuery` 的行数上限。表数据页的语句自带 LIMIT（最多 200），这里只是兜底；
  * 不用编辑器的「行数上限」——那里能选 100，每页 200 行时一页只读到一半
@@ -146,7 +148,7 @@ interface QueryActions {
   
   // SQL 执行
   executeSql: (sql: string) => Promise<boolean>;
-  executeStatement: (statementId: string) => Promise<boolean>;
+  executeStatement: (statementId: string, targetDocumentId?: string) => Promise<boolean>;
   executeAllStatements: () => Promise<void>;
   cancelExecution: (executionId: string) => Promise<void>;
   setQueryTimeoutMs: (timeoutMs: number) => void;
@@ -269,13 +271,154 @@ function writeSqlDocument(
  * 当时连的是哪个。取不到名字时退回 profileId，总比空着强。
  */
 function recordHistory(execution: QueryExecution, rowsAffected: number | null): void {
-  const profileId = execution.session.profileId;
-  const connection = useConnectionStore
-    .getState()
-    .connections.find((candidate) => candidate.id === profileId);
+  const connectionName = execution.session.profileName || execution.session.profileId;
   useHistoryStore
     .getState()
-    .record(execution, { connectionName: connection?.name ?? profileId, rowsAffected });
+    .record(execution, { connectionName, rowsAffected });
+}
+
+function estimateResultBytes(result: QueryResult | undefined): number {
+  if (!result) return 0;
+  if (typeof result.bytes_read === 'number' && result.bytes_read > 0) {
+    return result.bytes_read;
+  }
+  if (result.rows.length === 0) return 0;
+  // 无后端精确字节数时按抽样行估算，避免重复全量 JSON.stringify
+  const sampleCount = Math.min(result.rows.length, 20);
+  let sampleBytes = 0;
+  for (let i = 0; i < sampleCount; i += 1) {
+    sampleBytes += UTF8_ENCODER.encode(JSON.stringify(result.rows[i])).byteLength;
+  }
+  return Math.ceil((sampleBytes / sampleCount) * result.rows.length);
+}
+
+/**
+ * 跨 SQL 标签结果集总内存超过 `limitBytes` 时，优先清空非活动标签中最早缓存的查询结果（保留 SQL 草稿与语句列表）。
+ */
+export function evictExcessDocumentResults(
+  documents: Record<string, SqlDocument>,
+  activeDocumentId: string | null,
+  limitBytes: number = MAX_CACHED_RESULT_BYTES
+): Record<string, SqlDocument> {
+  const candidates: Array<{ docId: string; statementId: string; bytes: number; active: boolean }> = [];
+  let totalBytes = 0;
+  for (const [docId, doc] of Object.entries(documents)) {
+    for (const stmt of doc.statements) {
+      const bytes = estimateResultBytes(stmt.result);
+      if (bytes > 0) {
+        totalBytes += bytes;
+        candidates.push({ docId, statementId: stmt.id, bytes, active: docId === activeDocumentId });
+      }
+    }
+  }
+  if (totalBytes <= limitBytes) {
+    return documents;
+  }
+
+  // 非活动标签优先淘汰，活动标签的旧语句最后兜底
+  const ordered = candidates.filter((c) => !c.active);
+  const toEvict = new Map<string, Set<string>>();
+  for (const item of ordered) {
+    if (totalBytes <= limitBytes) break;
+    totalBytes -= item.bytes;
+    const set = toEvict.get(item.docId) ?? new Set<string>();
+    set.add(item.statementId);
+    toEvict.set(item.docId, set);
+  }
+  if (toEvict.size === 0) {
+    return documents;
+  }
+
+  const next: Record<string, SqlDocument> = { ...documents };
+  for (const [docId, stmtIds] of toEvict) {
+    const doc = next[docId];
+    if (!doc) continue;
+    next[docId] = {
+      ...doc,
+      statements: doc.statements.map((stmt) =>
+        stmtIds.has(stmt.id) ? clearSqlStatementResult(stmt) : stmt
+      )
+    };
+  }
+  return next;
+}
+
+interface StreamQueryInvocation {
+  connectionId: string;
+  sessionId: string;
+  executionId: string;
+  sql: string;
+  params?: unknown[];
+  timeoutMs: number;
+  rowLimit: number;
+  autocommit: boolean;
+}
+
+interface StreamedQueryOutput {
+  driverResult: DriverQueryResult;
+  rows: Record<string, SerializedResultValue>[];
+}
+
+/** 统一收敛 `runReadQuery`、`runCancellableSampleQuery` 与 `executeStatement` 三处流式收批逻辑（H18 / P2-4） */
+async function streamExecuteQuery(request: StreamQueryInvocation): Promise<StreamedQueryOutput> {
+  const rows: Record<string, SerializedResultValue>[] = [];
+  let expectedBatchCount = 0;
+  let batchError: Error | null = null;
+  let receivedBytes = 0;
+  let resolveBatches: (() => void) | null = null;
+  const batchesComplete = new Promise<void>((resolve) => {
+    resolveBatches = resolve;
+  });
+
+  const onBatch = new Channel<DriverQueryBatch>((batch) => {
+    if (batchError) {
+      return;
+    }
+    if (batch.offset !== rows.length) {
+      batchError = new Error(
+        translateNow('error.batchOutOfOrder', { expected: rows.length, actual: batch.offset })
+      );
+      resolveBatches?.();
+      return;
+    }
+    receivedBytes += UTF8_ENCODER.encode(JSON.stringify(batch.rows)).byteLength;
+    if (receivedBytes > QUERY_RESULT_FRONTEND_BYTE_LIMIT) {
+      batchError = new Error(translateNow('error.memoryBudget'));
+      resolveBatches?.();
+      return;
+    }
+    rows.push(...batch.rows);
+    if (expectedBatchCount > 0 && batch.index + 1 === expectedBatchCount) {
+      resolveBatches?.();
+    }
+  });
+
+  const driverResult = await invoke<DriverQueryResult>('execute_query', {
+    onBatch,
+    request: {
+      connectionId: request.connectionId,
+      sessionId: request.sessionId,
+      executionId: request.executionId,
+      sql: request.sql,
+      ...(request.params !== undefined ? { params: request.params } : {}),
+      timeoutMs: request.timeoutMs,
+      rowLimit: request.rowLimit,
+      byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
+      autocommit: request.autocommit
+    }
+  });
+
+  if (driverResult.kind === 'rows') {
+    expectedBatchCount = driverResult.batch_count;
+    if (rows.length < driverResult.row_count && !batchError) {
+      await batchesComplete;
+    }
+    if (batchError) {
+      throw batchError;
+    }
+  }
+
+  return { driverResult, rows };
 }
 
 export const selectActiveSqlDocument = (state: QueryState): SqlDocument =>
@@ -306,71 +449,28 @@ export async function runReadQuery(
     throw new Error(translateNow('error.sessionUnavailable'));
   }
 
-  const rows: Record<string, SerializedResultValue>[] = [];
-  let expectedBatchCount = 0;
-  let batchError: Error | null = null;
-  let receivedBytes = 0;
-  let resolveBatches: (() => void) | null = null;
-  const batchesComplete = new Promise<void>((resolve) => {
-    resolveBatches = resolve;
-  });
-
-  const onBatch = new Channel<DriverQueryBatch>((batch) => {
-    if (batchError) {
-      return;
-    }
-    if (batch.offset !== rows.length) {
-      batchError = new Error(
-          translateNow('error.batchOutOfOrder', { expected: rows.length, actual: batch.offset })
-        );
-      resolveBatches?.();
-      return;
-    }
-    receivedBytes += new TextEncoder().encode(JSON.stringify(batch.rows)).byteLength;
-    if (receivedBytes > QUERY_RESULT_FRONTEND_BYTE_LIMIT) {
-      batchError = new Error(translateNow('error.memoryBudget'));
-      resolveBatches?.();
-      return;
-    }
-    rows.push(...batch.rows);
-    if (expectedBatchCount > 0 && batch.index + 1 === expectedBatchCount) {
-      resolveBatches?.();
-    }
-  });
-
-  let driverResult: DriverQueryResult;
+  let output: StreamedQueryOutput;
   try {
-    driverResult = await invoke<DriverQueryResult>('execute_query', {
-      onBatch,
-      request: {
-        connectionId,
-        sessionId: session.id,
-        executionId: crypto.randomUUID(),
-        sql,
-        timeoutMs: queryTimeoutMs,
-        rowLimit: READ_QUERY_ROW_LIMIT,
-        byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
-        // 目录与表数据的读取一律自动提交：关掉自动提交管的是**用户在编辑器里
-        // 跑的语句**，浏览一张表不该让状态栏凭空亮起「事务中」。
-        // 事务已经开着时它照样落在同一个事务里——同一条连接，避不开，也正确
-        autocommit: true
-      }
+    output = await streamExecuteQuery({
+      connectionId,
+      sessionId: session.id,
+      executionId: crypto.randomUUID(),
+      sql,
+      timeoutMs: queryTimeoutMs,
+      rowLimit: READ_QUERY_ROW_LIMIT,
+      // 目录与表数据的读取一律自动提交：关掉自动提交管的是**用户在编辑器里
+      // 跑的语句**，浏览一张表不该让状态栏凭空亮起「事务中」。
+      // 事务已经开着时它照样落在同一个事务里——同一条连接，避不开，也正确
+      autocommit: true
     });
   } catch (error) {
     reportConnectionLostIfActive(connectionId, error);
     throw error;
   }
 
+  const { driverResult, rows } = output;
   if (driverResult.kind !== 'rows') {
     return [];
-  }
-
-  expectedBatchCount = driverResult.batch_count;
-  if (rows.length < driverResult.row_count && !batchError) {
-    await batchesComplete;
-  }
-  if (batchError) {
-    throw batchError;
   }
   // 只交回前几行是最糟的：网格照画、分页照算偏移，后面那些行再也看不到，界面上什么都不说
   if (driverResult.truncated) {
@@ -399,68 +499,25 @@ export async function runCancellableSampleQuery(
     throw new Error(translateNow('error.sessionUnavailable'));
   }
 
-  const rows: Record<string, SerializedResultValue>[] = [];
-  let expectedBatchCount = 0;
-  let batchError: Error | null = null;
-  let receivedBytes = 0;
-  let resolveBatches: (() => void) | null = null;
-  const batchesComplete = new Promise<void>((resolve) => {
-    resolveBatches = resolve;
-  });
-
-  const onBatch = new Channel<DriverQueryBatch>((batch) => {
-    if (batchError) {
-      return;
-    }
-    if (batch.offset !== rows.length) {
-      batchError = new Error(
-        translateNow('error.batchOutOfOrder', { expected: rows.length, actual: batch.offset })
-      );
-      resolveBatches?.();
-      return;
-    }
-    receivedBytes += new TextEncoder().encode(JSON.stringify(batch.rows)).byteLength;
-    if (receivedBytes > QUERY_RESULT_FRONTEND_BYTE_LIMIT) {
-      batchError = new Error(translateNow('error.memoryBudget'));
-      resolveBatches?.();
-      return;
-    }
-    rows.push(...batch.rows);
-    if (expectedBatchCount > 0 && batch.index + 1 === expectedBatchCount) {
-      resolveBatches?.();
-    }
-  });
-
-  let driverResult: DriverQueryResult;
+  let output: StreamedQueryOutput;
   try {
-    driverResult = await invoke<DriverQueryResult>('execute_query', {
-      onBatch,
-      request: {
-        connectionId,
-        sessionId: session.id,
-        executionId: options.executionId,
-        sql,
-        timeoutMs: queryTimeoutMs,
-        rowLimit: Math.max(1, Math.trunc(options.rowLimit)),
-        byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
-        autocommit: true
-      }
+    output = await streamExecuteQuery({
+      connectionId,
+      sessionId: session.id,
+      executionId: options.executionId,
+      sql,
+      timeoutMs: queryTimeoutMs,
+      rowLimit: Math.max(1, Math.trunc(options.rowLimit)),
+      autocommit: true
     });
   } catch (error) {
     reportConnectionLostIfActive(connectionId, error);
     throw error;
   }
 
+  const { driverResult, rows } = output;
   if (driverResult.kind !== 'rows') {
     return { rows: [], truncated: false };
-  }
-
-  expectedBatchCount = driverResult.batch_count;
-  if (rows.length < driverResult.row_count && !batchError) {
-    await batchesComplete;
-  }
-  if (batchError) {
-    throw batchError;
   }
 
   return {
@@ -734,12 +791,15 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
     if (!session) {
       return;
     }
+    const sessionId = session.id;
     try {
       const transaction = await invoke<TransactionContext>('get_session_transaction', {
-        sessionId: session.id
+        sessionId
       });
       set((state) => (
-        state.session ? { session: { ...state.session, transaction } } : {}
+        state.session && state.session.id === sessionId
+          ? { session: { ...state.session, transaction } }
+          : {}
       ));
     } catch (error) {
       // 读状态失败不该把界面打掉，但也不能假装「没在事务里」——那正是
@@ -838,7 +898,7 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
     return get().executeStatement(statement.id);
   },
 
-  executeStatement: async (statementId: string) => {
+  executeStatement: async (statementId: string, targetDocumentId?: string) => {
     const {
       connectionId,
       database,
@@ -853,7 +913,7 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
 
     // 在开始时锁定文档，之后所有写回都指向它：执行期间用户切到别的
     // SQL 标签时，结果仍然落在发起这次执行的标签里。
-    const documentId = get().activeDocumentId;
+    const documentId = targetDocumentId ?? get().activeDocumentId;
     if (!documentId) {
       set({ error: translateNow('error.noActiveSqlTab') });
       return false;
@@ -886,6 +946,7 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
 
     // 这次绑上的参数名，按占位符次序。后端报「第几个参数」时换回名字
     let boundNames: string[] = [];
+    let refreshedInCatch = false;
     try {
       const startTime = Date.now();
       // 不打印语句原文：WebKitGTK 打印长字符串是平方级的，一条 200KB 的 INSERT
@@ -897,36 +958,6 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
       // 由数据库驱动返回的列元数据判断语句是否产生结果集
       let queryResult: QueryResult;
       const sql = statement.sql.trim();
-      const streamedRows: Record<string, SerializedResultValue>[] = [];
-      let expectedBatchCount = 0;
-      let batchError: Error | null = null;
-      let receivedBytes = 0;
-      let resolveBatches: (() => void) | null = null;
-      const batchesComplete = new Promise<void>((resolve) => {
-        resolveBatches = resolve;
-      });
-      const onBatch = new Channel<DriverQueryBatch>((batch) => {
-        if (batchError) {
-          return;
-        }
-        if (batch.offset !== streamedRows.length) {
-          batchError = new Error(
-            translateNow('error.batchOutOfOrder', { expected: streamedRows.length, actual: batch.offset })
-          );
-          resolveBatches?.();
-          return;
-        }
-        receivedBytes += new TextEncoder().encode(JSON.stringify(batch.rows)).byteLength;
-        if (receivedBytes > QUERY_RESULT_FRONTEND_BYTE_LIMIT) {
-          batchError = new Error(translateNow('error.memoryBudget'));
-          resolveBatches?.();
-          return;
-        }
-        streamedRows.push(...batch.rows);
-        if (expectedBatchCount > 0 && batch.index + 1 === expectedBatchCount) {
-          resolveBatches?.();
-        }
-      });
       // 参数在这里换成占位符；执行记录、历史、风险判定看的都还是带 `:name` 的原文
       const bound = bindParameters(statement.sql, dialect, readSqlDocument(get(), documentId).parameters);
       if (!bound.ok) {
@@ -935,40 +966,29 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
           : translateNow(bound.reason === 'not-a-number' ? 'params.notANumber' : 'params.outOfRange', { name: bound.name }));
       }
       boundNames = bound.names;
-      const driverResult = await invoke<DriverQueryResult>('execute_query', {
-        onBatch,
-        request: {
-          connectionId,
-          sessionId: session.id,
-          executionId: execution.id,
-          sql: bound.sql,
-          params: bound.params,
-          timeoutMs: queryTimeoutMs,
-          rowLimit: queryResultRowLimit,
-          byteLimit: QUERY_RESULT_BACKEND_BYTE_LIMIT,
-          // **必须带上**：不带的话后端 serde 用默认值 true，于是取消勾选
-          // 「自动提交」对编辑器里的语句毫无作用——界面显示手动事务模式，
-          // 数据库却在自动提交，用户以为能回滚，实际每条都已经落库了。
-          // 后端 `begin_if_needed` 正是靠它决定要不要先发 BEGIN
-          autocommit: get().autocommit
-        }
+      const { driverResult, rows: streamedRows } = await streamExecuteQuery({
+        connectionId,
+        sessionId: session.id,
+        executionId: execution.id,
+        sql: bound.sql,
+        params: bound.params,
+        timeoutMs: queryTimeoutMs,
+        rowLimit: queryResultRowLimit,
+        // **必须带上**：不带的话后端 serde 用默认值 true，于是取消勾选
+        // 「自动提交」对编辑器里的语句毫无作用——界面显示手动事务模式，
+        // 数据库却在自动提交，用户以为能回滚，实际每条都已经落库了。
+        // 后端 `begin_if_needed` 正是靠它决定要不要先发 BEGIN
+        autocommit: get().autocommit
       });
       const executionTime = Date.now() - startTime;
 
       if (driverResult.kind === 'rows') {
-        expectedBatchCount = driverResult.batch_count;
-        if (streamedRows.length < driverResult.row_count && !batchError) {
-          await batchesComplete;
-        }
-        if (batchError) {
-          throw batchError;
-        }
         if (streamedRows.length !== driverResult.row_count) {
           throw new Error(
             translateNow('error.batchIncomplete', {
-            expected: driverResult.row_count,
-            actual: streamedRows.length
-          })
+              expected: driverResult.row_count,
+              actual: streamedRows.length
+            })
           );
         }
         const rows = streamedRows.map((row) =>
@@ -1031,9 +1051,9 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
         driverResult.kind === 'rows' ? [`result:${execution.id}`] : []
       );
 
-      // 更新结果
-      set((state) => ({
-        ...writeSqlDocument(state, documentId, (document) => ({
+      // 更新结果并按 64 MB 跨标签预算淘汰非活动标签旧结果（H18 / P2-4）
+      set((state) => {
+        const updatedDocs = writeSqlDocument(state, documentId, (document) => ({
           statements: document.statements.map(s =>
             s.id === statementId
               ? completeSqlStatement(
@@ -1044,13 +1064,16 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
                 )
               : s
           )
-        })),
-        executions: state.executions.map((candidate) =>
-          candidate.id === execution.id ? finished : candidate
-        ),
-        // 断线之后后端下一条会换一条连接：跑通了就说明连接是好的，不该还挂着「连接已断开」
-        connectionLost: false
-      }));
+        })).documents;
+        return {
+          documents: evictExcessDocumentResults(updatedDocs, state.activeDocumentId ?? documentId),
+          executions: state.executions.map((candidate) =>
+            candidate.id === execution.id ? finished : candidate
+          ),
+          // 断线之后后端下一条会换一条连接：跑通了就说明连接是好的，但仅在仍指向同一连接时清标记
+          ...(state.connectionId === connectionId ? { connectionLost: false } : {})
+        };
+      });
       recordHistory(finished, queryResult.affected_rows);
 
       console.log(`✅ SQL执行成功，耗时: ${formatExecutionTime(queryResult.execution_time)}`);
@@ -1085,7 +1108,8 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
       let transactionLost = false;
       if (inTransactionBefore) {
         await get().refreshTransaction();
-        transactionLost = get().session?.transaction.status === 'idle';
+        refreshedInCatch = true;
+        transactionLost = get().session?.id === session.id && get().session?.transaction.status === 'idle';
       }
       const rolledBack = transactionLost ? translateNow('error.abandonedTransactionRolledBack') : null;
       // 超时、取消、断线、读不懂回包都是我们自己判出来的，数据库没说过话，不该带上任何结构
@@ -1119,18 +1143,18 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
         executions: state.executions.map((candidate) =>
           candidate.id === execution.id ? finished : candidate
         ),
-        // 驱动说连接没了。这一句是界面知道该显示「已断开」并摆出重连按钮的
-        // 唯一来源——在此之前它照样印「已连接」，而下一条语句还是同样的错
-        ...(connectionLost ? { connectionLost: true } : {})
+        // 驱动说连接没了：仅在仍指向发起本次执行的连接时置位，防旧连接报错污染新连接（H9 / F1）
+        ...(connectionLost && state.connectionId === connectionId ? { connectionLost: true } : {})
       }));
       // 失败、取消、超时一样要记：「那条跑崩的语句到底是什么」正是事后最想
       // 翻出来的一条，只记成功等于历史里永远没有出问题的那次
       recordHistory(finished, null);
       return false;
     } finally {
-      // 成功和失败都刷一次。失败那一条尤其重要——它正是 PostgreSQL 把事务
-      // 标成废止的时刻，而失败路径上没有结果可以捎带这个状态
-      await get().refreshTransaction();
+      // 成功和失败都刷一次（已在 catch 里刷过的不再重复发第二次 IPC，H9 / F1）
+      if (!refreshedInCatch) {
+        await get().refreshTransaction();
+      }
     }
   },
 
@@ -1181,13 +1205,18 @@ export const useQueryStore = create<QueryStore>((set, get) => ({
   },
 
   executeAllStatements: async () => {
+    // 先锁定发起批量执行的文档：运行中途切到别的 SQL 标签不能把剩余语句丢掉（H9 / F1）
+    const documentId = get().activeDocumentId;
+    if (!documentId) {
+      return;
+    }
     // 先按现在的文本解析：自动解析有防抖，改完立刻执行时手里那份还是改之前的
     const statements = get().parseStatements();
     const { executeStatement } = get();
 
     await executeSequentially(
       statements.filter((statement) => !statement.isExecuting),
-      (statement) => executeStatement(statement.id)
+      (statement) => executeStatement(statement.id, documentId)
     );
   },
 

@@ -30,6 +30,16 @@ pub enum DbPool {
   Postgres(sqlx::PgPool),
 }
 
+impl DbPool {
+  pub async fn close(&self) {
+    match self {
+      Self::Sqlite(pool) => pool.close().await,
+      Self::MySql(pool) => pool.close().await,
+      Self::Postgres(pool) => pool.close().await,
+    }
+  }
+}
+
 pub type SqlxRegistry = PoolRegistry<DbPool>;
 
 /// 空闲连接留多久。要比常见的空闲回收短：AWS NLB 350 秒、Azure 负载均衡 4 分钟、
@@ -154,13 +164,20 @@ pub async fn open(connection_string: &str) -> Result<DbPool, String> {
           password: url_password(connection_string).unwrap_or_default(),
           tls: relay_tls(&options, connection_string),
         };
-        let port = opengauss_relay::local_port(upstream).await?;
-        let relayed = options.host("127.0.0.1").port(port).ssl_mode(PgSslMode::Disable);
-        PgPoolOptions::new()
+        let relay = opengauss_relay::start(upstream).await?;
+        let relayed = options
+          .host("127.0.0.1")
+          .port(relay.port)
+          .password(&relay.local_token)
+          .ssl_mode(PgSslMode::Disable);
+        let pool = PgPoolOptions::new()
           .idle_timeout(IDLE_TIMEOUT)
           .connect_with(relayed)
           .await
-          .map_err(|error| describe_open_error(&error))?
+          .map_err(|error| describe_open_error(&error))?;
+        let close_event = pool.close_event();
+        opengauss_relay::attach_to_close_event(relay, close_event);
+        pool
       }
       Err(error) => return Err(describe_open_error(&error)),
     };

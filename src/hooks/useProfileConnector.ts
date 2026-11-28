@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { ConnectionProfile } from '../contracts';
@@ -60,6 +60,7 @@ export function useProfileConnector(): ProfileConnector {
   const openConnectionForm = useAppStore((state) => state.openConnectionForm);
   const [connectingProfileId, setConnectingProfileId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeAttemptRef = useRef(0);
   // 侧边栏、欢迎页、⌘K 各有一份 connector：从别处连上了，这一份上次失败的提示也就过时了
   const connectedProfileId = useAppStore((state) => (
     state.connectionReady ? state.activeConnection?.config.id ?? null : null
@@ -71,24 +72,32 @@ export function useProfileConnector(): ProfileConnector {
   }, [connectedProfileId]);
 
   const connect = useCallback(async (profile: ConnectionProfile): Promise<ConnectResult> => {
+    const attempt = ++activeAttemptRef.current;
     setError(null);
     setConnectingProfileId(profile.id);
 
     try {
-      // test_connection 返回带 SSL 参数的连接串，和实际建立会话用的是同一份。
+      // test_connection 返回无口令池键（并在后端直接打开并登记连接池，H7 / S2）。
       // 这一步**不**加前端超时：它先读钥匙串，换了签名的包第一次读会弹授权框，
       // 用户输密码的时间也被算进去，15 秒一到就报「主机无响应」——主机根本还没碰。
-      // 它里面碰网络的几段各自有后端超时（SSH 隧道、SQL Server、Oracle）；
-      // MySQL / PostgreSQL / SQLite 在这一步不碰网络，真正的连接在下面。
       const connectionString = await invoke<string>('test_connection', { config: profile });
+      if (attempt !== activeAttemptRef.current) {
+        return 'failed';
+      }
       await withTimeout(
         sessionManager.switchConnection(profile, connectionString),
         CONNECT_TIMEOUT_MS,
         t('connect.sessionTimeout', { seconds: CONNECT_TIMEOUT_MS / 1000 })
       );
+      if (attempt !== activeAttemptRef.current) {
+        return 'failed';
+      }
       recordConnectionUse(profile.id);
       return 'connected';
     } catch (cause) {
+      if (attempt !== activeAttemptRef.current) {
+        return 'failed';
+      }
       const message = describeError(cause);
 
       // 钥匙串里那一条没了也走这里：提示说「请重新输入」，就得给出输入的地方
@@ -109,7 +118,9 @@ export function useProfileConnector(): ProfileConnector {
       setError(message || t('error.connectFailed'));
       return 'failed';
     } finally {
-      setConnectingProfileId(null);
+      if (attempt === activeAttemptRef.current) {
+        setConnectingProfileId(null);
+      }
     }
   }, [sessionManager, openConnectionForm, t]);
 

@@ -2,8 +2,9 @@
 
 use crate::commands::database_commands::TIMEOUT_OUT_OF_RANGE;
 use crate::services::neo4j::{
-  self, CypherRequest, CypherResult, Neo4jObject, Neo4jPool, Neo4jRegistry, NEO4J_NOT_CONNECTED,
+  self, CypherRequest, CypherResult, Neo4jObject, Neo4jPool, NEO4J_NOT_CONNECTED,
 };
+use crate::services::EngineRegistries;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
@@ -11,8 +12,8 @@ use tauri::State;
 /// 结果最多多少行。与执行 SQL 的结果上限同一个范围
 const MAX_ROW_LIMIT: u64 = 100_000;
 
-fn pool(registry: &Neo4jRegistry, connection_string: &str) -> Result<Arc<Neo4jPool>, String> {
-  registry.get(connection_string).ok_or_else(|| NEO4J_NOT_CONNECTED.to_string())
+fn pool(engines: &EngineRegistries, connection_string: &str) -> Result<Arc<Neo4jPool>, String> {
+  engines.neo4j.get(connection_string).ok_or_else(|| NEO4J_NOT_CONNECTED.to_string())
 }
 
 /// 与执行查询同一个范围（`execute_query`）
@@ -32,7 +33,7 @@ fn database(database: Option<String>) -> Option<String> {
 pub async fn neo4j_list_objects(
   connection_string: String,
   timeout_ms: u64,
-  registry: State<'_, Neo4jRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<Vec<Neo4jObject>, String> {
   let pool = pool(&registry, &connection_string)?;
   neo4j::list_objects(pool, timeout(timeout_ms)?).await
@@ -48,7 +49,7 @@ pub async fn neo4j_run(
   timeout_ms: u64,
   read_all: Option<bool>,
   read_only: Option<bool>,
-  registry: State<'_, Neo4jRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<CypherResult, String> {
   let request = CypherRequest {
     database: self::database(database),
@@ -69,13 +70,13 @@ pub async fn neo4j_query_type(
   database: Option<String>,
   query: String,
   timeout_ms: u64,
-  registry: State<'_, Neo4jRegistry>,
+  registry: State<'_, EngineRegistries>,
 ) -> Result<Option<&'static str>, String> {
   let pool = pool(&registry, &connection_string)?;
   neo4j::query_type(pool, self::database(database), query, timeout(timeout_ms)?).await
 }
 
 #[tauri::command]
-pub fn close_neo4j(connection_string: String, registry: State<'_, Neo4jRegistry>) -> bool {
-  registry.remove(&connection_string)
+pub fn close_neo4j(connection_string: String, engines: State<'_, EngineRegistries>) -> bool {
+  engines.neo4j.remove(&connection_string)
 }
