@@ -1,4 +1,5 @@
 import type { SqlDialect } from '../contracts/queryExecution';
+import { SQL_DIALECT_TRAITS } from '../contracts/sqlDialectTraits';
 
 export type SqlIdentifierDialect = SqlDialect;
 
@@ -46,9 +47,10 @@ const RESERVED_WORDS = new Set(`
  * Oracle 折成大写，小写建的才要；其余几家按原样比或不分大小写
  */
 export function sqlIdentifierAsTyped(identifier: string, dialect: SqlIdentifierDialect): string {
-  const plain = dialect === 'postgresql'
+  const folding = SQL_DIALECT_TRAITS[dialect].unquotedIdentifierCase;
+  const plain = folding === 'lower'
     ? /^[a-z_][a-z0-9_]*$/
-    : dialect === 'oracle' || dialect === 'dameng'
+    : folding === 'upper'
       ? /^[A-Z][A-Z0-9_$#]*$/
       : /^[A-Za-z_][A-Za-z0-9_]*$/;
   return plain.test(identifier) && !RESERVED_WORDS.has(identifier.toLowerCase())

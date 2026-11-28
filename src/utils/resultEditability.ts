@@ -1,3 +1,4 @@
+import { SQL_DIALECT_TRAITS } from '../contracts/sqlDialectTraits';
 import type { RowIdentityResult } from './rowIdentity';
 import type { SqlIdentifierDialect } from './sqlIdentifiers';
 import { topLevelKeywords } from './sqlStatements';
@@ -69,11 +70,12 @@ function unquoteIdentifier(raw: string, dialect: SqlIdentifierDialect): string {
   if (raw.startsWith('[')) {
     return raw.slice(1, -1).split(']]').join(']');
   }
-  // Oracle 反过来：不带引号的折成大写，`FROM orders` 指的是目录里的 ORDERS
-  if (dialect === 'oracle') {
+  // 目录大小写折叠策略由 SQL_DIALECT_TRAITS 统一声明（Oracle / 达梦折成大写，PostgreSQL 折成小写）
+  const folding = SQL_DIALECT_TRAITS[dialect].unquotedIdentifierCase;
+  if (folding === 'upper') {
     return raw.toUpperCase();
   }
-  return dialect === 'postgresql' ? raw.toLowerCase() : raw;
+  return folding === 'lower' ? raw.toLowerCase() : raw;
 }
 
 export function parseSingleTableSelect(

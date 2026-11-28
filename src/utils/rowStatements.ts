@@ -1,5 +1,6 @@
 import type { ColumnInfo } from '../contracts';
 import { unhandledDialect } from '../contracts/queryExecution';
+import { SQL_DIALECT_TRAITS } from '../contracts/sqlDialectTraits';
 import { columnTypeToken, isConcurrencyComparable, isNumericColumnType, NUMERIC_LITERAL } from './columnTypes';
 import type { BoundValue, CellInput } from './cellInput';
 import { binaryLiteral, isCompleteHex } from './columnEditors';
@@ -388,16 +389,17 @@ export function buildInsertStatement(
     const defaults = Object.keys(values).filter((name) => values[name].kind === 'default');
     // Oracle 要点名一列：虚拟列不收 DEFAULT，能避开就避开
     const defaulted = defaults.find((name) => !generated.has(name)) ?? defaults[0];
+    const insertStyle = SQL_DIALECT_TRAITS[target.dialect].emptyInsertStyle;
     // 每列都交给默认值（只有自增主键和 created_at 的表），仍是合法的一行；
-    // 省掉全部列之后的写法各家不同。ClickHouse 没有对应写法
-    if (defaulted === undefined || target.dialect === 'clickhouse') {
+    // 省掉全部列之后的写法由 SQL_DIALECT_TRAITS 统一声明（含 Oracle 与达梦显式列 DEFAULT）
+    if (defaulted === undefined || insertStyle === 'unsupported') {
       throw new Error(translateNow('table.noInsertableColumns'));
     }
     const table = tableReference(target);
-    if (target.dialect === 'mysql') {
+    if (insertStyle === 'empty-values') {
       return { sql: `INSERT INTO ${table} () VALUES ()`, params: [] };
     }
-    if (target.dialect === 'oracle') {
+    if (insertStyle === 'explicit-default-column') {
       return { sql: `INSERT INTO ${table} (${quoteSqlIdentifier(defaulted, target.dialect)}) VALUES (DEFAULT)`, params: [] };
     }
     return { sql: `INSERT INTO ${table} DEFAULT VALUES`, params: [] };

@@ -10,6 +10,7 @@ import {
   type SQLNamespace
 } from '@codemirror/lang-sql';
 import { DatabaseType } from '../contracts/connection';
+import { SQL_DIALECT_TRAITS, sqlDialectFromDatabaseType } from '../contracts/sqlDialectTraits';
 import type {
   CompletionColumn,
   CompletionRelation,
@@ -121,16 +122,17 @@ export function buildCompletionSchema(
     };
   }
 
+  const sqlDialect = sqlDialectFromDatabaseType(dbType);
+  const schemaRule = sqlDialect ? SQL_DIALECT_TRAITS[sqlDialect].defaultSchemaRule : 'none';
   return {
     schema,
-    // 不带前缀的名字落在哪个 schema：PostgreSQL 是 public，SQL Server 是 dbo，
-    // DuckDB 是 main，Oracle 是登录用户（目录里是大写），ClickHouse 是连上的库
+    // 不带前缀的名字落在哪个 schema：由 SQL_DIALECT_TRAITS 统一声明（含 Oracle 与达梦的大写用户名）
     defaultSchema: [
-      ...(dbType === DatabaseType.ClickHouse ? [database?.trim() || 'default'] : []),
+      ...(schemaRule === 'database-or-default' ? [database?.trim() || 'default'] : []),
       'public',
       'dbo',
-      ...(dbType === DatabaseType.DuckDB ? ['main'] : []),
-      ...(dbType === DatabaseType.Oracle && username ? [username.toUpperCase()] : [])
+      ...(schemaRule === 'main' ? ['main'] : []),
+      ...(schemaRule === 'uppercase-username' && username ? [username.toUpperCase()] : [])
     ].find((name) => bySchema.has(name))
   };
 }
@@ -141,26 +143,21 @@ export function buildCompletionSchema(
  * 关键字，比一个都不给强。
  */
 export function sqlDialectFor(dbType: DatabaseType): SQLDialect {
-  switch (dbType) {
-    case DatabaseType.MySQL:
+  const sqlDialect = sqlDialectFromDatabaseType(dbType);
+  if (!sqlDialect) {
+    return StandardSQL;
+  }
+  switch (SQL_DIALECT_TRAITS[sqlDialect].completionDialect) {
+    case 'mysql':
       return MySQL;
-    case DatabaseType.PostgreSQL:
+    case 'postgresql':
       return PostgreSQL;
-    case DatabaseType.SQLite:
+    case 'sqlite':
       return SQLite;
-    case DatabaseType.SqlServer:
+    case 'mssql':
       return MSSQL;
-    case DatabaseType.Oracle:
+    case 'plsql':
       return PLSQL;
-    // CodeMirror 没有 DuckDB 方言；它的语法照 PostgreSQL 来（`::` 转换、`$1` 参数、
-    // `RETURNING`、双引号标识符），关键字表也最接近
-    case DatabaseType.DuckDB:
-      return PostgreSQL;
-    // 也没有 ClickHouse 方言；它的标识符用反引号、`#` 是注释、字符串里反斜杠转义，都和 MySQL 一样
-    case DatabaseType.ClickHouse:
-      return MySQL;
-    default:
-      return StandardSQL;
   }
 }
 

@@ -14,6 +14,7 @@
  */
 
 import type { SqlDialect } from '../contracts/queryExecution';
+import { SQL_DIALECT_TRAITS } from '../contracts/sqlDialectTraits';
 
 export const REDACTED = "'***'";
 
@@ -362,7 +363,9 @@ export function redactSqlForHistory(sql: string, dialect: SqlDialect): RedactedS
   });
   result += sql.slice(cursor);
 
-  const withoutIdentifiers = dialect === 'oracle' ? result.replace(ORACLE_IDENTIFIED_BY, oracleRedaction) : result;
+  const withoutIdentifiers = dialect && SQL_DIALECT_TRAITS[dialect].usesOracleIdentifiedByPassword
+    ? result.replace(ORACLE_IDENTIFIED_BY, oracleRedaction)
+    : result;
   const withoutUrlCredentials = withoutIdentifiers.replace(URL_CREDENTIAL, '$1***$3');
   return {
     sql: withoutUrlCredentials,
